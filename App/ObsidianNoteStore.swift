@@ -86,7 +86,7 @@ final class ObsidianNoteStore {
         guard let content = String(data: data, encoding: .utf8) else {
             throw ObsidianNoteStoreError.targetNotUTF8
         }
-        return content.contains(Self.marker(for: headword))
+        return Self.containsEntry(in: content, headword: headword)
     }
 
     func save(_ entry: StructuredDictionaryEntry) throws -> ObsidianNoteSaveResult {
@@ -103,8 +103,9 @@ final class ObsidianNoteStore {
             throw ObsidianNoteStoreError.targetNotUTF8
         }
 
-        let marker = Self.marker(for: entry.headword)
-        guard !original.contains(marker) else { return .alreadySaved }
+        guard !Self.containsEntry(in: original, headword: entry.headword) else {
+            return .alreadySaved
+        }
 
         let newline = Self.newlineSequence(in: original)
         let block = Self.markdownBlock(for: entry, newline: newline)
@@ -167,14 +168,35 @@ final class ObsidianNoteStore {
         return .saved
     }
 
-    static func marker(for headword: String) -> String {
-        let normalized = singleLine(headword)
-            .precomposedStringWithCanonicalMapping
-            .lowercased(with: Locale(identifier: "en_US_POSIX"))
-            .replacingOccurrences(of: "--", with: "-")
-            .replacingOccurrences(of: "<", with: "")
-            .replacingOccurrences(of: ">", with: "")
-        return "<!-- LocalDictionary: word=\(normalized) -->"
+    static func containsEntry(in content: String, headword: String) -> Bool {
+        let expected = normalizedHeadword(headword)
+        guard !expected.isEmpty else { return false }
+        if containsLegacyMarker(in: content, normalizedHeadword: expected) {
+            return true
+        }
+
+        var activeFence: (character: Character, length: Int)?
+        let lines = content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        for line in lines {
+            if let fence = activeFence {
+                if isClosingFence(line, fence: fence) { activeFence = nil }
+                continue
+            }
+            if let fence = openingFence(in: line) {
+                activeFence = fence
+                continue
+            }
+            guard let heading = levelTwoHeading(in: line) else { continue }
+            if normalizedHeadword(heading) == expected { return true }
+        }
+        return false
+    }
+
+    static func legacyMarker(for headword: String) -> String {
+        "<!-- LocalDictionary: word=\(normalizedHeadword(headword)) -->"
     }
 
     static func markdownBlock(for entry: StructuredDictionaryEntry,
@@ -186,7 +208,7 @@ final class ObsidianNoteStore {
         let examples = uniqueNonempty(entry.examples, maximum: 3)
         let source = singleLine(entry.source)
 
-        var lines = [marker(for: headword), "", "## \(headword)", ""]
+        var lines = ["## \(headword)", ""]
         if !phonetics.isEmpty {
             lines.append("- 音标：\(phonetics.joined(separator: "；"))")
         }
@@ -245,6 +267,70 @@ final class ObsidianNoteStore {
 
     private static func singleLine(_ value: String) -> String {
         StructuredDictionaryEntry.singleLine(value)
+    }
+
+    private static func normalizedHeadword(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+            .lowercased(with: Locale(identifier: "en_US_POSIX"))
+    }
+
+    private static func containsLegacyMarker(in content: String,
+                                             normalizedHeadword: String) -> Bool {
+        let prefix = "<!-- LocalDictionary: word="
+        let suffix = " -->"
+        var searchStart = content.startIndex
+        while searchStart < content.endIndex,
+              let prefixRange = content.range(of: prefix,
+                                              range: searchStart..<content.endIndex),
+              let suffixRange = content.range(of: suffix,
+                                              range: prefixRange.upperBound..<content.endIndex) {
+            let value = String(content[prefixRange.upperBound..<suffixRange.lowerBound])
+            if self.normalizedHeadword(value) == normalizedHeadword { return true }
+            searchStart = suffixRange.upperBound
+        }
+        return false
+    }
+
+    private static func levelTwoHeading(in line: String) -> String? {
+        guard let content = contentAfterMarkdownIndent(in: line),
+              content.hasPrefix("##") else { return nil }
+        let afterHashes = content.dropFirst(2)
+        guard let first = afterHashes.first,
+              first == " " || first == "\t" else { return nil }
+        let heading = afterHashes.drop(while: { $0 == " " || $0 == "\t" })
+            .trimmingCharacters(in: .whitespaces)
+        return heading.isEmpty ? nil : heading
+    }
+
+    private static func openingFence(in line: String) -> (character: Character, length: Int)? {
+        guard let content = contentAfterMarkdownIndent(in: line),
+              let character = content.first,
+              character == "`" || character == "~" else { return nil }
+        let length = content.prefix(while: { $0 == character }).count
+        return length >= 3 ? (character, length) : nil
+    }
+
+    private static func isClosingFence(_ line: String,
+                                       fence: (character: Character, length: Int)) -> Bool {
+        guard let content = contentAfterMarkdownIndent(in: line),
+              content.first == fence.character else { return false }
+        let runLength = content.prefix(while: { $0 == fence.character }).count
+        guard runLength >= fence.length else { return false }
+        return content.dropFirst(runLength)
+            .trimmingCharacters(in: .whitespaces)
+            .isEmpty
+    }
+
+    private static func contentAfterMarkdownIndent(in line: String) -> Substring? {
+        var index = line.startIndex
+        var spaces = 0
+        while index < line.endIndex, line[index] == " " {
+            spaces += 1
+            guard spaces <= 3 else { return nil }
+            index = line.index(after: index)
+        }
+        return line[index...]
     }
 
     private static func newlineSequence(in content: String) -> String {
