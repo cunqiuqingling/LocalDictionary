@@ -163,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let show = NSMenuItem(title: "显示词典", action: #selector(showDictionary), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
-        let selectNote = NSMenuItem(title: "选择 Obsidian 笔记…",
+        let selectNote = NSMenuItem(title: "更改当前 Markdown 笔记…",
                                     action: #selector(selectObsidianNote),
                                     keyEquivalent: "")
         selectNote.target = self

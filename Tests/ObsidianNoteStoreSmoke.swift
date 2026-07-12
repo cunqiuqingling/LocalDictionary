@@ -75,9 +75,53 @@ struct ObsidianNoteStoreSmoke {
             throw SmokeError.assertionFailed("unsaved star state")
         }
 
+        let existingCandidateURL = workingDirectory.appendingPathComponent("existing-candidate.md")
+        let existingCandidateOriginal = "Existing candidate content.\n"
+        try Data(existingCandidateOriginal.utf8).write(to: existingCandidateURL, options: .atomic)
+        guard try restartedStore.save(entries[0], to: existingCandidateURL) == .saved,
+              restartedStore.targetURL == noteURL.standardizedFileURL else {
+            throw SmokeError.assertionFailed("candidate save changed current target")
+        }
+        let existingCandidate = try String(contentsOf: existingCandidateURL, encoding: .utf8)
+        guard existingCandidate.hasPrefix(existingCandidateOriginal),
+              existingCandidate.contains(ObsidianNoteStore.marker(for: entries[0].headword)) else {
+            throw SmokeError.assertionFailed("existing candidate append")
+        }
+        try restartedStore.rememberTarget(existingCandidateURL)
+
+        let newNoteURL = workingDirectory.appendingPathComponent("new-note.md")
+        try? fileManager.removeItem(at: newNoteURL)
+        guard try restartedStore.createOrSave(entries[1], at: newNoteURL) == .saved,
+              restartedStore.targetURL == existingCandidateURL.standardizedFileURL else {
+            throw SmokeError.assertionFailed("new note changed current target early")
+        }
+        let newNote = try String(contentsOf: newNoteURL, encoding: .utf8)
+        guard newNote.hasPrefix(ObsidianNoteStore.marker(for: entries[1].headword)),
+              !newNote.hasPrefix("# ") else {
+            throw SmokeError.assertionFailed("new note first entry")
+        }
+        try restartedStore.rememberTarget(newNoteURL)
+        guard try restartedStore.contains(headword: entries[1].headword) else {
+            throw SmokeError.assertionFailed("new note saved state")
+        }
+
+        let confirmedExistingURL = workingDirectory.appendingPathComponent("confirmed-existing.md")
+        let confirmedOriginal = "Keep this original text.\n"
+        try Data(confirmedOriginal.utf8).write(to: confirmedExistingURL, options: .atomic)
+        guard try restartedStore.createOrSave(entries[2], at: confirmedExistingURL) == .saved else {
+            throw SmokeError.assertionFailed("confirmed existing save")
+        }
+        let confirmed = try String(contentsOf: confirmedExistingURL, encoding: .utf8)
+        guard confirmed.hasPrefix(confirmedOriginal),
+              confirmed.contains(ObsidianNoteStore.marker(for: entries[2].headword)) else {
+            throw SmokeError.assertionFailed("confirmed existing content preserved")
+        }
+
         let missingURL = workingDirectory.appendingPathComponent("missing.md")
-        try restartedStore.rememberTarget(missingURL)
-        try expect(.targetUnavailable) { try restartedStore.save(entries[0]) }
+        try expect(.targetUnavailable) { try restartedStore.save(entries[0], to: missingURL) }
+        guard restartedStore.targetURL == newNoteURL.standardizedFileURL else {
+            throw SmokeError.assertionFailed("missing candidate changed current target")
+        }
 
         let readOnlyURL = workingDirectory.appendingPathComponent("read-only.md")
         let readOnlyOriginal = Data("Do not damage this file.\n".utf8)
@@ -85,10 +129,12 @@ struct ObsidianNoteStoreSmoke {
         try fileManager.setAttributes([.posixPermissions: 0o444], ofItemAtPath: readOnlyURL.path)
         defer { try? fileManager.setAttributes([.posixPermissions: 0o644],
                                                 ofItemAtPath: readOnlyURL.path) }
-        try restartedStore.rememberTarget(readOnlyURL)
-        try expect(.targetNotWritable) { try restartedStore.save(entries[0]) }
+        try expect(.targetNotWritable) { try restartedStore.save(entries[0], to: readOnlyURL) }
         guard try Data(contentsOf: readOnlyURL) == readOnlyOriginal else {
             throw SmokeError.assertionFailed("read-only file changed")
+        }
+        guard restartedStore.targetURL == newNoteURL.standardizedFileURL else {
+            throw SmokeError.assertionFailed("read-only candidate changed current target")
         }
 
         try expect(.invalidEntry) {
@@ -99,7 +145,7 @@ struct ObsidianNoteStoreSmoke {
                                                               examples: [],
                                                               source: "Oxford"))
         }
-        print("ObsidianNoteStoreSmoke: 10/10 passed")
+        print("ObsidianNoteStoreSmoke: 16/16 passed")
     }
 
     private static func expect(_ expected: ObsidianNoteStoreError,

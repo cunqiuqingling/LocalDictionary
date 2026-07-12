@@ -80,7 +80,8 @@ final class ObsidianNoteStore {
     }
 
     func contains(headword: String) throws -> Bool {
-        let target = try validatedTarget(requireWritable: false)
+        guard let targetURL else { throw ObsidianNoteStoreError.targetNotSelected }
+        let target = try validatedTarget(targetURL, requireWritable: false)
         let data = try readData(from: target)
         guard let content = String(data: data, encoding: .utf8) else {
             throw ObsidianNoteStoreError.targetNotUTF8
@@ -89,8 +90,14 @@ final class ObsidianNoteStore {
     }
 
     func save(_ entry: StructuredDictionaryEntry) throws -> ObsidianNoteSaveResult {
+        guard let targetURL else { throw ObsidianNoteStoreError.targetNotSelected }
+        return try save(entry, to: targetURL)
+    }
+
+    func save(_ entry: StructuredDictionaryEntry,
+              to candidateURL: URL) throws -> ObsidianNoteSaveResult {
         guard entry.isValid else { throw ObsidianNoteStoreError.invalidEntry }
-        let target = try validatedTarget(requireWritable: true)
+        let target = try validatedTarget(candidateURL, requireWritable: true)
         let originalData = try readData(from: target)
         guard let original = String(data: originalData, encoding: .utf8) else {
             throw ObsidianNoteStoreError.targetNotUTF8
@@ -117,6 +124,43 @@ final class ObsidianNoteStore {
         }
         do {
             try updatedData.write(to: target, options: .atomic)
+        } catch {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+        return .saved
+    }
+
+    func createOrSave(_ entry: StructuredDictionaryEntry,
+                      at candidateURL: URL) throws -> ObsidianNoteSaveResult {
+        guard entry.isValid else { throw ObsidianNoteStoreError.invalidEntry }
+        let target = candidateURL.standardizedFileURL
+        guard target.isFileURL, target.pathExtension.lowercased() == "md" else {
+            throw ObsidianNoteStoreError.invalidTarget
+        }
+
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: target.path, isDirectory: &isDirectory) {
+            guard !isDirectory.boolValue else { throw ObsidianNoteStoreError.invalidTarget }
+            return try save(entry, to: target)
+        }
+
+        let parent = target.deletingLastPathComponent()
+        guard fileManager.fileExists(atPath: parent.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              fileManager.isWritableFile(atPath: parent.path) else {
+            throw ObsidianNoteStoreError.targetNotWritable
+        }
+        let block = Self.markdownBlock(for: entry, newline: "\n")
+        guard let data = block.data(using: .utf8) else {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+        let temporary = parent.appendingPathComponent(
+            ".\(target.lastPathComponent).localdictionary-\(UUID().uuidString).tmp"
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+        do {
+            try data.write(to: temporary, options: .atomic)
+            try fileManager.linkItem(at: temporary, to: target)
         } catch {
             throw ObsidianNoteStoreError.writeFailed
         }
@@ -164,11 +208,9 @@ final class ObsidianNoteStore {
         return lines.joined(separator: newline)
     }
 
-    private func validatedTarget(requireWritable: Bool) throws -> URL {
-        guard let target = targetURL else {
-            throw ObsidianNoteStoreError.targetNotSelected
-        }
-        guard target.pathExtension.lowercased() == "md" else {
+    private func validatedTarget(_ candidateURL: URL, requireWritable: Bool) throws -> URL {
+        let target = candidateURL.standardizedFileURL
+        guard target.isFileURL, target.pathExtension.lowercased() == "md" else {
             throw ObsidianNoteStoreError.invalidTarget
         }
         var isDirectory: ObjCBool = false

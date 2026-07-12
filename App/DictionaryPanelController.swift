@@ -25,6 +25,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
     private var localKeyMonitor: Any?
+    private var isShowingNoteMenu = false
     private var animating = false
 
     init(core: DictionaryCoreBridge,
@@ -152,7 +153,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
         starButton.image = NSImage(systemSymbolName: "star", accessibilityDescription: "保存词条")
         starButton.target = self
-        starButton.action = #selector(saveCurrentEntry)
+        starButton.action = #selector(showNoteMenu)
         starButton.isBordered = false
         starButton.bezelStyle = .accessoryBarAction
         starButton.toolTip = "当前没有可以保存的词条"
@@ -213,7 +214,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
         localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] event in
-            if self?.notePicker.isChoosing == true { return event }
+            if self?.notePicker.isChoosing == true || self?.isShowingNoteMenu == true {
+                return event
+            }
             if let attachedSheet = self?.window?.attachedSheet, event.window === attachedSheet {
                 return event
             }
@@ -319,18 +322,85 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         return item
     }
 
-    @objc private func saveCurrentEntry() {
-        guard let entry = currentEntry, entry.isValid else { return }
-        if noteStore.targetURL == nil,
-           !notePicker.chooseTarget(for: noteStore) {
-            return
+    @objc private func showNoteMenu() {
+        guard let entry = currentEntry, entry.isValid, !isShowingNoteMenu else { return }
+        let menu = NSMenu(title: "保存词条")
+        if let target = noteStore.targetURL {
+            let filename = abbreviatedFilename(target.lastPathComponent)
+            let addCurrent = NSMenuItem(title: "加入当前笔记：\(filename)",
+                                        action: #selector(addToCurrentNote),
+                                        keyEquivalent: "")
+            addCurrent.target = self
+            addCurrent.toolTip = target.path
+            addCurrent.state = (try? noteStore.contains(headword: entry.headword)) == true
+                ? .on : .off
+            menu.addItem(addCurrent)
+            menu.addItem(.separator())
         }
+
+        let chooseExisting = NSMenuItem(title: "选择已有 Markdown 笔记…",
+                                        action: #selector(selectExistingNote),
+                                        keyEquivalent: "")
+        chooseExisting.target = self
+        menu.addItem(chooseExisting)
+
+        let createNew = NSMenuItem(title: "新建 Markdown 笔记…",
+                                   action: #selector(createNewNote),
+                                   keyEquivalent: "")
+        createNew.target = self
+        menu.addItem(createNew)
+
+        isShowingNoteMenu = true
+        defer { isShowingNoteMenu = false }
+        menu.popUp(positioning: nil,
+                   at: NSPoint(x: starButton.bounds.minX, y: starButton.bounds.minY - 4),
+                   in: starButton)
+    }
+
+    @objc private func addToCurrentNote() {
+        guard let entry = currentEntry, entry.isValid else { return }
         save(entry)
+    }
+
+    @objc private func selectExistingNote() {
+        selectExistingForCurrentEntry()
+    }
+
+    @objc private func createNewNote() {
+        guard let entry = currentEntry, entry.isValid else { return }
+        let directory = noteStore.targetURL?.deletingLastPathComponent()
+        guard let url = notePicker.chooseNewNote(initialDirectory: directory) else { return }
+        save(entry, to: url, creatingIfNeeded: true)
+    }
+
+    private func selectExistingForCurrentEntry() {
+        guard let entry = currentEntry, entry.isValid else { return }
+        let directory = noteStore.targetURL?.deletingLastPathComponent()
+        guard let url = notePicker.chooseExistingNote(initialDirectory: directory) else { return }
+        save(entry, to: url, creatingIfNeeded: false)
     }
 
     private func save(_ entry: StructuredDictionaryEntry) {
         do {
             _ = try noteStore.save(entry)
+            refreshStarState()
+            showFeedback("已保存")
+        } catch {
+            refreshStarState()
+            presentSaveError(error, entry: entry)
+        }
+    }
+
+    private func save(_ entry: StructuredDictionaryEntry,
+                      to url: URL,
+                      creatingIfNeeded: Bool) {
+        do {
+            if creatingIfNeeded {
+                _ = try noteStore.createOrSave(entry, at: url)
+            } else {
+                _ = try noteStore.save(entry, to: url)
+            }
+            try noteStore.rememberTarget(url)
             refreshStarState()
             showFeedback("已保存")
         } catch {
@@ -364,6 +434,14 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         starButton.setAccessibilityValue(filled ? "已保存" : "未保存")
     }
 
+    private func abbreviatedFilename(_ filename: String) -> String {
+        let maximumCharacters = 44
+        guard filename.count > maximumCharacters else { return filename }
+        let suffix = filename.hasSuffix(".md") ? ".md" : ""
+        let prefixCount = maximumCharacters - suffix.count - 1
+        return String(filename.prefix(prefixCount)) + "…" + suffix
+    }
+
     private func showFeedback(_ message: String) {
         feedbackPopover?.close()
         let label = NSTextField(labelWithString: message)
@@ -390,15 +468,15 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         alert.alertStyle = .warning
         alert.messageText = "无法保存词条"
         alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "重新选择")
+        alert.addButton(withTitle: "选择已有笔记")
         alert.addButton(withTitle: "取消")
 
         guard let panel = window else { return }
         alert.beginSheetModal(for: panel) { [weak self] response in
             guard response == .alertFirstButtonReturn,
                   let self,
-                  self.notePicker.chooseTarget(for: self.noteStore) else { return }
-            self.save(entry)
+                  self.currentEntry == entry else { return }
+            self.selectExistingForCurrentEntry()
         }
     }
 
