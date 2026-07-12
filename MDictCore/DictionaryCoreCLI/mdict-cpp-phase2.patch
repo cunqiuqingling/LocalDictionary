@@ -1,0 +1,213 @@
+diff --git a/src/include/mdict.h b/src/include/mdict.h
+index a20f846..f39eeb9 100644
+--- a/src/include/mdict.h
++++ b/src/include/mdict.h
+@@ -308,6 +308,18 @@ class Mdict {
+    */
+   void init();
+ 
++  /** Initialize block metadata without decoding all headwords. */
++  void initMetadataOnly();
++
++  /** Read one MDX record by its global decompressed byte range. */
++  std::string readRecordAt(uint64_t record_start, uint64_t record_end);
++
++  uint64_t entryCount() const { return entries_num; }
++  uint64_t recordStreamSize() const;
++  float engineVersion() const { return version; }
++  int dictionaryEncoding() const { return encoding; }
++  const std::string &headerXML() const { return header_buffer; }
++
+   /**
+    * Reduce search range for a phrase
+    * @param phrase The phrase to search for
+@@ -371,6 +383,9 @@ class Mdict {
+    */
+   void read_key_block_info();
+ 
++  /** Decode key-block metadata but not the complete headword list. */
++  void read_key_block_info_metadata();
++
+   /**
+    * Decode key block information from a buffer
+    * @param key_block_info_buffer Buffer containing key block information
+@@ -531,6 +546,8 @@ class Mdict {
+ 
+   std::vector<record *> key_data;
+ 
++  std::vector<uint8_t> readRecordBlockBytes(uint64_t block_id);
++
+   /**
+    * split key block from key block buffer
+    * @param key_block the key block buffer
+diff --git a/src/mdict.cc b/src/mdict.cc
+index 3b1d4a3..3c1e99c 100644
+--- a/src/mdict.cc
++++ b/src/mdict.cc
+@@ -43,8 +43,11 @@ Mdict::Mdict(std::string fn) noexcept : filename(std::move(fn)) {
+ 
+ // distructor
+ Mdict::~Mdict() {
+-  // close instream
+   instream.close();
++  for (auto *item : key_block_info_list) delete item;
++  for (auto *item : key_list) delete item;
++  for (auto *item : record_header) delete item;
++  for (auto *item : key_data) delete item;
+ }
+ 
+ /**
+@@ -456,6 +459,27 @@ void Mdict::read_key_block_header() {
+  * offset
+  */
+ void Mdict::read_key_block_info() {
++  read_key_block_info_metadata();
++
++  char *key_block_compressed_buffer =
++      (char *)calloc(static_cast<size_t>(this->key_block_size), sizeof(char));
++
++  readfile(this->key_block_compressed_start_offset,
++           static_cast<int>(this->key_block_size), key_block_compressed_buffer);
++
++  unsigned long kb_len = this->key_block_size;
++  int err =
++      decode_key_block((unsigned char *)key_block_compressed_buffer, kb_len);
++  if (err != 0) {
++    std::free(key_block_compressed_buffer);
++    throw std::runtime_error("decode key block error");
++  }
++
++  if (key_block_compressed_buffer != nullptr)
++    std::free(key_block_compressed_buffer);
++}
++
++void Mdict::read_key_block_info_metadata() {
+   // start at this->key_block_info_start_offset
+   char *key_block_info_buffer = (char *)calloc(
+       static_cast<size_t>(this->key_block_info_size), sizeof(char));
+@@ -473,31 +497,11 @@ void Mdict::read_key_block_info() {
+   // key_block_info_size
+   this->key_block_compressed_start_offset = static_cast<uint32_t>(
+       this->key_block_info_start_offset + this->key_block_info_size);
+-
+-  /// passed
+-
+-  char *key_block_compressed_buffer =
+-      (char *)calloc(static_cast<size_t>(this->key_block_size), sizeof(char));
+-
+-  readfile(this->key_block_compressed_start_offset,
+-           static_cast<int>(this->key_block_size), key_block_compressed_buffer);
+-
+-  // ------------------------------------
+-  // decode key_block_compressed
+-  // ------------------------------------
+-  unsigned long kb_len = this->key_block_size;
+-  //  putbytes(key_block_compressed_buffer,this->key_block_size, true);
+-
+-  int err =
+-      decode_key_block((unsigned char *)key_block_compressed_buffer, kb_len);
+-  if (err != 0) {
+-    throw std::runtime_error("decode key block error");
+-  }
++  this->record_block_info_offset = this->key_block_compressed_start_offset +
++                                   this->key_block_size;
+ 
+   if (key_block_info_buffer != nullptr)
+     std::free(key_block_info_buffer);
+-  if (key_block_compressed_buffer != nullptr)
+-    std::free(key_block_compressed_buffer);
+ }
+ 
+ /**
+@@ -1434,6 +1438,91 @@ void Mdict::init() {
+   //  this->decode_record_block(); // don't use this function, it's too slow
+ }
+ 
++void Mdict::initMetadataOnly() {
++  if (!std::filesystem::exists(filename)) {
++    throw std::runtime_error("File does not exist: " + filename);
++  }
++  this->instream = std::ifstream(filename, std::ios::binary);
++  this->read_header();
++  if (this->version < 2.0) {
++    throw std::runtime_error("MDict versions before 2.0 are not supported");
++  }
++  this->read_key_block_header();
++  this->read_key_block_info_metadata();
++  this->read_record_block_header();
++}
++
++uint64_t Mdict::recordStreamSize() const {
++  if (record_header.empty()) return 0;
++  const auto *last = record_header.back();
++  return last->decompressed_size_accumulator + last->decompressed_size;
++}
++
++std::vector<uint8_t> Mdict::readRecordBlockBytes(uint64_t block_id) {
++  if (block_id >= record_header.size()) {
++    throw std::out_of_range("record block id out of range");
++  }
++  const auto *header = record_header[block_id];
++  const uint64_t comp_size = header->compressed_size;
++  if (comp_size < 8) throw std::runtime_error("invalid record block size");
++
++  std::vector<uint8_t> compressed(comp_size);
++  readfile(record_block_offset + header->compressed_size_accumulator,
++           comp_size, reinterpret_cast<char *>(compressed.data()));
++
++  const int comp_type = compressed[0] & 0xff;
++  const uint32_t expected_checksum = be_bin_to_u32(compressed.data() + 4);
++  std::vector<uint8_t> output;
++  if (comp_type == 0) {
++    output.assign(compressed.begin() + 8, compressed.end());
++  } else if (comp_type == 1) {
++    throw std::runtime_error("LZO record blocks are not supported");
++  } else if (comp_type == 2) {
++    output = zlib_mem_uncompress(compressed.data() + 8, comp_size - 8,
++                                 header->decompressed_size);
++  } else {
++    throw std::runtime_error("unknown record block compression type");
++  }
++
++  if (output.size() != header->decompressed_size) {
++    throw std::runtime_error("record block decompressed size mismatch");
++  }
++  if (adler32checksum(output.data(), static_cast<uint32_t>(output.size())) !=
++      expected_checksum) {
++    throw std::runtime_error("record block checksum mismatch");
++  }
++  return output;
++}
++
++std::string Mdict::readRecordAt(uint64_t record_start, uint64_t record_end) {
++  if (filetype != "MDX") {
++    throw std::runtime_error("readRecordAt is limited to MDX text records");
++  }
++  if (encoding != 0 /* ENCODING_UTF8 */) {
++    throw std::runtime_error("phase 2 supports UTF-8 MDX records only");
++  }
++  const uint64_t stream_size = recordStreamSize();
++  if (record_start >= record_end || record_end > stream_size) return {};
++
++  std::string result;
++  result.reserve(static_cast<size_t>(record_end - record_start));
++  uint64_t cursor = record_start;
++  while (cursor < record_end) {
++    const uint64_t block_id = reduce_record_block_offset(cursor);
++    const auto *header = record_header.at(block_id);
++    const uint64_t block_start = header->decompressed_size_accumulator;
++    const uint64_t block_end = block_start + header->decompressed_size;
++    const auto bytes = readRecordBlockBytes(block_id);
++    const uint64_t local_start = cursor - block_start;
++    const uint64_t copy_end = std::min(record_end, block_end);
++    const uint64_t local_end = copy_end - block_start;
++    result.append(reinterpret_cast<const char *>(bytes.data() + local_start),
++                  static_cast<size_t>(local_end - local_start));
++    cursor = copy_end;
++  }
++  return trim_nulls(result);
++}
++
+ /**
+  * find the key word includes in which block
+  * @param phrase

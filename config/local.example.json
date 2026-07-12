@@ -1,0 +1,5 @@
+{
+  "dictionaryDirectory": "/absolute/path/to/your/dictionaries",
+  "primaryDictionary": "/absolute/path/to/dictionary.mdx",
+  "indexPath": "/absolute/path/to/generated-index.sqlite"
+}

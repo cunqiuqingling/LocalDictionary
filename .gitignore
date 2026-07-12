@@ -1,0 +1,26 @@
+.DS_Store
+.build/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Machine-local paths and user-selected files
+config/local.json
+*.bookmark
+
+# Dictionary packages and generated indexes must never be committed
+*.mdx
+*.mdd
+*.eudic
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Local validation artifacts
+Benchmarks/results/
+ThirdParty/mdict-cpp/build/
+
+# Phase-1 research checkout. Production will vendor only the reviewed,
+# permissively licensed parser subset.
+ThirdParty/mdict-cpp/
