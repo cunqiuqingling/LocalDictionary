@@ -9,14 +9,38 @@
 #include <string>
 #include <vector>
 
+@implementation OxfordStructuredEntry
+
+- (instancetype)initWithHeadword:(NSString *)headword
+                       phonetics:(NSArray<NSString *> *)phonetics
+                    partsOfSpeech:(NSArray<NSString *> *)partsOfSpeech
+                     definitions:(NSArray<NSString *> *)definitions
+                        examples:(NSArray<NSString *> *)examples
+                          source:(NSString *)source {
+  self = [super init];
+  if (self) {
+    _headword = [headword copy];
+    _phonetics = [phonetics copy];
+    _partsOfSpeech = [partsOfSpeech copy];
+    _definitions = [definitions copy];
+    _examples = [examples copy];
+    _source = [source copy];
+  }
+  return self;
+}
+
+@end
+
 @implementation OxfordFormatResult
 
 - (instancetype)initWithAttributedString:(NSAttributedString *)attributedString
-                                  metrics:(NSDictionary<NSString *, NSNumber *> *)metrics {
+                                  metrics:(NSDictionary<NSString *, NSNumber *> *)metrics
+                          structuredEntry:(OxfordStructuredEntry *)structuredEntry {
   self = [super init];
   if (self) {
     _attributedString = [attributedString copy];
     _metrics = [metrics copy];
+    _structuredEntry = structuredEntry;
   }
   return self;
 }
@@ -152,6 +176,11 @@ NSString *normalize(NSString *source) {
                      [NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
+NSString *canonicalHeadword(NSString *source) {
+  return [[normalize(source) stringByReplacingOccurrencesOfString:@"·" withString:@""]
+      stringByReplacingOccurrencesOfString:@"•" withString:@""];
+}
+
 NSString *text(xmlNodePtr node,
                const std::set<std::string> &excludedClasses = {}) {
   NSMutableString *raw = [NSMutableString string];
@@ -177,6 +206,19 @@ void nodesWithClass(xmlNodePtr node, const std::string &className,
       continue;
     }
     nodesWithClass(current->children, className, result);
+  }
+}
+
+void nodesWithClassExcluding(xmlNodePtr node, const std::string &className,
+                             const std::string &excludedClass,
+                             std::vector<xmlNodePtr> &result) {
+  for (xmlNodePtr current = node; current; current = current->next) {
+    if (current->type != XML_ELEMENT_NODE || hasClass(current, excludedClass)) continue;
+    if (hasClass(current, className)) {
+      result.push_back(current);
+      continue;
+    }
+    nodesWithClassExcluding(current->children, className, excludedClass, result);
   }
 }
 
@@ -206,6 +248,11 @@ NSMutableParagraphStyle *paragraph(CGFloat spacingBefore, CGFloat spacingAfter,
 class Formatter {
  public:
   NSMutableAttributedString *output = [[NSMutableAttributedString alloc] init];
+  NSString *headword = @"";
+  NSMutableArray<NSString *> *phonetics = [NSMutableArray array];
+  NSMutableArray<NSString *> *partsOfSpeech = [NSMutableArray array];
+  NSMutableArray<NSString *> *definitions = [NSMutableArray array];
+  NSMutableArray<NSString *> *examples = [NSMutableArray array];
   NSMutableDictionary<NSString *, NSNumber *> *metrics = [@{
     @"headwords" : @0,
     @"phonetics" : @0,
@@ -227,8 +274,27 @@ class Formatter {
     }
   }
 
+  OxfordStructuredEntry *structuredEntry() const {
+    return [[OxfordStructuredEntry alloc] initWithHeadword:headword
+                                                phonetics:phonetics
+                                             partsOfSpeech:partsOfSpeech
+                                              definitions:definitions
+                                                 examples:examples
+                                                   source:@"Oxford"];
+  }
+
  private:
   std::set<std::string> emittedSections_;
+
+  void appendUnique(NSMutableArray<NSString *> *values, NSString *value,
+                    NSUInteger maximumCount) {
+    NSString *clean = normalize(value);
+    if (clean.length == 0 || values.count >= maximumCount ||
+        [values containsObject:clean]) {
+      return;
+    }
+    [values addObject:clean];
+  }
 
   void increment(NSString *key) {
     metrics[key] = @(metrics[key].integerValue + 1);
@@ -267,6 +333,7 @@ class Formatter {
   }
 
   void renderDefinition(xmlNodePtr node, NSString *number = nil) {
+    NSString *structuredEnglish = text(node, {"oalecd8e_chn", "x-g"});
     NSString *english = text(node, {"oalecd8e_chn"});
     if (number.length > 0) {
       english = english.length > 0 ? [NSString stringWithFormat:@"%@  %@", number, english]
@@ -285,12 +352,27 @@ class Formatter {
                       paragraph(0, 7, 18, 2));
       increment(@"chinese");
     }
+
+    std::vector<xmlNodePtr> structuredTranslations;
+    nodesWithClassExcluding(node->children, "oalecd8e_chn", "x-g",
+                            structuredTranslations);
+    for (xmlNodePtr translation : structuredTranslations) {
+      appendUnique(definitions, text(translation), 5);
+    }
+    appendUnique(definitions, structuredEnglish, 5);
+
+    std::vector<xmlNodePtr> nestedExamples;
+    nodesWithClass(node->children, "x", nestedExamples);
+    for (xmlNodePtr englishNode : nestedExamples) {
+      appendUnique(examples, text(englishNode, {"oalecd8e_chn"}), 3);
+    }
   }
 
   void renderExample(xmlNodePtr node) {
     xmlNodePtr englishNode = firstWithClass(node->children, "x");
     NSString *english = englishNode ? text(englishNode, {"oalecd8e_chn"}) : @"";
     if (english.length > 0) {
+      appendUnique(examples, english, 3);
       appendParagraph(english, italicFont(13), mutedLabelColor(0.72),
                       paragraph(1, 2, 18, 2));
       increment(@"examples");
@@ -366,7 +448,9 @@ class Formatter {
     const std::string name = nodeName(node);
 
     if (setContains(nodeClasses, "h")) {
-      appendParagraph(text(node), [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold],
+      NSString *value = text(node);
+      if (headword.length == 0) headword = canonicalHeadword(value);
+      appendParagraph(value, [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold],
                       NSColor.labelColor, paragraph(0, 5, 0, 2));
       increment(@"headwords");
       return;
@@ -377,13 +461,17 @@ class Formatter {
       return;
     }
     if (setContains(nodeClasses, "ei-g")) {
-      appendParagraph(text(node), [NSFont systemFontOfSize:14], mutedLabelColor(0.72),
+      NSString *value = text(node);
+      appendUnique(phonetics, value, 4);
+      appendParagraph(value, [NSFont systemFontOfSize:14], mutedLabelColor(0.72),
                       paragraph(0, 6, 0));
       increment(@"phonetics");
       return;
     }
     if (setContains(nodeClasses, "pos-g")) {
-      appendParagraph(text(node),
+      NSString *value = text(node);
+      appendUnique(partsOfSpeech, value, 8);
+      appendParagraph(value,
                       [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
                       NSColor.labelColor, paragraph(3, 5, 0));
       increment(@"partsOfSpeech");
@@ -487,9 +575,17 @@ class Formatter {
       HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING | HTML_PARSE_NONET |
           HTML_PARSE_COMPACT);
   if (!document) {
+    OxfordStructuredEntry *emptyEntry =
+        [[OxfordStructuredEntry alloc] initWithHeadword:@""
+                                             phonetics:@[]
+                                          partsOfSpeech:@[]
+                                           definitions:@[]
+                                              examples:@[]
+                                                source:@"Oxford"];
     return [[OxfordFormatResult alloc] initWithAttributedString:
               [[NSAttributedString alloc] initWithString:@"词条格式解析失败"]
-                                                    metrics:@{ @"parseFailed" : @YES }];
+                                                    metrics:@{ @"parseFailed" : @YES }
+                                            structuredEntry:emptyEntry];
   }
 
   Formatter formatter;
@@ -505,7 +601,8 @@ class Formatter {
           NSNotFound;
   formatter.metrics[@"residualMarkup"] = @(residualMarkup);
   return [[OxfordFormatResult alloc] initWithAttributedString:formatter.output
-                                                       metrics:formatter.metrics];
+                                                       metrics:formatter.metrics
+                                               structuredEntry:formatter.structuredEntry()];
 }
 
 @end

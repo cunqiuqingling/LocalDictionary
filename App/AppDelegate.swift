@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let selectionReader = AccessibilitySelectionReader()
     private let clipboardFallback = ClipboardSelectionFallback()
     private let permissionPrompter = AccessibilityPermissionPrompter()
+    private let noteStore = ObsidianNoteStore()
+    private let notePicker = ObsidianNotePicker()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -161,6 +163,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let show = NSMenuItem(title: "显示词典", action: #selector(showDictionary), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
+        let selectNote = NSMenuItem(title: "选择 Obsidian 笔记…",
+                                    action: #selector(selectObsidianNote),
+                                    keyEquivalent: "")
+        selectNote.target = self
+        menu.addItem(selectNote)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出", action: #selector(quitApplication), keyEquivalent: "q")
         quit.target = self
@@ -174,13 +181,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let config = try AppConfig.load()
             let core = DictionaryCoreBridge(dictionaryPath: config.primaryDictionary,
                                             indexPath: config.indexPath)
-            panelController = DictionaryPanelController(core: core)
+            panelController = DictionaryPanelController(core: core,
+                                                        noteStore: noteStore,
+                                                        notePicker: notePicker)
         } catch {
             let core = DictionaryCoreBridge(dictionaryPath: "", indexPath: "")
-            panelController = DictionaryPanelController(core: core)
+            panelController = DictionaryPanelController(core: core,
+                                                        noteStore: noteStore,
+                                                        notePicker: notePicker)
         }
     }
 
     @objc private func showDictionary() { panelController?.show() }
+    @objc private func selectObsidianNote() {
+        guard notePicker.chooseTarget(for: noteStore) else { return }
+        panelController?.targetNoteDidChange()
+    }
     @objc private func quitApplication() { NSApp.terminate(nil) }
 }

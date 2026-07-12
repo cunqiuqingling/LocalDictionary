@@ -32,6 +32,8 @@
 		A10000000000000000000017 /* AccessibilitySelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001D /* AccessibilitySelection.swift */; };
 		A10000000000000000000018 /* ApplicationServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001E /* ApplicationServices.framework */; };
 		A10000000000000000000019 /* ClipboardSelectionFallback.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001F /* ClipboardSelectionFallback.swift */; };
+		A1000000000000000000001A /* ObsidianNoteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000020 /* ObsidianNoteStore.swift */; };
+		A1000000000000000000001B /* ObsidianNotePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* ObsidianNotePicker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -66,6 +68,8 @@
 		B1000000000000000000001D /* AccessibilitySelection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilitySelection.swift; sourceTree = "<group>"; };
 		B1000000000000000000001E /* ApplicationServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ApplicationServices.framework; path = System/Library/Frameworks/ApplicationServices.framework; sourceTree = SDKROOT; };
 		B1000000000000000000001F /* ClipboardSelectionFallback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardSelectionFallback.swift; sourceTree = "<group>"; };
+		B10000000000000000000020 /* ObsidianNoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObsidianNoteStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000021 /* ObsidianNotePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObsidianNotePicker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -110,6 +114,8 @@
 				B1000000000000000000001B /* OxfordEntryFormatter.h */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
+				B10000000000000000000020 /* ObsidianNoteStore.swift */,
+				B10000000000000000000021 /* ObsidianNotePicker.swift */,
 				B10000000000000000000016 /* LocalDictionary-Bridging-Header.h */,
 				B10000000000000000000017 /* Info.plist */,
 				B10000000000000000000011 /* local.json */,
@@ -241,6 +247,8 @@
 				A10000000000000000000015 /* OxfordEntryFormatter.mm in Sources */,
 				A10000000000000000000017 /* AccessibilitySelection.swift in Sources */,
 				A10000000000000000000019 /* ClipboardSelectionFallback.swift in Sources */,
+				A1000000000000000000001A /* ObsidianNoteStore.swift in Sources */,
+				A1000000000000000000001B /* ObsidianNotePicker.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,

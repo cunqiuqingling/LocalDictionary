@@ -14,16 +14,25 @@ final class DictionaryPanel: NSPanel {
 final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate {
     private let core: DictionaryCoreBridge
     private let entryFormatter = OxfordEntryFormatter()
+    private let noteStore: ObsidianNoteStore
+    private let notePicker: ObsidianNotePicker
     private let searchField = NSSearchField()
+    private let starButton = NSButton()
     private let textView: NSTextView
     private let scrollView: NSScrollView
+    private var currentEntry: StructuredDictionaryEntry?
+    private var feedbackPopover: NSPopover?
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
     private var localKeyMonitor: Any?
     private var animating = false
 
-    init(core: DictionaryCoreBridge) {
+    init(core: DictionaryCoreBridge,
+         noteStore: ObsidianNoteStore,
+         notePicker: ObsidianNotePicker) {
         self.core = core
+        self.noteStore = noteStore
+        self.notePicker = notePicker
         let standardScrollView = NSTextView.scrollableTextView()
         guard let standardTextView = standardScrollView.documentView as? NSTextView else {
             fatalError("AppKit did not create an NSTextView document view")
@@ -62,8 +71,13 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     func showSelectionTooLongMessage() {
+        setCurrentEntry(nil)
         displayText("所选文本超过 100 个字符，请缩短选择或手动输入。")
         show()
+    }
+
+    func targetNoteDidChange() {
+        refreshStarState()
     }
 
     func show() {
@@ -136,13 +150,14 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         searchField.target = self
         searchField.action = #selector(performSearch)
 
-        let starButton = NSButton(image: NSImage(systemSymbolName: "star", accessibilityDescription: "收藏")!,
-                                  target: self,
-                                  action: #selector(starPlaceholder))
+        starButton.image = NSImage(systemSymbolName: "star", accessibilityDescription: "保存词条")
+        starButton.target = self
+        starButton.action = #selector(saveCurrentEntry)
         starButton.isBordered = false
         starButton.bezelStyle = .accessoryBarAction
-        starButton.toolTip = "收藏功能将在后续阶段启用"
-        starButton.setAccessibilityLabel("收藏（占位）")
+        starButton.toolTip = "当前没有可以保存的词条"
+        starButton.setAccessibilityLabel("保存到 Obsidian 笔记")
+        starButton.isEnabled = false
 
         let closeButton = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "关闭")!,
                                    target: self,
@@ -198,6 +213,10 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
         localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
             [weak self] event in
+            if self?.notePicker.isChoosing == true { return event }
+            if let attachedSheet = self?.window?.attachedSheet, event.window === attachedSheet {
+                return event
+            }
             if let panel = self?.window, panel.isVisible, event.window !== panel {
                 self?.hide()
             }
@@ -214,11 +233,15 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     @objc private func performSearch() {
         let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return }
+        guard !query.isEmpty else {
+            setCurrentEntry(nil)
+            return
+        }
         _ = lookup(query)
     }
 
     private func lookup(_ query: String) -> Bool {
+        setCurrentEntry(nil)
         let result = core.lookup(query)
         if let error = result["error"] as? String, !error.isEmpty {
             displayText("查询失败：\(error)")
@@ -230,6 +253,16 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                 displayText("词条内容为空")
             } else {
                 displayAttributedText(formatted.attributedString)
+                let parsed = formatted.structuredEntry
+                let entry = StructuredDictionaryEntry(
+                    headword: parsed.headword,
+                    phonetics: parsed.phonetics,
+                    partsOfSpeech: parsed.partsOfSpeech,
+                    definitions: parsed.definitions,
+                    examples: parsed.examples,
+                    source: parsed.source
+                )
+                if entry.isValid { setCurrentEntry(entry) }
             }
             textView.scrollToBeginningOfDocument(nil)
             return true
@@ -286,7 +319,89 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         return item
     }
 
-    @objc private func starPlaceholder() {}
+    @objc private func saveCurrentEntry() {
+        guard let entry = currentEntry, entry.isValid else { return }
+        if noteStore.targetURL == nil,
+           !notePicker.chooseTarget(for: noteStore) {
+            return
+        }
+        save(entry)
+    }
+
+    private func save(_ entry: StructuredDictionaryEntry) {
+        do {
+            _ = try noteStore.save(entry)
+            refreshStarState()
+            showFeedback("已保存")
+        } catch {
+            refreshStarState()
+            presentSaveError(error, entry: entry)
+        }
+    }
+
+    private func setCurrentEntry(_ entry: StructuredDictionaryEntry?) {
+        currentEntry = entry
+        refreshStarState()
+    }
+
+    private func refreshStarState() {
+        guard let entry = currentEntry, entry.isValid else {
+            starButton.isEnabled = false
+            setStarFilled(false)
+            starButton.toolTip = "当前没有可以保存的词条"
+            return
+        }
+
+        starButton.isEnabled = true
+        let isSaved = (try? noteStore.contains(headword: entry.headword)) == true
+        setStarFilled(isSaved)
+        starButton.toolTip = isSaved ? "已保存到 Obsidian 笔记" : "保存到 Obsidian 笔记"
+    }
+
+    private func setStarFilled(_ filled: Bool) {
+        let symbol = filled ? "star.fill" : "star"
+        starButton.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "保存词条")
+        starButton.setAccessibilityValue(filled ? "已保存" : "未保存")
+    }
+
+    private func showFeedback(_ message: String) {
+        feedbackPopover?.close()
+        let label = NSTextField(labelWithString: message)
+        label.alignment = .center
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.frame = NSRect(x: 0, y: 0, width: 92, height: 34)
+
+        let controller = NSViewController()
+        controller.view = label
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentSize = label.frame.size
+        popover.contentViewController = controller
+        feedbackPopover = popover
+        popover.show(relativeTo: starButton.bounds, of: starButton, preferredEdge: .maxY)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self, weak popover] in
+            popover?.close()
+            if self?.feedbackPopover === popover { self?.feedbackPopover = nil }
+        }
+    }
+
+    private func presentSaveError(_ error: Error, entry: StructuredDictionaryEntry) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法保存词条"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "重新选择")
+        alert.addButton(withTitle: "取消")
+
+        guard let panel = window else { return }
+        alert.beginSheetModal(for: panel) { [weak self] response in
+            guard response == .alertFirstButtonReturn,
+                  let self,
+                  self.notePicker.chooseTarget(for: self.noteStore) else { return }
+            self.save(entry)
+        }
+    }
+
     @objc private func closePanel() { hide() }
 
     private func activeScreen() -> NSScreen {
