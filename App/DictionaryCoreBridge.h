@@ -20,9 +20,12 @@ class DictionaryBridgeStorage;
 
 - (instancetype)initWithDictionaryPath:(NSString *)dictionaryPath
                              indexPath:(NSString *)indexPath;
+- (instancetype)initWithDictionaryPath:(NSString *)dictionaryPath
+                              indexPath:(NSString *)indexPath
+                     cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
+                   cacheMaximumEntries:(NSUInteger)cacheMaximumEntries;
 - (NSDictionary<NSString *, id> *)lookup:(NSString *)query;
 
 @end
 
 NS_ASSUME_NONNULL_END
-

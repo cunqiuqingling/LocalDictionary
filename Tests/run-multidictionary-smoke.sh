@@ -3,17 +3,14 @@ set -euo pipefail
 
 ROOT="${0:A:h:h}"
 UPSTREAM="$ROOT/ThirdParty/mdict-cpp"
-WORK="$ROOT/.build/obsidian-note-smoke"
+WORK="$ROOT/.build/multidictionary-smoke"
 OBJECTS="$WORK/objects"
-STRUCTURED_JSON="$WORK/structured-entries.json"
-mkdir -p "$OBJECTS" "$WORK/module-cache"
+FIXTURE="$WORK/real-multi-source.json"
+NOTES="$WORK/notes"
+mkdir -p "$OBJECTS" "$WORK/module-cache" "$NOTES"
 
-if [[ -z "${DEVELOPER_DIR:-}" ]]; then
-    if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
-        export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
-    elif [[ -d "$HOME/Downloads/Xcode.app/Contents/Developer" ]]; then
-        export DEVELOPER_DIR="$HOME/Downloads/Xcode.app/Contents/Developer"
-    fi
+if [[ -z "${DEVELOPER_DIR:-}" && -d "/Applications/Xcode.app/Contents/Developer" ]]; then
+    export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 fi
 
 CC="$(xcrun --find clang)"
@@ -27,7 +24,6 @@ for source in miniz.c miniz_tinfl.c miniz_tdef.c miniz_zip.c; do
 done
 "$CC" -O0 -isysroot "$SDKROOT" -c "$UPSTREAM/src/ripemd128.c" \
     -o "$OBJECTS/ripemd128.o"
-
 for source in mdict.cc binutils.cc adler32.cc; do
     "$CXX" -std=c++17 -O0 -isysroot "$SDKROOT" \
         -I"$UPSTREAM/src" -I"$UPSTREAM/src/include" \
@@ -41,19 +37,21 @@ done
     -I"$UPSTREAM/deps" -I"$UPSTREAM/deps/turbobase64" \
     -I"$SDKROOT/usr/include/libxml2" \
     "$ROOT/MDictCore/SQLiteDictionaryCore.cpp" \
+    "$ROOT/App/DictionaryCoreBridge.mm" \
     "$ROOT/App/DictionarySemanticModel.mm" \
     "$ROOT/App/OxfordEntryFormatter.mm" \
-    "$ROOT/Tests/OxfordStructuredEntrySmoke.mm" \
+    "$ROOT/App/SupplementalEntryFormatters.mm" \
+    "$ROOT/Tests/MultiDictionaryFormatterSmoke.mm" \
     "$OBJECTS/mdict.o" "$OBJECTS/binutils.o" "$OBJECTS/adler32.o" \
     "$OBJECTS/ripemd128.o" "$OBJECTS/miniz.o" \
     "$OBJECTS/miniz_tinfl.o" "$OBJECTS/miniz_tdef.o" "$OBJECTS/miniz_zip.o" \
     -lsqlite3 -lxml2 -framework AppKit -framework Foundation \
-    -o "$WORK/oxford-structured-entry-smoke"
+    -o "$WORK/multidictionary-formatter-smoke"
 
-"$WORK/oxford-structured-entry-smoke" "$ROOT/config/local.json" "$STRUCTURED_JSON"
+"$WORK/multidictionary-formatter-smoke" "$ROOT/config/local.json" "$FIXTURE"
 
 "$SWIFTC" -sdk "$SDKROOT" -module-cache-path "$WORK/module-cache" \
     "$ROOT/App/ObsidianNoteStore.swift" \
-    "$ROOT/Tests/ObsidianNoteStoreSmoke.swift" \
-    -o "$WORK/obsidian-note-store-smoke"
-"$WORK/obsidian-note-store-smoke" "$STRUCTURED_JSON" "$WORK"
+    "$ROOT/Tests/MultiSourceObsidianSmoke.swift" \
+    -o "$WORK/multisource-obsidian-smoke"
+"$WORK/multisource-obsidian-smoke" "$FIXTURE" "$NOTES"

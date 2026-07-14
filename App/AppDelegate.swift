@@ -181,7 +181,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let config = try AppConfig.load()
             let core = DictionaryCoreBridge(dictionaryPath: config.primaryDictionary,
                                             indexPath: config.indexPath)
+            let supplementalDictionaries = config.supplementalDictionaries.map { configuration in
+                SupplementalDictionaryRuntime(
+                    id: configuration.id,
+                    displayName: configuration.displayName,
+                    priority: configuration.priority,
+                    core: DictionaryCoreBridge(
+                        dictionaryPath: configuration.dictionaryPath,
+                        indexPath: configuration.indexPath,
+                        cacheMaximumBytes: 2 * 1024 * 1024,
+                        cacheMaximumEntries: 32
+                    )
+                )
+            }
             panelController = DictionaryPanelController(core: core,
+                                                        supplementalDictionaries: supplementalDictionaries,
                                                         noteStore: noteStore,
                                                         notePicker: notePicker)
         } catch {

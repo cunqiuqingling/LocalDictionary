@@ -1,5 +1,12 @@
 import AppKit
 
+struct SupplementalDictionaryRuntime {
+    let id: DictionarySourceID
+    let displayName: String
+    let priority: Int
+    let core: DictionaryCoreBridge
+}
+
 final class DictionaryPanel: NSPanel {
     var escapeHandler: (() -> Void)?
 
@@ -12,8 +19,13 @@ final class DictionaryPanel: NSPanel {
 }
 
 final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate {
-    private let core: DictionaryCoreBridge
+    private let oxfordCore: DictionaryCoreBridge
+    private let supplementalDictionaries: [SupplementalDictionaryRuntime]
     private let entryFormatter = OxfordEntryFormatter()
+    private let century21Formatter = Century21EntryFormatter()
+    private let newOxfordFormatter = NewOxfordEntryFormatter()
+    private let medicalFormatter = MedicalEntryFormatter()
+    private let affixRootFormatter = AffixRootEntryFormatter()
     private let noteStore: ObsidianNoteStore
     private let notePicker: ObsidianNotePicker
     private let searchField = NSSearchField()
@@ -27,11 +39,16 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var localKeyMonitor: Any?
     private var isShowingNoteMenu = false
     private var animating = false
+    private var reportedUnavailableDictionaryIDs: Set<String> = []
 
     init(core: DictionaryCoreBridge,
+         supplementalDictionaries: [SupplementalDictionaryRuntime] = [],
          noteStore: ObsidianNoteStore,
          notePicker: ObsidianNotePicker) {
-        self.core = core
+        oxfordCore = core
+        self.supplementalDictionaries = supplementalDictionaries.sorted {
+            $0.priority < $1.priority
+        }
         self.noteStore = noteStore
         self.notePicker = notePicker
         let standardScrollView = NSTextView.scrollableTextView()
@@ -184,7 +201,10 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         textView.isHorizontallyResizable = false
         textView.textContainer?.widthTracksTextView = true
         textView.menu = editingContextMenu(includeModificationCommands: false)
-        displayText(core.isReady ? "输入英文单词并按回车查询" : core.lastError)
+        let hasReadyDictionary = oxfordCore.isReady || supplementalDictionaries.contains {
+            $0.core.isReady
+        }
+        displayText(hasReadyDictionary ? "输入英文单词并按回车查询" : oxfordCore.lastError)
         textView.setAccessibilityLabel("词典释义")
 
         scrollView.hasVerticalScroller = true
@@ -245,34 +265,205 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     private func lookup(_ query: String) -> Bool {
         setCurrentEntry(nil)
-        let result = core.lookup(query)
-        if let error = result["error"] as? String, !error.isEmpty {
-            displayText("查询失败：\(error)")
-            return false
-        } else if result["found"] as? Bool == true,
-                  let html = result["html"] as? String {
+        var attributedSections: [NSAttributedString] = []
+        var structuredSources: [StructuredDictionarySource] = []
+        var headword = ""
+        var failures: [(id: String, name: String)] = []
+
+        let oxfordResult = oxfordCore.lookup(query)
+        if let error = oxfordResult["error"] as? String, !error.isEmpty {
+            failures.append((DictionarySourceID.oxfordOALD8.rawValue, "牛津高阶 8"))
+        } else if oxfordResult["found"] as? Bool == true,
+                  let html = oxfordResult["html"] as? String {
             let formatted = entryFormatter.formatHTML(html)
-            if formatted.attributedString.length == 0 {
-                displayText("词条内容为空")
-            } else {
-                displayAttributedText(formatted.attributedString)
+            if formatted.attributedString.length > 0 {
+                attributedSections.append(formatted.attributedString)
                 let parsed = formatted.structuredEntry
-                let entry = StructuredDictionaryEntry(
-                    headword: parsed.headword,
+                if headword.isEmpty { headword = parsed.headword }
+                structuredSources.append(StructuredDictionarySource(
                     phonetics: parsed.phonetics,
                     partsOfSpeech: parsed.partsOfSpeech,
                     definitions: parsed.definitions,
                     examples: parsed.examples,
-                    source: parsed.source
-                )
-                if entry.isValid { setCurrentEntry(entry) }
+                    source: "牛津高阶 8",
+                    semanticEntry: structuredSemanticEntry(from: parsed.semanticEntry)
+                ))
             }
-            textView.scrollToBeginningOfDocument(nil)
-            return true
-        } else {
-            displayText("未找到词条：\(query)")
+        }
+
+        for dictionary in supplementalDictionaries {
+            let lookupResult = dictionary.core.lookup(query)
+            if let error = lookupResult["error"] as? String, !error.isEmpty {
+                failures.append((dictionary.id.rawValue, dictionary.displayName))
+                continue
+            }
+            guard lookupResult["found"] as? Bool == true,
+                  let html = lookupResult["html"] as? String else { continue }
+            let matchedHeadword = (lookupResult["matchedHeadword"] as? String) ?? query
+            let formatted = formatSupplementalHTML(html,
+                                                   matchedHeadword: matchedHeadword,
+                                                   sourceID: dictionary.id)
+            guard formatted.attributedString.length > 0 else { continue }
+            attributedSections.append(formatted.attributedString)
+            let parsed = formatted.structuredEntry
+            if headword.isEmpty {
+                headword = parsed.headword.isEmpty ? matchedHeadword : parsed.headword
+            }
+            structuredSources.append(StructuredDictionarySource(
+                phonetics: parsed.phonetics,
+                partsOfSpeech: parsed.partsOfSpeech,
+                definitions: parsed.definitions,
+                examples: parsed.examples,
+                source: dictionary.displayName,
+                partOfSpeechSections: dictionary.id == .century21
+                    ? structuredPartOfSpeechSections(from: parsed)
+                    : nil,
+                semanticEntry: dictionary.id == .newOxford
+                    ? structuredSemanticEntry(from: parsed.semanticEntry)
+                    : nil
+            ))
+        }
+
+        let newlyUnavailable = failures.filter {
+            !reportedUnavailableDictionaryIDs.contains($0.id)
+        }
+        reportedUnavailableDictionaryIDs.formUnion(newlyUnavailable.map { $0.id })
+
+        guard !attributedSections.isEmpty else {
+            var message = "未找到词条：\(query)"
+            if !newlyUnavailable.isEmpty {
+                message += "\n部分词典暂不可用：" + newlyUnavailable.map { $0.name }.joined(separator: "、")
+            }
+            displayText(message)
             return false
         }
+
+        let combined = NSMutableAttributedString(string: "")
+        for section in attributedSections {
+            if combined.length > 0 {
+                combined.append(NSAttributedString(string: "\n\n"))
+            }
+            combined.append(section)
+        }
+        if !newlyUnavailable.isEmpty {
+            appendAvailabilityNotice(newlyUnavailable.map { $0.name }, to: combined)
+        }
+        displayAttributedText(combined)
+        let entry = StructuredDictionaryEntry(headword: headword.isEmpty ? query : headword,
+                                              sources: structuredSources)
+        if entry.isValid { setCurrentEntry(entry) }
+        textView.scrollToBeginningOfDocument(nil)
+        return true
+    }
+
+    private func formatSupplementalHTML(_ html: String,
+                                        matchedHeadword: String,
+                                        sourceID: DictionarySourceID) -> SupplementalFormatResult {
+        switch sourceID {
+        case .century21:
+            return century21Formatter.formatHTML(html, matchedHeadword: matchedHeadword)
+        case .newOxford:
+            return newOxfordFormatter.formatHTML(html, matchedHeadword: matchedHeadword)
+        case .medicalEnglishChinese:
+            return medicalFormatter.formatHTML(html, matchedHeadword: matchedHeadword)
+        case .affixRootA:
+            return affixRootFormatter.formatHTML(html, matchedHeadword: matchedHeadword)
+        case .oxfordOALD8:
+            preconditionFailure("Oxford uses OxfordEntryFormatter")
+        }
+    }
+
+    private func structuredPartOfSpeechSections(
+        from entry: SupplementalStructuredEntry
+    ) -> [StructuredPartOfSpeechSection] {
+        entry.partOfSpeechSections.map { section in
+            StructuredPartOfSpeechSection(
+                partOfSpeech: section.partOfSpeech,
+                senses: section.senses.map { sense in
+                    StructuredPartOfSpeechSense(
+                        definition: sense.definition,
+                        labels: sense.labels,
+                        examples: sense.examples,
+                        number: Int(sense.number),
+                        indentationLevel: Int(sense.indentationLevel)
+                    )
+                }
+            )
+        }
+    }
+
+    private func structuredSemanticEntry(
+        from entry: DictionarySemanticEntry
+    ) -> StructuredSemanticEntry? {
+        let structured = StructuredSemanticEntry(
+            inflections: entry.inflections,
+            partOfSpeechSections: entry.partOfSpeechSections.map { section in
+                StructuredSemanticPartOfSpeechSection(
+                    partOfSpeech: section.partOfSpeech,
+                    pronunciations: section.pronunciations,
+                    grammarLabels: section.grammarLabels,
+                    senses: section.senses.map(structuredSemanticSense),
+                    relations: section.relations.map(structuredSemanticRelation),
+                    derivatives: section.derivatives.map(structuredSemanticDerivative)
+                )
+            },
+            entryLevelRelations: entry.entryLevelRelations.map(structuredSemanticRelation),
+            derivatives: entry.derivatives.map(structuredSemanticDerivative)
+        )
+        return structured.hasContent ? structured : nil
+    }
+
+    private func structuredSemanticSense(
+        _ sense: DictionarySemanticSense
+    ) -> StructuredSemanticSense {
+        StructuredSemanticSense(
+            number: sense.number,
+            labels: sense.labels,
+            definitionEnglish: sense.definitionEnglish,
+            definitionChinese: sense.definitionChinese,
+            grammarPatterns: sense.grammarPatterns,
+            examples: sense.examples.map {
+                StructuredSemanticExample(english: $0.english,
+                                          translations: $0.translations)
+            },
+            relations: sense.relations.map(structuredSemanticRelation),
+            subsenses: sense.subsenses.map(structuredSemanticSense)
+        )
+    }
+
+    private func structuredSemanticRelation(
+        _ relation: DictionarySemanticRelationGroup
+    ) -> StructuredSemanticRelationGroup {
+        StructuredSemanticRelationGroup(kind: relation.kind,
+                                        title: relation.title,
+                                        values: relation.values)
+    }
+
+    private func structuredSemanticDerivative(
+        _ derivative: DictionarySemanticDerivative
+    ) -> StructuredSemanticDerivative {
+        StructuredSemanticDerivative(headword: derivative.headword,
+                                     partOfSpeech: derivative.partOfSpeech,
+                                     pronunciations: derivative.pronunciations,
+                                     summary: derivative.summary,
+                                     sourceHeadword: derivative.sourceHeadword,
+                                     sourcePartOfSpeech: derivative.sourcePartOfSpeech)
+    }
+
+    private func appendAvailabilityNotice(_ names: [String],
+                                          to output: NSMutableAttributedString) {
+        guard !names.isEmpty else { return }
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacingBefore = 10
+        style.lineBreakMode = .byWordWrapping
+        output.append(NSAttributedString(
+            string: "\n\n部分词典暂不可用：" + names.joined(separator: "、"),
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: style
+            ]
+        ))
     }
 
     private func displayText(_ value: String) {

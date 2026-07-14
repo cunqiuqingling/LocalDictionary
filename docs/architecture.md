@@ -10,8 +10,8 @@
 ## Planned components
 
 1. `MDictCore`: a small C/C++17 parser surface bridged to Swift, plus a persistent SQLite headword index.
-2. `DictionaryContentPolicy`: rewrites resource and entry links, strips executable content, and prevents network/file navigation.
-3. `App`: an `NSStatusItem`, fixed global shortcut, Accessibility selection reader, and a lazily-created `NSPanel` containing a restricted `WKWebView`.
+2. Native libxml2 formatters: strip executable and invisible content and map each verified dictionary structure to `NSAttributedString` without WebKit or JavaScript.
+3. `App`: an `NSStatusItem`, fixed global shortcut, Accessibility selection reader, and a lightweight `NSPanel` containing an `NSTextView`.
 4. `ObsidianWriter`: explicit `.md` selection and duplicate-safe UTF-8 append.
 
 The production parser must keep block metadata and the SQLite index resident, not all headword strings. Compressed record/resource blocks are read and decompressed on demand with a bounded cache.
@@ -46,4 +46,8 @@ Sources: [mdict-cpp](https://github.com/dictlab/mdict-cpp), [MDict v2 reverse-en
 7. decompress only the record block(s) intersecting the indexed byte range;
 8. retain returned records in a 64-entry/8 MiB LRU cache.
 
-There is no directory watcher, polling loop, background writer, full-text index, fuzzy search, morphology engine, UI or web component.
+There is no directory watcher, polling loop, background writer, full-text index, fuzzy search, morphology engine or web component.
+
+## Fixed multi-dictionary runtime
+
+Oxford Advanced Learner's 8 remains the unchanged primary source. Four supplemental sources—21st Century Unabridged English-Chinese, New Oxford English, English-Chinese Medical Dictionary 2003, and The Affix Root of Vocabulary—each use a separate machine-local MDX path, SQLite index, read-only SQLite connection, bounded LRU cache, display name and priority. A failed supplemental source is skipped without interrupting the other dictionaries. Stedman's Medical Dictionary and the unselected script-rendered root dictionary are not configured or opened.

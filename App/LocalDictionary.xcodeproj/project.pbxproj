@@ -34,6 +34,8 @@
 		A10000000000000000000019 /* ClipboardSelectionFallback.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000001F /* ClipboardSelectionFallback.swift */; };
 		A1000000000000000000001A /* ObsidianNoteStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000020 /* ObsidianNoteStore.swift */; };
 		A1000000000000000000001B /* ObsidianNotePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* ObsidianNotePicker.swift */; };
+		A1000000000000000000001C /* SupplementalEntryFormatters.mm in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* SupplementalEntryFormatters.mm */; };
+		A1000000000000000000001D /* DictionarySemanticModel.mm in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000024 /* DictionarySemanticModel.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -70,6 +72,10 @@
 		B1000000000000000000001F /* ClipboardSelectionFallback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardSelectionFallback.swift; sourceTree = "<group>"; };
 		B10000000000000000000020 /* ObsidianNoteStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObsidianNoteStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000021 /* ObsidianNotePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObsidianNotePicker.swift; sourceTree = "<group>"; };
+		B10000000000000000000022 /* SupplementalEntryFormatters.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = SupplementalEntryFormatters.mm; sourceTree = "<group>"; };
+		B10000000000000000000023 /* SupplementalEntryFormatters.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SupplementalEntryFormatters.h; sourceTree = "<group>"; };
+		B10000000000000000000024 /* DictionarySemanticModel.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DictionarySemanticModel.mm; sourceTree = "<group>"; };
+		B10000000000000000000025 /* DictionarySemanticModel.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DictionarySemanticModel.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -112,6 +118,10 @@
 				B10000000000000000000015 /* DictionaryCoreBridge.h */,
 				B1000000000000000000001A /* OxfordEntryFormatter.mm */,
 				B1000000000000000000001B /* OxfordEntryFormatter.h */,
+				B10000000000000000000022 /* SupplementalEntryFormatters.mm */,
+				B10000000000000000000023 /* SupplementalEntryFormatters.h */,
+				B10000000000000000000024 /* DictionarySemanticModel.mm */,
+				B10000000000000000000025 /* DictionarySemanticModel.h */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
 				B10000000000000000000020 /* ObsidianNoteStore.swift */,
@@ -245,6 +255,8 @@
 				A10000000000000000000006 /* HTMLTextCleaner.swift in Sources */,
 				A10000000000000000000007 /* DictionaryCoreBridge.mm in Sources */,
 				A10000000000000000000015 /* OxfordEntryFormatter.mm in Sources */,
+				A1000000000000000000001C /* SupplementalEntryFormatters.mm in Sources */,
+				A1000000000000000000001D /* DictionarySemanticModel.mm in Sources */,
 				A10000000000000000000017 /* AccessibilitySelection.swift in Sources */,
 				A10000000000000000000019 /* ClipboardSelectionFallback.swift in Sources */,
 				A1000000000000000000001A /* ObsidianNoteStore.swift in Sources */,

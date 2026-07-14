@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import "DictionarySemanticModel.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -10,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, copy, readonly) NSArray<NSString *> *definitions;
 @property(nonatomic, copy, readonly) NSArray<NSString *> *examples;
 @property(nonatomic, copy, readonly) NSString *source;
+@property(nonatomic, strong, readonly) DictionarySemanticEntry *semanticEntry;
 
 - (instancetype)initWithHeadword:(NSString *)headword
                        phonetics:(NSArray<NSString *> *)phonetics
@@ -17,6 +19,14 @@ NS_ASSUME_NONNULL_BEGIN
                      definitions:(NSArray<NSString *> *)definitions
                         examples:(NSArray<NSString *> *)examples
                           source:(NSString *)source;
+
+- (instancetype)initWithHeadword:(NSString *)headword
+                       phonetics:(NSArray<NSString *> *)phonetics
+                    partsOfSpeech:(NSArray<NSString *> *)partsOfSpeech
+                     definitions:(NSArray<NSString *> *)definitions
+                        examples:(NSArray<NSString *> *)examples
+                          source:(NSString *)source
+                   semanticEntry:(DictionarySemanticEntry *)semanticEntry;
 
 @end
 

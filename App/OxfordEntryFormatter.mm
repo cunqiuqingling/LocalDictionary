@@ -17,6 +17,27 @@
                      definitions:(NSArray<NSString *> *)definitions
                         examples:(NSArray<NSString *> *)examples
                           source:(NSString *)source {
+  DictionarySemanticEntry *semanticEntry = [[DictionarySemanticEntry alloc]
+      initWithInflections:@[]
+      partOfSpeechSections:@[]
+      entryLevelRelations:@[]
+      derivatives:@[]];
+  return [self initWithHeadword:headword
+                      phonetics:phonetics
+                   partsOfSpeech:partsOfSpeech
+                    definitions:definitions
+                       examples:examples
+                         source:source
+                  semanticEntry:semanticEntry];
+}
+
+- (instancetype)initWithHeadword:(NSString *)headword
+                       phonetics:(NSArray<NSString *> *)phonetics
+                    partsOfSpeech:(NSArray<NSString *> *)partsOfSpeech
+                     definitions:(NSArray<NSString *> *)definitions
+                        examples:(NSArray<NSString *> *)examples
+                          source:(NSString *)source
+                   semanticEntry:(DictionarySemanticEntry *)semanticEntry {
   self = [super init];
   if (self) {
     _headword = [headword copy];
@@ -25,6 +46,7 @@
     _definitions = [definitions copy];
     _examples = [examples copy];
     _source = [source copy];
+    _semanticEntry = semanticEntry;
   }
   return self;
 }
@@ -245,6 +267,47 @@ NSMutableParagraphStyle *paragraph(CGFloat spacingBefore, CGFloat spacingAfter,
   return style;
 }
 
+void collectOwned(xmlNodePtr node, const std::string &target,
+                  const std::set<std::string> &barriers,
+                  std::vector<xmlNodePtr> &result) {
+  for (xmlNodePtr current = node; current; current = current->next) {
+    if (current->type != XML_ELEMENT_NODE || isInvisible(current)) continue;
+    if (hasAnyClass(current, barriers)) continue;
+    if (hasClass(current, target)) {
+      result.push_back(current);
+      continue;
+    }
+    collectOwned(current->children, target, barriers, result);
+  }
+}
+
+int firstInDocumentOrder(xmlNodePtr node, xmlNodePtr first, xmlNodePtr second) {
+  for (xmlNodePtr current = node; current; current = current->next) {
+    if (current == first) return 1;
+    if (current == second) return -1;
+    const int childResult = firstInDocumentOrder(current->children, first, second);
+    if (childResult != 0) return childResult;
+  }
+  return 0;
+}
+
+NSString *localizedPartOfSpeech(NSString *source) {
+  NSString *value = normalize(source).lowercaseString;
+  const std::pair<NSString *, NSString *> mappings[] = {
+      {@"adjective", @"形容词"}, {@"adverb", @"副词"},
+      {@"noun", @"名词"}, {@"verb", @"动词"},
+      {@"pronoun", @"代词"}, {@"preposition", @"介词"},
+      {@"conjunction", @"连词"}, {@"determiner", @"限定词"}};
+  for (const auto &mapping : mappings) {
+    if ([value containsString:mapping.first]) return mapping.second;
+  }
+  if ([value hasPrefix:@"adj."] || [value isEqualToString:@"adj"]) return @"形容词";
+  if ([value hasPrefix:@"adv."] || [value isEqualToString:@"adv"]) return @"副词";
+  if ([value hasPrefix:@"n."] || [value isEqualToString:@"n"]) return @"名词";
+  if ([value hasPrefix:@"v."] || [value isEqualToString:@"v"]) return @"动词";
+  return normalize(source);
+}
+
 class Formatter {
  public:
   NSMutableAttributedString *output = [[NSMutableAttributedString alloc] init];
@@ -253,51 +316,79 @@ class Formatter {
   NSMutableArray<NSString *> *partsOfSpeech = [NSMutableArray array];
   NSMutableArray<NSString *> *definitions = [NSMutableArray array];
   NSMutableArray<NSString *> *examples = [NSMutableArray array];
+  NSMutableArray<NSString *> *inflections = [NSMutableArray array];
+  NSMutableArray<DictionarySemanticPartOfSpeechSection *> *semanticSections =
+      [NSMutableArray array];
+  NSMutableArray<DictionarySemanticRelationGroup *> *entryRelations =
+      [NSMutableArray array];
+  NSMutableArray<DictionarySemanticDerivative *> *entryDerivatives =
+      [NSMutableArray array];
   NSMutableDictionary<NSString *, NSNumber *> *metrics = [@{
-    @"headwords" : @0,
-    @"phonetics" : @0,
-    @"partsOfSpeech" : @0,
-    @"definitions" : @0,
-    @"chinese" : @0,
-    @"examples" : @0,
-    @"sections" : @0,
-    @"derived" : @0,
-    @"synonyms" : @0
+    @"headwords" : @0, @"phonetics" : @0, @"partsOfSpeech" : @0,
+    @"definitions" : @0, @"chinese" : @0, @"examples" : @0,
+    @"sections" : @0, @"derived" : @0, @"synonyms" : @0
   } mutableCopy];
 
   void render(xmlNodePtr root) {
     xmlNodePtr entry = firstWithClass(root, "entry");
-    renderNode(entry ?: root);
-    while (output.length > 0 &&
-           [[output.string substringFromIndex:output.length - 1] isEqualToString:@"\n"]) {
-      [output deleteCharactersInRange:NSMakeRange(output.length - 1, 1)];
+    if (!entry) entry = root;
+    renderHeader(entry);
+
+    std::vector<xmlNodePtr> sections;
+    collectOwned(entry->children, "p-g", {}, sections);
+    for (xmlNodePtr section : sections) renderPartOfSpeech(section);
+    if (sections.empty()) renderPartOfSpeech(entry);
+
+    if (!sections.empty()) {
+      collectAndRenderRelations(entry, {"p-g", "n-g", "sn-g", "dr-g"},
+                                entryRelations, 0);
+      collectAndRenderDerivatives(entry, {"p-g", "n-g", "sn-g"},
+                                  entryDerivatives, true);
     }
+
+    if (semanticSections.count == 0) {
+      NSString *fallback = text(entry, {"h", "infl", "ei-g", "pos-g", "dr-g"});
+      if (fallback.length > 0) {
+        appendParagraph(fallback, [NSFont systemFontOfSize:14], NSColor.labelColor,
+                        paragraph(3, 5, 0));
+        appendUnique(definitions, fallback, 5);
+      }
+    }
+    trimOutput();
   }
 
   OxfordStructuredEntry *structuredEntry() const {
+    DictionarySemanticEntry *semantic = [[DictionarySemanticEntry alloc]
+        initWithInflections:inflections
+        partOfSpeechSections:semanticSections
+        entryLevelRelations:entryRelations
+        derivatives:entryDerivatives];
     return [[OxfordStructuredEntry alloc] initWithHeadword:headword
                                                 phonetics:phonetics
                                              partsOfSpeech:partsOfSpeech
                                               definitions:definitions
                                                  examples:examples
-                                                   source:@"Oxford"];
+                                                   source:@"Oxford"
+                                            semanticEntry:semantic];
   }
 
  private:
-  std::set<std::string> emittedSections_;
-
   void appendUnique(NSMutableArray<NSString *> *values, NSString *value,
                     NSUInteger maximumCount) {
     NSString *clean = normalize(value);
     if (clean.length == 0 || values.count >= maximumCount ||
-        [values containsObject:clean]) {
-      return;
-    }
+        [values containsObject:clean]) return;
     [values addObject:clean];
   }
 
   void increment(NSString *key) {
     metrics[key] = @(metrics[key].integerValue + 1);
+  }
+
+  void trimOutput() {
+    while (output.length > 0 && [output.string hasSuffix:@"\n"]) {
+      [output deleteCharactersInRange:NSMakeRange(output.length - 1, 1)];
+    }
   }
 
   void appendParagraph(NSString *value, NSFont *font, NSColor *color,
@@ -307,260 +398,421 @@ class Formatter {
     if (output.length > 0 && ![output.string hasSuffix:@"\n"]) {
       [output appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"]];
     }
-    NSDictionary *attributes = @{
-      NSFontAttributeName : font,
-      NSForegroundColorAttributeName : color,
-      NSParagraphStyleAttributeName : style
-    };
+    NSDictionary *attributes = @{NSFontAttributeName: font,
+                                 NSForegroundColorAttributeName: color,
+                                 NSParagraphStyleAttributeName: style};
     [output appendAttributedString:[[NSAttributedString alloc] initWithString:clean
                                                                    attributes:attributes]];
     [output appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"
                                                                    attributes:attributes]];
   }
 
-  void appendSection(NSString *title, const std::string &key) {
-    if (setContains(emittedSections_, key)) return;
-    emittedSections_.insert(key);
-    appendParagraph(title, [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
-                    NSColor.labelColor, paragraph(9, 4, 0));
-    increment(@"sections");
-  }
-
-  void renderChildren(xmlNodePtr node) {
-    for (xmlNodePtr child = node ? node->children : nullptr; child; child = child->next) {
-      renderNode(child);
+  void renderHeader(xmlNodePtr entry) {
+    xmlNodePtr headwordNode = firstWithClass(entry->children, "h");
+    if (headwordNode) {
+      headword = canonicalHeadword(text(headwordNode));
+      appendParagraph(text(headwordNode),
+                      [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold],
+                      NSColor.labelColor, paragraph(0, 5, 0, 2));
+      increment(@"headwords");
+    }
+    std::vector<xmlNodePtr> pronunciationNodes;
+    collectOwned(entry->children, "ei-g", {"p-g", "dr-g", "n-g"},
+                 pronunciationNodes);
+    for (xmlNodePtr node : pronunciationNodes) {
+      NSString *value = text(node);
+      appendUnique(phonetics, value, 4);
+      appendParagraph(value, [NSFont systemFontOfSize:14], mutedLabelColor(0.72),
+                      paragraph(0, 4, 0));
+      increment(@"phonetics");
+    }
+    std::vector<xmlNodePtr> inflectionNodes;
+    collectOwned(entry->children, "infl", {"p-g", "dr-g", "n-g"},
+                 inflectionNodes);
+    for (xmlNodePtr node : inflectionNodes) {
+      NSString *value = text(node);
+      appendUnique(inflections, value, 12);
+      appendParagraph(value, [NSFont systemFontOfSize:12.5], mutedLabelColor(0.58),
+                      paragraph(0, 3, 0));
     }
   }
 
-  void renderDefinition(xmlNodePtr node, NSString *number = nil) {
-    NSString *structuredEnglish = text(node, {"oalecd8e_chn", "x-g"});
-    NSString *english = text(node, {"oalecd8e_chn"});
-    if (number.length > 0) {
-      english = english.length > 0 ? [NSString stringWithFormat:@"%@  %@", number, english]
-                                   : number;
-    }
-    appendParagraph(english, [NSFont systemFontOfSize:14], NSColor.labelColor,
-                    paragraph(3, 3, 0, 3));
-    if (english.length > 0) increment(@"definitions");
+  NSArray<NSString *> *ownedTextValues(xmlNodePtr root, const std::string &className,
+                                       const std::set<std::string> &barriers,
+                                       NSUInteger maximum = 12) {
+    std::vector<xmlNodePtr> nodes;
+    collectOwned(root->children, className, barriers, nodes);
+    NSMutableArray<NSString *> *values = [NSMutableArray array];
+    for (xmlNodePtr node : nodes) appendUnique(values, text(node), maximum);
+    return values;
+  }
 
-    std::vector<xmlNodePtr> translations;
-    nodesWithClass(node->children, "oalecd8e_chn", translations);
-    for (xmlNodePtr translation : translations) {
-      NSString *value = text(translation);
-      if (value.length == 0) continue;
-      appendParagraph(value, [NSFont systemFontOfSize:14], mutedLabelColor(0.78),
-                      paragraph(0, 7, 18, 2));
-      increment(@"chinese");
+  DictionarySemanticRelationGroup *relation(xmlNodePtr node) {
+    NSString *kind = @"relatedReference";
+    NSString *title = @"相关参考";
+    if (firstWithClass(node->children, "symbols-synsym")) {
+      kind = @"synonymComparison";
+      title = @"同义词辨析";
+      increment(@"synonyms");
+    } else if (firstWithClass(node->children, "symbols-oppsym")) {
+      kind = @"antonymComparison";
+      title = @"反义词辨析";
     }
-
-    std::vector<xmlNodePtr> structuredTranslations;
-    nodesWithClassExcluding(node->children, "oalecd8e_chn", "x-g",
-                            structuredTranslations);
-    for (xmlNodePtr translation : structuredTranslations) {
-      appendUnique(definitions, text(translation), 5);
+    xmlNodePtr crossReferenceSymbol = firstWithClass(node->children, "symbols-xrsym");
+    NSString *marker = crossReferenceSymbol ? text(crossReferenceSymbol) : @"";
+    NSString *value = text(node, {"symbols-synsym", "symbols-oppsym", "symbols-xrsym"});
+    NSString *classificationText = normalize(
+        [NSString stringWithFormat:@"%@ %@", marker, value]);
+    NSString *lower = classificationText.lowercaseString;
+    if ([kind isEqualToString:@"relatedReference"]) {
+      if ([lower containsString:@"collocation"] || [lower containsString:@"搭配"]) {
+        kind = @"collocationReference";
+        title = @"搭配参考";
+      } else if ([marker isEqualToString:@"="] || [value hasPrefix:@"="]) {
+        kind = @"relatedWords";
+        title = @"相关词";
+        if (value.length > 0 && ![value hasPrefix:@"="]) {
+          value = [@"= " stringByAppendingString:value];
+        }
+      } else if ([lower hasPrefix:@"see "] || [lower hasPrefix:@"see also"] ||
+                 [lower containsString:@"参见"] || [lower containsString:@"另见"]) {
+        kind = @"seeAlso";
+        title = @"另见";
+      }
     }
-    appendUnique(definitions, structuredEnglish, 5);
+    return [[DictionarySemanticRelationGroup alloc]
+        initWithKind:kind title:title values:value.length > 0 ? @[value] : @[]];
+  }
 
-    std::vector<xmlNodePtr> nestedExamples;
-    nodesWithClass(node->children, "x", nestedExamples);
-    for (xmlNodePtr englishNode : nestedExamples) {
-      appendUnique(examples, text(englishNode, {"oalecd8e_chn"}), 3);
+  void renderRelation(DictionarySemanticRelationGroup *group, CGFloat indent) {
+    if (group.values.count == 0) return;
+    appendParagraph(group.title,
+                    [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
+                    mutedLabelColor(0.78), paragraph(4, 1, indent));
+    for (NSString *value in group.values) {
+      appendParagraph(value, [NSFont systemFontOfSize:12.5],
+                      NSColor.secondaryLabelColor,
+                      paragraph(0, 3, indent + 14));
     }
   }
 
-  void renderExample(xmlNodePtr node) {
+  void collectAndRenderRelations(
+      xmlNodePtr root, const std::set<std::string> &barriers,
+      NSMutableArray<DictionarySemanticRelationGroup *> *destination,
+      CGFloat indent, bool renderNow = true,
+      xmlNodePtr excludedNode = nullptr) {
+    std::vector<xmlNodePtr> relationNodes;
+    collectOwned(root->children, "xr-g", barriers, relationNodes);
+    for (xmlNodePtr node : relationNodes) {
+      if (node == excludedNode) continue;
+      DictionarySemanticRelationGroup *group = relation(node);
+      if (group.values.count == 0) continue;
+      [destination addObject:group];
+      if (renderNow) renderRelation(group, indent);
+    }
+  }
+
+  DictionarySemanticExample *renderExample(xmlNodePtr node) {
     xmlNodePtr englishNode = firstWithClass(node->children, "x");
     NSString *english = englishNode ? text(englishNode, {"oalecd8e_chn"}) : @"";
+    NSMutableArray<NSString *> *translations = [NSMutableArray array];
+    std::vector<xmlNodePtr> translationNodes;
+    nodesWithClass(node->children, "oalecd8e_chn", translationNodes);
     if (english.length > 0) {
       appendUnique(examples, english, 3);
       appendParagraph(english, italicFont(13), mutedLabelColor(0.72),
                       paragraph(1, 2, 18, 2));
       increment(@"examples");
     }
-    std::vector<xmlNodePtr> translations;
-    nodesWithClass(node->children, "oalecd8e_chn", translations);
-    for (xmlNodePtr translation : translations) {
-      NSString *value = text(translation);
-      if (value.length == 0) continue;
+    for (xmlNodePtr translationNode : translationNodes) {
+      NSString *value = text(translationNode);
+      appendUnique(translations, value, 8);
       appendParagraph(value, [NSFont systemFontOfSize:13], mutedLabelColor(0.68),
-                      paragraph(0, 5, 28, 2));
+                      paragraph(0, 4, 28, 2));
       increment(@"chinese");
     }
+    return [[DictionarySemanticExample alloc] initWithEnglish:english
+                                                  translations:translations];
   }
 
-  void renderCrossReference(xmlNodePtr node) {
-    NSString *title = @"参见";
-    std::string key = "reference";
-    if (firstWithClass(node->children, "symbols-synsym")) {
-      title = @"同义词";
-      key = "synonym";
-      increment(@"synonyms");
-    } else if (firstWithClass(node->children, "symbols-oppsym")) {
-      title = @"反义词";
-      key = "opposite";
+  DictionarySemanticSense *renderSense(xmlNodePtr node, bool subsense = false,
+                                       bool includeMetadata = true,
+                                       bool includeRelations = true) {
+    std::vector<xmlNodePtr> numberNodes;
+    collectOwned(node->children, "z_n", {"n-g", "sn-g"}, numberNodes);
+    NSString *number = numberNodes.empty() ? @"" : text(numberNodes.front());
+    NSArray<NSString *> *labels = includeMetadata ? ownedTextValues(
+        node, "label-g", {"n-g", "sn-g", "def-g", "x-g", "xr-g"}) : @[];
+    NSArray<NSString *> *grammar = includeMetadata ? ownedTextValues(
+        node, "g", {"n-g", "sn-g", "def-g", "x-g", "xr-g"}) : @[];
+    for (NSString *label in labels) {
+      appendParagraph(label, [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
+                      mutedLabelColor(0.72), paragraph(2, 1, subsense ? 28 : 14));
     }
-    appendSection(title, key);
-    NSString *value = text(node, {"symbols-synsym", "symbols-oppsym", "symbols-xrsym"});
-    appendParagraph(value, [NSFont systemFontOfSize:13 weight:NSFontWeightMedium],
-                    NSColor.linkColor, paragraph(0, 5, 18));
-  }
 
-  void renderDerivative(xmlNodePtr node) {
-    appendSection(@"派生词", "derived");
-    xmlNodePtr derivative = firstWithClass(node->children, "dr");
-    if (derivative) {
-      appendParagraph(text(derivative),
-                      [NSFont systemFontOfSize:16 weight:NSFontWeightSemibold],
-                      NSColor.labelColor, paragraph(2, 3, 0));
-      increment(@"derived");
-    }
-    xmlNodePtr top = firstWithClass(node->children, "top-g");
-    if (top) {
-      for (xmlNodePtr child = top->children; child; child = child->next) {
-        if (hasClass(child, "dr")) continue;
-        renderNode(child);
-      }
-    }
-    for (xmlNodePtr child = node->children; child; child = child->next) {
-      if (child == top) continue;
-      renderNode(child);
-    }
-  }
-
-  void renderNumberedSense(xmlNodePtr node) {
-    xmlNodePtr numberNode = firstWithClass(node->children, "z_n");
-    NSString *number = numberNode ? text(numberNode) : nil;
+    std::vector<xmlNodePtr> definitionNodes;
+    collectOwned(node->children, "def-g", {"n-g", "sn-g", "x-g", "xr-g"},
+                 definitionNodes);
+    NSString *definitionEnglish = @"";
+    NSMutableArray<NSString *> *definitionChinese = [NSMutableArray array];
     bool usedNumber = false;
-    for (xmlNodePtr child = node->children; child; child = child->next) {
-      if (hasClass(child, "z_n")) continue;
-      if (hasClass(child, "def-g")) {
-        renderDefinition(child, usedNumber ? nil : number);
-        usedNumber = true;
-      } else {
-        renderNode(child);
+    xmlNodePtr definingRelationNode = nullptr;
+    DictionarySemanticRelationGroup *definingRelation = nil;
+    if (definitionNodes.empty() && includeRelations) {
+      std::vector<xmlNodePtr> candidateRelations;
+      std::vector<xmlNodePtr> candidateExamples;
+      collectOwned(node->children, "xr-g", {"n-g", "sn-g", "def-g", "x-g"},
+                   candidateRelations);
+      collectOwned(node->children, "x-g", {"n-g", "sn-g", "xr-g"},
+                   candidateExamples);
+      if (!candidateRelations.empty() &&
+          (candidateExamples.empty() ||
+           firstInDocumentOrder(node->children, candidateRelations.front(),
+                                candidateExamples.front()) > 0)) {
+        DictionarySemanticRelationGroup *candidate = relation(candidateRelations.front());
+        if (![candidate.kind isEqualToString:@"synonymComparison"] &&
+            ![candidate.kind isEqualToString:@"antonymComparison"] &&
+            ![candidate.kind isEqualToString:@"collocationReference"] &&
+            candidate.values.count > 0) {
+          definingRelationNode = candidateRelations.front();
+          definingRelation = candidate;
+        }
       }
+    }
+    for (xmlNodePtr definitionNode : definitionNodes) {
+      NSString *english = text(definitionNode, {"oalecd8e_chn", "x-g", "xr-g"});
+      if (definitionEnglish.length == 0) definitionEnglish = english;
+      NSString *display = english;
+      if (!usedNumber && number.length > 0) {
+        display = [NSString stringWithFormat:@"%@  %@", number, english];
+        usedNumber = true;
+      }
+      appendParagraph(display, [NSFont systemFontOfSize:14], NSColor.labelColor,
+                      paragraph(3, 2, subsense ? 18 : 0, 3));
+      appendUnique(definitions, english, 5);
+      increment(@"definitions");
+      std::vector<xmlNodePtr> translations;
+      nodesWithClassExcluding(definitionNode->children, "oalecd8e_chn", "x-g",
+                              translations);
+      for (xmlNodePtr translation : translations) {
+        NSString *value = text(translation);
+        appendUnique(definitionChinese, value, 12);
+        appendUnique(definitions, value, 5);
+        appendParagraph(value, [NSFont systemFontOfSize:14], mutedLabelColor(0.78),
+                        paragraph(0, 5, subsense ? 36 : 18, 2));
+        increment(@"chinese");
+      }
+    }
+    if (definitionEnglish.length == 0 && definingRelation.values.count > 0) {
+      definitionEnglish = [definingRelation.values componentsJoinedByString:@"；"];
+      NSString *display = number.length > 0
+          ? [NSString stringWithFormat:@"%@  %@", number, definitionEnglish]
+          : definitionEnglish;
+      appendParagraph(display, [NSFont systemFontOfSize:14], NSColor.labelColor,
+                      paragraph(3, 2, subsense ? 18 : 0, 3));
+      appendUnique(definitions, definitionEnglish, 5);
+      increment(@"definitions");
+      usedNumber = true;
+    }
+    for (NSString *patternValue in grammar) {
+      appendParagraph(patternValue,
+                      [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
+                      mutedLabelColor(0.72), paragraph(1, 2, subsense ? 36 : 18));
+    }
+
+    NSMutableArray<DictionarySemanticExample *> *semanticExamples = [NSMutableArray array];
+    std::vector<xmlNodePtr> exampleNodes;
+    collectOwned(node->children, "x-g", {"n-g", "sn-g", "xr-g"}, exampleNodes);
+    for (xmlNodePtr exampleNode : exampleNodes) {
+      DictionarySemanticExample *example = renderExample(exampleNode);
+      if (example.english.length > 0 || example.translations.count > 0) {
+        [semanticExamples addObject:example];
+      }
+    }
+
+    NSMutableArray<DictionarySemanticRelationGroup *> *relations = [NSMutableArray array];
+    if (includeRelations) {
+      collectAndRenderRelations(node, {"n-g", "sn-g", "def-g", "x-g"},
+                                relations, subsense ? 36 : 18, false,
+                                definingRelationNode);
+    }
+
+    NSMutableArray<DictionarySemanticSense *> *subsenses = [NSMutableArray array];
+    std::vector<xmlNodePtr> subsenseNodes;
+    collectOwned(node->children, "sn-g", {"n-g"}, subsenseNodes);
+    for (xmlNodePtr subsenseNode : subsenseNodes) {
+      [subsenses addObject:renderSense(subsenseNode, true)];
+    }
+    for (DictionarySemanticRelationGroup *group in relations) {
+      renderRelation(group, subsense ? 36 : 18);
+    }
+    return [[DictionarySemanticSense alloc]
+        initWithNumber:number labels:labels definitionEnglish:definitionEnglish
+        definitionChinese:definitionChinese grammarPatterns:grammar
+        examples:semanticExamples relations:relations subsenses:subsenses];
+  }
+
+  DictionarySemanticDerivative *derivative(xmlNodePtr node,
+                                            NSString *sourcePartOfSpeech) {
+    xmlNodePtr wordNode = firstWithClass(node->children, "dr");
+    NSString *word = wordNode ? text(wordNode) : @"";
+    xmlNodePtr partNode = firstWithClass(node->children, "pos-g");
+    NSString *part = partNode ? text(partNode) : @"";
+    NSArray<NSString *> *pronunciations =
+        ownedTextValues(node, "ei-g", {"dr-g", "n-g"}, 4);
+    NSString *summary = text(node, {"dr", "pos-g", "ei-g", "de_c", "de_e"});
+    return [[DictionarySemanticDerivative alloc] initWithHeadword:word
+                                                      partOfSpeech:part
+                                                    pronunciations:pronunciations
+                                                           summary:summary
+                                                    sourceHeadword:headword
+                                                sourcePartOfSpeech:sourcePartOfSpeech];
+  }
+
+  NSString *derivativeTitle(DictionarySemanticDerivative *item) {
+    NSString *derivedPart = localizedPartOfSpeech(item.partOfSpeech);
+    if (item.sourcePartOfSpeech.length > 0 && item.sourceHeadword.length > 0) {
+      NSString *sourcePart = localizedPartOfSpeech(item.sourcePartOfSpeech);
+      NSString *kind = derivedPart.length > 0
+          ? [@"派生" stringByAppendingString:derivedPart] : @"派生词";
+      return [NSString stringWithFormat:@"%@（由%@ %@ 派生）", kind,
+                                        sourcePart, item.sourceHeadword];
+    }
+    return derivedPart.length > 0
+        ? [@"派生" stringByAppendingString:derivedPart] : @"派生词";
+  }
+
+  void renderDerivativeGroup(NSArray<DictionarySemanticDerivative *> *derivatives,
+                             bool entryLevel) {
+    if (derivatives.count == 0) return;
+    if (entryLevel) {
+      appendParagraph(@"派生词",
+                      [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
+                      NSColor.labelColor, paragraph(10, 3, 0));
+    }
+    increment(@"sections");
+    for (DictionarySemanticDerivative *item in derivatives) {
+      if (!entryLevel) {
+        appendParagraph(derivativeTitle(item),
+                        [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
+                        NSColor.secondaryLabelColor, paragraph(7, 2, 0));
+      }
+      appendParagraph(item.headword,
+                      [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
+                      NSColor.labelColor, paragraph(1, 1, 14));
+      NSMutableArray<NSString *> *meta = [NSMutableArray array];
+      if (item.partOfSpeech.length > 0) [meta addObject:item.partOfSpeech];
+      [meta addObjectsFromArray:item.pronunciations];
+      if (meta.count > 0) {
+        appendParagraph([meta componentsJoinedByString:@"  "],
+                        [NSFont systemFontOfSize:12.5], mutedLabelColor(0.68),
+                        paragraph(0, 2, 28));
+      }
+      appendParagraph(item.summary, [NSFont systemFontOfSize:12.5],
+                      mutedLabelColor(0.72), paragraph(0, 2, 28));
+      increment(@"derived");
     }
   }
 
-  void renderNode(xmlNodePtr node) {
-    if (!node || node->type != XML_ELEMENT_NODE || isInvisible(node)) return;
-    const auto nodeClasses = classes(node);
-    const std::string name = nodeName(node);
+  void collectAndRenderDerivatives(
+      xmlNodePtr root, const std::set<std::string> &barriers,
+      NSMutableArray<DictionarySemanticDerivative *> *destination,
+      bool renderAsGroup, NSString *sourcePartOfSpeech = @"") {
+    std::vector<xmlNodePtr> nodes;
+    collectOwned(root->children, "dr-g", barriers, nodes);
+    NSMutableArray<DictionarySemanticDerivative *> *items = [NSMutableArray array];
+    for (xmlNodePtr node : nodes) {
+      DictionarySemanticDerivative *item = derivative(node, sourcePartOfSpeech);
+      if (item.headword.length == 0 && item.summary.length == 0) continue;
+      [destination addObject:item];
+      [items addObject:item];
+    }
+    if (renderAsGroup) renderDerivativeGroup(items, sourcePartOfSpeech.length == 0);
+  }
 
-    if (setContains(nodeClasses, "h")) {
-      NSString *value = text(node);
-      if (headword.length == 0) headword = canonicalHeadword(value);
-      appendParagraph(value, [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold],
-                      NSColor.labelColor, paragraph(0, 5, 0, 2));
-      increment(@"headwords");
-      return;
-    }
-    if (setContains(nodeClasses, "infl")) {
-      appendParagraph(text(node), [NSFont systemFontOfSize:13], mutedLabelColor(0.55),
-                      paragraph(0, 3, 0));
-      return;
-    }
-    if (setContains(nodeClasses, "ei-g")) {
-      NSString *value = text(node);
-      appendUnique(phonetics, value, 4);
-      appendParagraph(value, [NSFont systemFontOfSize:14], mutedLabelColor(0.72),
-                      paragraph(0, 6, 0));
-      increment(@"phonetics");
-      return;
-    }
-    if (setContains(nodeClasses, "pos-g")) {
-      NSString *value = text(node);
-      appendUnique(partsOfSpeech, value, 8);
-      appendParagraph(value,
-                      [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
-                      NSColor.labelColor, paragraph(3, 5, 0));
+  void renderPartOfSpeech(xmlNodePtr section) {
+    std::vector<xmlNodePtr> partNodes;
+    collectOwned(section->children, "pos-g",
+                 {"n-g", "sn-g", "dr-g", "id-g", "pv-g"}, partNodes);
+    NSString *part = partNodes.empty() ? @"" : text(partNodes.front());
+    appendUnique(partsOfSpeech, part, 8);
+    if (part.length > 0) {
+      appendParagraph(part, [NSFont systemFontOfSize:16.5 weight:NSFontWeightSemibold],
+                      NSColor.labelColor, paragraph(10, 5, 0));
       increment(@"partsOfSpeech");
-      return;
     }
-    if (setContains(nodeClasses, "n-g")) {
-      renderNumberedSense(node);
-      return;
+    NSArray<NSString *> *pronunciations = ownedTextValues(
+        section, "ei-g", {"n-g", "sn-g", "dr-g", "id-g", "pv-g"}, 4);
+    NSArray<NSString *> *grammar = ownedTextValues(
+        section, "g", {"n-g", "sn-g", "dr-g", "id-g", "pv-g"}, 8);
+    for (NSString *value in pronunciations) {
+      appendParagraph(value, [NSFont systemFontOfSize:13], mutedLabelColor(0.68),
+                      paragraph(0, 3, 0));
     }
-    if (setContains(nodeClasses, "def-g")) {
-      renderDefinition(node);
-      return;
-    }
-    if (setContains(nodeClasses, "x-g")) {
-      renderExample(node);
-      return;
-    }
-    if (setContains(nodeClasses, "xr-g")) {
-      renderCrossReference(node);
-      return;
-    }
-    if (setContains(nodeClasses, "dr-g")) {
-      renderDerivative(node);
-      return;
-    }
-    if (setContains(nodeClasses, "derived")) {
-      appendSection(@"派生词", "derived");
-      appendParagraph(text(node, {"de_c", "de_e"}), [NSFont systemFontOfSize:13],
-                      mutedLabelColor(0.72), paragraph(0, 5, 18));
-      increment(@"derived");
-      return;
-    }
-    if (setContains(nodeClasses, "id-g") || setContains(nodeClasses, "ids-g")) {
-      appendSection(@"习语与搭配", "idioms");
-      renderChildren(node);
-      return;
-    }
-    if (setContains(nodeClasses, "pv-g") || setContains(nodeClasses, "pvs-g")) {
-      appendSection(@"短语与搭配", "phrases");
-      renderChildren(node);
-      return;
-    }
-    if (setContains(nodeClasses, "title") || setContains(nodeClasses, "subhead") ||
-        setContains(nodeClasses, "collsubhead") ||
-        setContains(nodeClasses, "langbanksubhead")) {
-      appendParagraph(text(node), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
-                      NSColor.labelColor, paragraph(8, 4, 0));
-      increment(@"sections");
-      return;
-    }
-    if (setContains(nodeClasses, "para") || setContains(nodeClasses, "cf")) {
-      appendParagraph(text(node), [NSFont systemFontOfSize:13], mutedLabelColor(0.72),
-                      paragraph(1, 4, 18));
-      return;
+    for (NSString *value in grammar) {
+      appendParagraph(value, [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold],
+                      mutedLabelColor(0.68), paragraph(0, 3, 0));
     }
 
-    if (name == "h1" || name == "h2" || name == "h3" || name == "h4" ||
-        name == "h5" || name == "h6") {
-      appendParagraph(text(node), [NSFont systemFontOfSize:14 weight:NSFontWeightSemibold],
-                      NSColor.labelColor, paragraph(8, 4, 0));
-      increment(@"sections");
-      return;
+    NSMutableArray<DictionarySemanticSense *> *senses = [NSMutableArray array];
+    std::vector<xmlNodePtr> senseNodes;
+    collectOwned(section->children, "n-g",
+                 {"p-g", "id-g", "ids-g", "pv-g", "pvs-g", "dr-g"},
+                 senseNodes);
+    for (xmlNodePtr senseNode : senseNodes) [senses addObject:renderSense(senseNode)];
+    std::vector<xmlNodePtr> looseDefinitions;
+    std::vector<xmlNodePtr> looseExamples;
+    const std::set<std::string> looseBarriers = {
+        "p-g", "n-g", "sn-g", "id-g", "ids-g", "pv-g", "pvs-g", "dr-g"};
+    collectOwned(section->children, "def-g", looseBarriers, looseDefinitions);
+    collectOwned(section->children, "x-g", looseBarriers, looseExamples);
+    if (!looseDefinitions.empty() || !looseExamples.empty()) {
+      [senses addObject:renderSense(section, false, false, false)];
     }
-    if (name == "li") {
-      NSString *value = text(node);
-      appendParagraph([NSString stringWithFormat:@"• %@", value],
-                      [NSFont systemFontOfSize:13], NSColor.labelColor,
-                      paragraph(1, 3, 18));
-      return;
-    }
-    if (name == "ul" || name == "ol") {
-      renderChildren(node);
-      return;
-    }
-    if (name == "p") {
-      appendParagraph(text(node), [NSFont systemFontOfSize:14], NSColor.labelColor,
-                      paragraph(2, 5, 0));
-      return;
-    }
-    if (name == "div" || name == "section" || name == "article") {
-      if (hasSemanticDescendant(node->children)) {
-        renderChildren(node);
-      } else {
-        appendParagraph(text(node), [NSFont systemFontOfSize:14], NSColor.labelColor,
-                        paragraph(2, 5, 0));
+
+    NSMutableArray<DictionarySemanticRelationGroup *> *relations = [NSMutableArray array];
+    collectAndRenderRelations(section,
+                              {"p-g", "n-g", "sn-g", "id-g", "ids-g",
+                               "pv-g", "pvs-g", "dr-g"},
+                              relations, 0);
+    struct AuxiliaryMapping {
+      const char *containerClass;
+      const char *itemClass;
+      NSString *title;
+    };
+    const AuxiliaryMapping auxiliary[] = {
+        {"ids-g", "id-g", @"习语与搭配"},
+        {"pvs-g", "pv-g", @"短语与搭配"},
+        {"coll-g", "cl", @"搭配"}};
+    for (const auto &item : auxiliary) {
+      std::vector<xmlNodePtr> nodes;
+      collectOwned(section->children, item.containerClass,
+                   {"p-g", "n-g", "sn-g", "dr-g"},
+                   nodes);
+      NSMutableArray<NSString *> *values = [NSMutableArray array];
+      for (xmlNodePtr node : nodes) {
+        std::vector<xmlNodePtr> itemNodes;
+        collectOwned(node->children, item.itemClass, {}, itemNodes);
+        if (itemNodes.empty()) appendUnique(values, text(node), 16);
+        for (xmlNodePtr itemNode : itemNodes) {
+          appendUnique(values, text(itemNode), 16);
+        }
       }
-      return;
+      if (values.count == 0) continue;
+      DictionarySemanticRelationGroup *group = [[DictionarySemanticRelationGroup alloc]
+          initWithKind:[NSString stringWithUTF8String:item.containerClass]
+          title:item.title values:values];
+      [relations addObject:group];
+      renderRelation(group, 0);
     }
-    renderChildren(node);
+
+    NSMutableArray<DictionarySemanticDerivative *> *derivatives = [NSMutableArray array];
+    collectAndRenderDerivatives(section, {"p-g", "n-g", "sn-g"}, derivatives,
+                                true, part);
+    [semanticSections addObject:[[DictionarySemanticPartOfSpeechSection alloc]
+        initWithPartOfSpeech:part pronunciations:pronunciations
+        grammarLabels:grammar senses:senses relations:relations
+        derivatives:derivatives]];
   }
 };
 }  // namespace

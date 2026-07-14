@@ -4,11 +4,11 @@ An offline, minimal macOS menu-bar dictionary backed by a real local MDict index
 
 ## Current status
 
-The current native AppKit application supports manual lookup, Oxford rich-text formatting, Accessibility selection lookup, and a one-shot Command+C fallback when an application does not expose its selection through Accessibility.
+The current native AppKit application supports manual lookup, Accessibility selection lookup, a one-shot Command+C fallback, native rich-text formatting, and duplicate-safe multi-source Markdown export. The fixed enabled dictionary order is Oxford Advanced Learner's 8, 21st Century Unabridged English-Chinese, New Oxford English, English-Chinese Medical Dictionary 2003, and The Affix Root of Vocabulary.
 
 ## Local configuration
 
-Copy `config/local.example.json` to `config/local.json` and set the local dictionary directory. The real config is ignored by Git. Dictionary and Obsidian files remain in place and are never copied or modified.
+Copy `config/local.example.json` to `config/local.json` and set the five MDX paths plus one independent SQLite index path for each dictionary. The existing Oxford keys remain `primaryDictionary` and `indexPath`; the four supplemental dictionaries use their named path/index pairs. The real config is ignored by Git. Dictionary and Obsidian files remain in place and are never copied or modified.
 
 ## Validation CLI
 

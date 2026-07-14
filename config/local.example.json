@@ -1,5 +1,13 @@
 {
   "dictionaryDirectory": "/absolute/path/to/your/dictionaries",
-  "primaryDictionary": "/absolute/path/to/dictionary.mdx",
-  "indexPath": "/absolute/path/to/generated-index.sqlite"
+  "primaryDictionary": "/absolute/path/to/oxford-oald8.mdx",
+  "indexPath": "/absolute/path/to/indexes/oxford-oald8.sqlite",
+  "century21Dictionary": "/absolute/path/to/21st-century.mdx",
+  "century21IndexPath": "/absolute/path/to/indexes/21st-century.sqlite",
+  "newOxfordDictionary": "/absolute/path/to/new-oxford.mdx",
+  "newOxfordIndexPath": "/absolute/path/to/indexes/new-oxford.sqlite",
+  "medicalDictionary": "/absolute/path/to/medical-en-zh-2003.mdx",
+  "medicalIndexPath": "/absolute/path/to/indexes/medical-en-zh-2003.sqlite",
+  "affixRootDictionary": "/absolute/path/to/affix-root-a.mdx",
+  "affixRootIndexPath": "/absolute/path/to/indexes/affix-root-a.sqlite"
 }

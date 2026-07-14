@@ -30,6 +30,7 @@ struct ObsidianNoteStoreSmoke {
         )
         let promptBlock = ObsidianNoteStore.markdownBlock(for: promptEntry, newline: "\n")
         guard promptBlock.hasPrefix("## prompt\n"),
+              promptBlock.contains("### Oxford\n"),
               !promptBlock.contains("<!-- LocalDictionary:") else {
             throw SmokeError.assertionFailed("new format has no marker")
         }
@@ -203,7 +204,83 @@ struct ObsidianNoteStoreSmoke {
                                                               examples: [],
                                                               source: "Oxford"))
         }
-        print("ObsidianNoteStoreSmoke: 26/26 passed")
+
+        let multiSourceEntry = StructuredDictionaryEntry(
+            headword: "algorithm",
+            sources: [
+                StructuredDictionarySource(
+                    phonetics: ["/ˈælɡərɪðəm/"],
+                    partsOfSpeech: ["noun"],
+                    definitions: ["算法"],
+                    examples: ["The algorithm completed."],
+                    source: "牛津高阶 8"
+                ),
+                StructuredDictionarySource(
+                    phonetics: [],
+                    partsOfSpeech: ["n."],
+                    definitions: ["计算机演算规则系统"],
+                    examples: [],
+                    source: "21世纪大英汉词典",
+                    partOfSpeechSections: [
+                        StructuredPartOfSpeechSection(
+                            partOfSpeech: "n.",
+                            senses: [
+                                StructuredPartOfSpeechSense(
+                                    definition: "计算机演算规则系统",
+                                    labels: [],
+                                    examples: [],
+                                    number: 1,
+                                    indentationLevel: 0
+                                )
+                            ]
+                        )
+                    ]
+                ),
+                StructuredDictionarySource(
+                    phonetics: [],
+                    partsOfSpeech: [],
+                    definitions: ["algo- + -rithm"],
+                    examples: [],
+                    source: "词根词缀"
+                ),
+                StructuredDictionarySource(
+                    phonetics: [],
+                    partsOfSpeech: [],
+                    definitions: [],
+                    examples: [],
+                    source: "空来源"
+                )
+            ]
+        )
+        let multiBlock = ObsidianNoteStore.markdownBlock(for: multiSourceEntry, newline: "\n")
+        let sectionOrder = ["### 牛津高阶 8", "### 21世纪大英汉词典", "### 词根词缀"]
+        var previousLocation = multiBlock.startIndex
+        for section in sectionOrder {
+            guard let range = multiBlock.range(of: section,
+                                               range: previousLocation..<multiBlock.endIndex) else {
+                throw SmokeError.assertionFailed("multi-source section order")
+            }
+            previousLocation = range.upperBound
+        }
+        guard multiBlock.contains("- 构词："),
+              multiBlock.contains("- n.\n  1. 计算机演算规则系统"),
+              !multiBlock.contains("- 词性：n."),
+              !multiBlock.contains("### 空来源"),
+              !multiBlock.contains("- 来源："),
+              !multiBlock.contains("<!-- LocalDictionary:") else {
+            throw SmokeError.assertionFailed("multi-source markdown format")
+        }
+        let multiURL = workingDirectory.appendingPathComponent("multi-source.md")
+        try Data().write(to: multiURL, options: .atomic)
+        guard try restartedStore.save(multiSourceEntry, to: multiURL) == .saved,
+              try restartedStore.save(multiSourceEntry, to: multiURL) == .alreadySaved else {
+            throw SmokeError.assertionFailed("multi-source duplicate save")
+        }
+        let savedMulti = try String(contentsOf: multiURL, encoding: .utf8)
+        guard exactHeadingCount("algorithm", in: savedMulti) == 1 else {
+            throw SmokeError.assertionFailed("multi-source heading duplicate")
+        }
+        print("ObsidianNoteStoreSmoke: 30/30 passed")
     }
 
     private static func exactHeadingCount(_ headword: String, in content: String) -> Int {

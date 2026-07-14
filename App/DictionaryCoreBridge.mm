@@ -29,12 +29,24 @@ NSString *string(const std::string &value) {
 
 - (instancetype)initWithDictionaryPath:(NSString *)dictionaryPath
                              indexPath:(NSString *)indexPath {
+  return [self initWithDictionaryPath:dictionaryPath
+                            indexPath:indexPath
+                   cacheMaximumBytes:8 * 1024 * 1024
+                 cacheMaximumEntries:64];
+}
+
+- (instancetype)initWithDictionaryPath:(NSString *)dictionaryPath
+                              indexPath:(NSString *)indexPath
+                     cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
+                   cacheMaximumEntries:(NSUInteger)cacheMaximumEntries {
   self = [super init];
   if (self) {
     _storage = new DictionaryBridgeStorage();
     try {
       _storage->core = std::make_unique<localdict::SQLiteDictionaryCore>(
-          utf8(dictionaryPath), utf8(indexPath));
+          utf8(dictionaryPath), utf8(indexPath),
+          static_cast<size_t>(cacheMaximumBytes),
+          static_cast<size_t>(cacheMaximumEntries));
       _storage->core->open(false);
     } catch (const std::exception &exception) {
       _storage->error = exception.what();

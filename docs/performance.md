@@ -67,3 +67,28 @@ The OS may satisfy later reads from its filesystem cache, so disk-read counters 
 The core caches complete returned records with two simultaneous limits: 64 entries and 8 MiB. Oversized records are not cached; least-recently-used records are evicted until both limits are satisfied. The 20-word test retained 19 records totaling 321,761 bytes.
 
 These numbers still exclude AppKit, Accessibility and WebKit because phase 3 has not started.
+
+## Fixed five-dictionary application (Apple M2, arm64 Release)
+
+The existing Oxford index was reused without rebuilding. The four enabled supplemental dictionaries were indexed independently with the existing native core; each index is reopened read-only while its MDX metadata is unchanged.
+
+| Dictionary | Rows | SQLite index | First index build |
+|---|---:|---:|---:|
+| 21st Century Unabridged English-Chinese | 483,723 | 41,529,344 bytes (39.61 MiB) | 656.330 ms |
+| New Oxford English | 91,325 | 6,811,648 bytes (6.50 MiB) | 117.577 ms |
+| English-Chinese Medical Dictionary 2003 | 56,367 | 4,689,920 bytes (4.47 MiB) | 75.460 ms |
+| The Affix Root of Vocabulary | 30,131 | 2,121,728 bytes (2.02 MiB) | 40.328 ms |
+
+All indexes are machine-local under `.build/index/` and are ignored by Git. The four supplemental cores each use an independent cache limited to 32 records and 2 MiB; Oxford retains its existing 64-record, 8 MiB limit.
+
+Seventeen real exact-query cases exercised all five sources. Across the five sequential core lookups, mean total core latency was 8.160 ms per query and the slowest combined query was 18.417 ms. Per-source hit-query measurements were:
+
+| Source | Hits | Mean hit latency | Slowest hit |
+|---|---:|---:|---:|
+| Oxford Advanced Learner's 8 | 11/17 | 1.275 ms | 2.332 ms |
+| 21st Century Unabridged English-Chinese | 16/17 | 2.699 ms | 11.177 ms |
+| New Oxford English | 10/17 | 2.147 ms | 4.225 ms |
+| English-Chinese Medical Dictionary 2003 | 9/17 | 1.096 ms | 2.210 ms |
+| The Affix Root of Vocabulary | 8/17 | 0.942 ms | 1.947 ms |
+
+The Release menu-bar process was sampled five times while idle: CPU remained at 0.0%, RSS remained at 64,032 KiB (62.53 MiB), and `proc_pid_rusage` reported a 13.67 MiB physical footprint. A second five-second idle interval showed no increase in user/system CPU time and no disk writes. These are local warm-filesystem observations, not universal hardware guarantees. There is no dictionary-directory polling or background query loop.

@@ -1,5 +1,96 @@
 import Foundation
 
+struct StructuredPartOfSpeechSense: Codable, Equatable {
+    let definition: String
+    let labels: [String]
+    let examples: [String]
+    let number: Int
+    let indentationLevel: Int
+}
+
+struct StructuredPartOfSpeechSection: Codable, Equatable {
+    let partOfSpeech: String
+    let senses: [StructuredPartOfSpeechSense]
+}
+
+struct StructuredSemanticExample: Codable, Equatable {
+    let english: String
+    let translations: [String]
+}
+
+struct StructuredSemanticRelationGroup: Codable, Equatable {
+    let kind: String
+    let title: String
+    let values: [String]
+}
+
+struct StructuredSemanticSense: Codable, Equatable {
+    let number: String
+    let labels: [String]
+    let definitionEnglish: String
+    let definitionChinese: [String]
+    let grammarPatterns: [String]
+    let examples: [StructuredSemanticExample]
+    let relations: [StructuredSemanticRelationGroup]
+    let subsenses: [StructuredSemanticSense]
+}
+
+struct StructuredSemanticDerivative: Codable, Equatable {
+    let headword: String
+    let partOfSpeech: String
+    let pronunciations: [String]
+    let summary: String
+    let sourceHeadword: String
+    let sourcePartOfSpeech: String
+}
+
+struct StructuredSemanticPartOfSpeechSection: Codable, Equatable {
+    let partOfSpeech: String
+    let pronunciations: [String]
+    let grammarLabels: [String]
+    let senses: [StructuredSemanticSense]
+    let relations: [StructuredSemanticRelationGroup]
+    let derivatives: [StructuredSemanticDerivative]
+}
+
+struct StructuredSemanticEntry: Codable, Equatable {
+    let inflections: [String]
+    let partOfSpeechSections: [StructuredSemanticPartOfSpeechSection]
+    let entryLevelRelations: [StructuredSemanticRelationGroup]
+    let derivatives: [StructuredSemanticDerivative]
+
+    var hasContent: Bool {
+        !inflections.isEmpty || !partOfSpeechSections.isEmpty ||
+            !entryLevelRelations.isEmpty || !derivatives.isEmpty
+    }
+}
+
+struct StructuredDictionarySource: Codable, Equatable {
+    let phonetics: [String]
+    let partsOfSpeech: [String]
+    let definitions: [String]
+    let examples: [String]
+    let source: String
+    let partOfSpeechSections: [StructuredPartOfSpeechSection]?
+    let semanticEntry: StructuredSemanticEntry?
+
+    init(phonetics: [String],
+         partsOfSpeech: [String],
+         definitions: [String],
+         examples: [String],
+         source: String,
+         partOfSpeechSections: [StructuredPartOfSpeechSection]? = nil,
+         semanticEntry: StructuredSemanticEntry? = nil) {
+        self.phonetics = phonetics
+        self.partsOfSpeech = partsOfSpeech
+        self.definitions = definitions
+        self.examples = examples
+        self.source = source
+        self.partOfSpeechSections = partOfSpeechSections
+        self.semanticEntry = semanticEntry
+    }
+}
+
 struct StructuredDictionaryEntry: Codable, Equatable {
     let headword: String
     let phonetics: [String]
@@ -7,6 +98,65 @@ struct StructuredDictionaryEntry: Codable, Equatable {
     let definitions: [String]
     let examples: [String]
     let source: String
+    let partOfSpeechSections: [StructuredPartOfSpeechSection]?
+    let semanticEntry: StructuredSemanticEntry?
+    let additionalSources: [StructuredDictionarySource]?
+
+    init(headword: String,
+         phonetics: [String],
+         partsOfSpeech: [String],
+         definitions: [String],
+         examples: [String],
+         source: String,
+         partOfSpeechSections: [StructuredPartOfSpeechSection]? = nil,
+         semanticEntry: StructuredSemanticEntry? = nil,
+         additionalSources: [StructuredDictionarySource]? = nil) {
+        self.headword = headword
+        self.phonetics = phonetics
+        self.partsOfSpeech = partsOfSpeech
+        self.definitions = definitions
+        self.examples = examples
+        self.source = source
+        self.partOfSpeechSections = partOfSpeechSections
+        self.semanticEntry = semanticEntry
+        self.additionalSources = additionalSources
+    }
+
+    init(headword: String, sources: [StructuredDictionarySource]) {
+        let first = sources.first ?? StructuredDictionarySource(
+            phonetics: [],
+            partsOfSpeech: [],
+            definitions: [],
+            examples: [],
+            source: ""
+        )
+        self.init(headword: headword,
+                  phonetics: first.phonetics,
+                  partsOfSpeech: first.partsOfSpeech,
+                  definitions: first.definitions,
+                  examples: first.examples,
+                  source: first.source,
+                  partOfSpeechSections: first.partOfSpeechSections,
+                  semanticEntry: first.semanticEntry,
+                  additionalSources: sources.count > 1 ? Array(sources.dropFirst()) : nil)
+    }
+
+    var sources: [StructuredDictionarySource] {
+        var values: [StructuredDictionarySource] = []
+        if !Self.singleLine(source).isEmpty {
+            values.append(StructuredDictionarySource(
+                phonetics: phonetics,
+                partsOfSpeech: partsOfSpeech,
+                definitions: definitions,
+                examples: examples,
+                source: source,
+                partOfSpeechSections: partOfSpeechSections,
+                semanticEntry: semanticEntry
+            ))
+        }
+        values.append(contentsOf: additionalSources ?? [])
+        return values
+    }
 
     var isValid: Bool {
         !Self.singleLine(headword).isEmpty
@@ -202,32 +352,240 @@ final class ObsidianNoteStore {
     static func markdownBlock(for entry: StructuredDictionaryEntry,
                               newline: String) -> String {
         let headword = singleLine(entry.headword)
-        let phonetics = uniqueNonempty(entry.phonetics, maximum: 4)
-        let partsOfSpeech = uniqueNonempty(entry.partsOfSpeech, maximum: 8)
-        let definitions = uniqueNonempty(entry.definitions, maximum: 5)
-        let examples = uniqueNonempty(entry.examples, maximum: 3)
-        let source = singleLine(entry.source)
-
         var lines = ["## \(headword)", ""]
-        if !phonetics.isEmpty {
-            lines.append("- 音标：\(phonetics.joined(separator: "；"))")
+        for sourceEntry in entry.sources {
+            let source = singleLine(sourceEntry.source)
+            guard !source.isEmpty else { continue }
+            let phonetics = uniqueNonempty(sourceEntry.phonetics, maximum: 4)
+            let partsOfSpeech = uniqueNonempty(sourceEntry.partsOfSpeech, maximum: 8)
+            let definitions = uniqueNonempty(sourceEntry.definitions, maximum: 5)
+            let examples = uniqueNonempty(sourceEntry.examples, maximum: 3)
+            let groupedSections = limitedPartOfSpeechSections(
+                sourceEntry.partOfSpeechSections ?? [],
+                maximumSenses: 5
+            )
+            let semanticEntry = sourceEntry.semanticEntry
+            guard !phonetics.isEmpty || !partsOfSpeech.isEmpty ||
+                    !definitions.isEmpty || !examples.isEmpty ||
+                    !groupedSections.isEmpty || semanticEntry?.hasContent == true else { continue }
+
+            lines.append("### \(source)")
+            lines.append("")
+            if !phonetics.isEmpty {
+                lines.append("- 音标：\(phonetics.joined(separator: "；"))")
+            }
+            if let semanticEntry, semanticEntry.hasContent {
+                appendSemanticEntry(semanticEntry, to: &lines)
+            } else if groupedSections.isEmpty {
+                if !partsOfSpeech.isEmpty {
+                    lines.append("- 词性：\(partsOfSpeech.joined(separator: ", "))")
+                }
+                if !definitions.isEmpty {
+                    let definitionLabel = source == "词根词缀" ? "构词" :
+                        (source == "英中医学辞海" ? "定义" : "释义")
+                    lines.append("- \(definitionLabel)：")
+                    lines.append(contentsOf: definitions.map { "  - \($0)" })
+                }
+                if !examples.isEmpty {
+                    lines.append("- 例句：")
+                    lines.append(contentsOf: examples.map { "  - \($0)" })
+                }
+            } else {
+                for section in groupedSections {
+                    let partOfSpeech = singleLine(section.partOfSpeech)
+                    lines.append(partOfSpeech.isEmpty ? "- 释义：" : "- \(partOfSpeech)")
+                    for sense in section.senses {
+                        let definition = singleLine(sense.definition)
+                        guard !definition.isEmpty else { continue }
+                        let indentation = String(repeating: "  ",
+                                                 count: max(1, sense.indentationLevel + 1))
+                        if sense.number > 0 {
+                            lines.append("\(indentation)\(sense.number). \(definition)")
+                        } else {
+                            lines.append("\(indentation)- \(definition)")
+                        }
+                    }
+                }
+            }
+            lines.append("")
         }
-        if !partsOfSpeech.isEmpty {
-            lines.append("- 词性：\(partsOfSpeech.joined(separator: ", "))")
-        }
-        if !definitions.isEmpty {
-            lines.append("- 释义：")
-            lines.append(contentsOf: definitions.map { "  - \($0)" })
-        }
-        if !examples.isEmpty {
-            lines.append("- 例句：")
-            lines.append(contentsOf: examples.map { "  - \($0)" })
-        }
-        if !source.isEmpty {
-            lines.append("- 来源：\(source)")
-        }
-        lines.append("")
         return lines.joined(separator: newline)
+    }
+
+    private static func appendSemanticEntry(_ entry: StructuredSemanticEntry,
+                                            to lines: inout [String]) {
+        let inflections = uniqueNonempty(entry.inflections, maximum: 12)
+        if !inflections.isEmpty {
+            lines.append("- 词形：\(inflections.joined(separator: "；"))")
+        }
+        var remainingSenses = 5
+        var remainingExamples = 3
+        for section in entry.partOfSpeechSections where remainingSenses > 0 {
+            let partOfSpeech = singleLine(section.partOfSpeech)
+            if !partOfSpeech.isEmpty {
+                lines.append("")
+                lines.append("#### \(partOfSpeech)")
+                lines.append("")
+            }
+            let grammarLabels = uniqueNonempty(section.grammarLabels, maximum: 6)
+            if !grammarLabels.isEmpty {
+                lines.append("- 语法：\(grammarLabels.joined(separator: "；"))")
+            }
+            for sense in section.senses where remainingSenses > 0 {
+                appendSemanticSense(sense, to: &lines, indentation: "",
+                                    remainingSenses: &remainingSenses,
+                                    remainingExamples: &remainingExamples)
+            }
+            appendSemanticRelations(section.relations, to: &lines, indentation: "- ")
+            appendSemanticDerivatives(section.derivatives, entryLevel: false, to: &lines)
+        }
+        appendSemanticDerivatives(entry.derivatives, entryLevel: true, to: &lines)
+        appendSemanticRelations(entry.entryLevelRelations, to: &lines, indentation: "- ")
+    }
+
+    private static func appendSemanticSense(_ sense: StructuredSemanticSense,
+                                            to lines: inout [String],
+                                            indentation: String,
+                                            remainingSenses: inout Int,
+                                            remainingExamples: inout Int) {
+        guard remainingSenses > 0 else { return }
+        let english = singleLine(sense.definitionEnglish)
+        let chinese = uniqueNonempty(sense.definitionChinese, maximum: 4)
+        guard !english.isEmpty || !chinese.isEmpty else { return }
+        remainingSenses -= 1
+        let number = singleLine(sense.number)
+        let lead = number.isEmpty ? "-" : (number.hasSuffix(".") ? number : "\(number).")
+        let primary = english.isEmpty ? chinese[0] : english
+        lines.append("\(indentation)\(lead) \(primary)")
+        let remainingChinese = english.isEmpty ? Array(chinese.dropFirst()) : chinese
+        for value in remainingChinese {
+            lines.append("\(indentation)   - 中文释义：\(value)")
+        }
+        let labels = uniqueNonempty(sense.labels, maximum: 4)
+        if !labels.isEmpty {
+            lines.append("\(indentation)   - 标签：\(labels.joined(separator: "；"))")
+        }
+        let grammar = uniqueNonempty(sense.grammarPatterns, maximum: 4)
+        if !grammar.isEmpty {
+            lines.append("\(indentation)   - 语法：\(grammar.joined(separator: "；"))")
+        }
+        for example in sense.examples where remainingExamples > 0 {
+            let englishExample = singleLine(example.english)
+            guard !englishExample.isEmpty else { continue }
+            lines.append("\(indentation)   - 例句：\(englishExample)")
+            if let translation = uniqueNonempty(example.translations, maximum: 1).first {
+                lines.append("\(indentation)     - \(translation)")
+            }
+            remainingExamples -= 1
+        }
+        appendSemanticRelations(sense.relations, to: &lines,
+                                indentation: "\(indentation)   - ")
+        for subsense in sense.subsenses where remainingSenses > 0 {
+            appendSemanticSense(subsense, to: &lines,
+                                indentation: indentation + "   ",
+                                remainingSenses: &remainingSenses,
+                                remainingExamples: &remainingExamples)
+        }
+    }
+
+    private static func appendSemanticRelations(
+        _ relations: [StructuredSemanticRelationGroup],
+        to lines: inout [String],
+        indentation: String
+    ) {
+        for relation in relations {
+            let title = singleLine(relation.title)
+            let values = uniqueNonempty(relation.values, maximum: 5)
+            guard !title.isEmpty, !values.isEmpty else { continue }
+            lines.append("\(indentation)\(title)：\(values.joined(separator: "；"))")
+        }
+    }
+
+    private static func appendSemanticDerivatives(
+        _ derivatives: [StructuredSemanticDerivative],
+        entryLevel: Bool,
+        to lines: inout [String]
+    ) {
+        let usable = derivatives.filter { !singleLine($0.headword).isEmpty }
+        guard !usable.isEmpty else { return }
+        if entryLevel {
+            lines.append("")
+            lines.append("#### 派生词")
+            lines.append("")
+        }
+        for derivative in usable.prefix(8) {
+            if !entryLevel {
+                lines.append("")
+                lines.append("##### \(derivativeHeading(derivative))")
+                lines.append("")
+            }
+            var metadata: [String] = []
+            let part = singleLine(derivative.partOfSpeech)
+            if !part.isEmpty { metadata.append(part) }
+            metadata.append(contentsOf: uniqueNonempty(derivative.pronunciations, maximum: 2))
+            let suffix = metadata.isEmpty ? "" : "：" + metadata.joined(separator: "；")
+            lines.append("- \(singleLine(derivative.headword))\(suffix)")
+            let summary = singleLine(derivative.summary)
+            if !summary.isEmpty { lines.append("  - \(summary)") }
+        }
+    }
+
+    private static func derivativeHeading(
+        _ derivative: StructuredSemanticDerivative
+    ) -> String {
+        let derivedPart = localizedPartOfSpeech(derivative.partOfSpeech)
+        let sourcePart = localizedPartOfSpeech(derivative.sourcePartOfSpeech)
+        let kind = derivedPart.isEmpty ? "派生词" : "派生\(derivedPart)"
+        let sourceWord = singleLine(derivative.sourceHeadword)
+        guard !sourcePart.isEmpty, !sourceWord.isEmpty else { return kind }
+        return "\(kind)（由\(sourcePart) \(sourceWord) 派生）"
+    }
+
+    private static func localizedPartOfSpeech(_ source: String) -> String {
+        let value = singleLine(source).lowercased()
+        let mappings = [
+            ("adjective", "形容词"), ("adverb", "副词"),
+            ("noun", "名词"), ("verb", "动词"),
+            ("pronoun", "代词"), ("preposition", "介词"),
+            ("conjunction", "连词"), ("determiner", "限定词")
+        ]
+        if let mapped = mappings.first(where: { value.contains($0.0) })?.1 {
+            return mapped
+        }
+        if value.hasPrefix("adj.") || value == "adj" { return "形容词" }
+        if value.hasPrefix("adv.") || value == "adv" { return "副词" }
+        if value.hasPrefix("n.") || value == "n" { return "名词" }
+        if value.hasPrefix("v.") || value == "v" { return "动词" }
+        return singleLine(source)
+    }
+
+    private static func limitedPartOfSpeechSections(
+        _ sections: [StructuredPartOfSpeechSection],
+        maximumSenses: Int
+    ) -> [StructuredPartOfSpeechSection] {
+        guard maximumSenses > 0 else { return [] }
+        var selected = Array(repeating: [StructuredPartOfSpeechSense](),
+                             count: sections.count)
+        var remaining = maximumSenses
+        var senseIndex = 0
+        while remaining > 0 {
+            var added = false
+            for index in sections.indices where sections[index].senses.count > senseIndex {
+                selected[index].append(sections[index].senses[senseIndex])
+                remaining -= 1
+                added = true
+                if remaining == 0 { break }
+            }
+            if !added { break }
+            senseIndex += 1
+        }
+        return sections.indices.compactMap { index in
+            guard !selected[index].isEmpty else { return nil }
+            return StructuredPartOfSpeechSection(
+                partOfSpeech: sections[index].partOfSpeech,
+                senses: selected[index]
+            )
+        }
     }
 
     private func validatedTarget(_ candidateURL: URL, requireWritable: Bool) throws -> URL {
