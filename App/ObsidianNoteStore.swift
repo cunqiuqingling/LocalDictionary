@@ -174,6 +174,82 @@ enum ObsidianNoteSaveResult: Equatable {
     case alreadySaved
 }
 
+struct AIExplanationNoteSection: Equatable {
+    let headword: String
+    let markdown: String
+
+    var isValid: Bool {
+        !StructuredDictionaryEntry.singleLine(headword).isEmpty &&
+            markdown.hasPrefix("### AI 双语解释")
+    }
+}
+
+struct VocabularyNoteSaveContent: Equatable {
+    let headword: String
+    let localEntry: StructuredDictionaryEntry?
+    let aiSection: AIExplanationNoteSection?
+
+    var isValid: Bool {
+        let expected = Self.normalized(headword)
+        guard !expected.isEmpty else { return false }
+        let localMatches = localEntry.map {
+            $0.isValid && Self.normalized($0.headword) == expected
+        } ?? false
+        let aiMatches = aiSection.map {
+            $0.isValid && Self.normalized($0.headword) == expected
+        } ?? false
+        return localMatches || aiMatches
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+            .lowercased(with: Locale(identifier: "en_US_POSIX"))
+    }
+}
+
+enum VocabularyNoteSaveResult: Equatable {
+    case localSaved
+    case localAlreadySaved
+    case savedWithAI
+    case aiAddedToExistingEntry
+    case aiAlreadyPresent
+}
+
+struct SentenceNoteSaveContent: Equatable {
+    let sourceText: String
+    let title: String
+    let aiSectionMarkdown: String?
+    let glossarySectionMarkdown: String?
+
+    var isValid: Bool {
+        !Self.normalizedSentence(sourceText).isEmpty &&
+            (validAISection || validGlossarySection)
+    }
+
+    var validAISection: Bool {
+        aiSectionMarkdown?.hasPrefix("### AI 解析") == true
+    }
+
+    var validGlossarySection: Bool {
+        glossarySectionMarkdown?.hasPrefix("### 本地词语参考") == true
+    }
+
+    static func normalizedSentence(_ value: String) -> String {
+        value.split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+    }
+}
+
+enum SentenceNoteSaveResult: Equatable {
+    case saved
+    case alreadySaved
+    case aiAddedToExistingSentence
+    case aiAlreadyPresent
+}
+
 enum ObsidianNoteStoreError: LocalizedError, Equatable {
     case targetNotSelected
     case invalidTarget
@@ -242,6 +318,118 @@ final class ObsidianNoteStore {
     func save(_ entry: StructuredDictionaryEntry) throws -> ObsidianNoteSaveResult {
         guard let targetURL else { throw ObsidianNoteStoreError.targetNotSelected }
         return try save(entry, to: targetURL)
+    }
+
+    func save(_ content: VocabularyNoteSaveContent) throws -> VocabularyNoteSaveResult {
+        guard let targetURL else { throw ObsidianNoteStoreError.targetNotSelected }
+        return try save(content, to: targetURL)
+    }
+
+    func contains(sentence sourceText: String) throws -> Bool {
+        guard let targetURL else { throw ObsidianNoteStoreError.targetNotSelected }
+        let target = try validatedTarget(targetURL, requireWritable: false)
+        let data = try readData(from: target)
+        guard let content = String(data: data, encoding: .utf8) else {
+            throw ObsidianNoteStoreError.targetNotUTF8
+        }
+        return Self.containsSentence(in: content, sourceText: sourceText)
+    }
+
+    func save(_ content: SentenceNoteSaveContent) throws -> SentenceNoteSaveResult {
+        guard let targetURL else { throw ObsidianNoteStoreError.targetNotSelected }
+        return try save(content, to: targetURL)
+    }
+
+    func save(_ content: SentenceNoteSaveContent,
+              to candidateURL: URL) throws -> SentenceNoteSaveResult {
+        guard content.isValid else { throw ObsidianNoteStoreError.invalidEntry }
+        let target = try validatedTarget(candidateURL, requireWritable: true)
+        let originalData = try readData(from: target)
+        guard let original = String(data: originalData, encoding: .utf8) else {
+            throw ObsidianNoteStoreError.targetNotUTF8
+        }
+        let newline = Self.newlineSequence(in: original)
+        let updated: String
+        let result: SentenceNoteSaveResult
+        if let range = Self.sentenceEntryRange(in: original,
+                                               sourceText: content.sourceText) {
+            let existingEntry = String(original[range])
+            if content.validAISection {
+                guard !Self.containsSentenceAISection(in: existingEntry) else {
+                    return .aiAlreadyPresent
+                }
+                let ai = Self.markdown(content.aiSectionMarkdown!, using: newline)
+                var replacement = Self.insertingSentenceAISection(ai,
+                                                                   into: existingEntry,
+                                                                   newline: newline)
+                if range.upperBound < original.endIndex {
+                    replacement = Self.ensuringBlankLineSuffix(replacement, newline: newline)
+                }
+                var mutable = original
+                mutable.replaceSubrange(range, with: replacement)
+                updated = mutable
+                result = .aiAddedToExistingSentence
+            } else {
+                return .alreadySaved
+            }
+        } else {
+            let block = Self.sentenceMarkdownBlock(for: content, newline: newline)
+            updated = Self.appendingMarkdownBlock(block, to: original, newline: newline)
+            result = .saved
+        }
+        try writeAtomically(updated, to: target)
+        return result
+    }
+
+    func save(_ content: VocabularyNoteSaveContent,
+              to candidateURL: URL) throws -> VocabularyNoteSaveResult {
+        guard content.isValid else { throw ObsidianNoteStoreError.invalidEntry }
+        if content.aiSection == nil, let localEntry = content.localEntry {
+            switch try save(localEntry, to: candidateURL) {
+            case .saved: return .localSaved
+            case .alreadySaved: return .localAlreadySaved
+            }
+        }
+        guard let aiSection = content.aiSection,
+              aiSection.isValid,
+              Self.normalizedHeadword(aiSection.headword) ==
+                Self.normalizedHeadword(content.headword) else {
+            throw ObsidianNoteStoreError.invalidEntry
+        }
+
+        let target = try validatedTarget(candidateURL, requireWritable: true)
+        let originalData = try readData(from: target)
+        guard let original = String(data: originalData, encoding: .utf8) else {
+            throw ObsidianNoteStoreError.targetNotUTF8
+        }
+        let newline = Self.newlineSequence(in: original)
+        let updated: String
+        let result: VocabularyNoteSaveResult
+        if let range = Self.entryRange(in: original, headword: content.headword) {
+            let existingEntry = String(original[range])
+            guard !Self.containsAISection(in: existingEntry) else {
+                return .aiAlreadyPresent
+            }
+            let aiMarkdown = Self.markdown(aiSection.markdown, using: newline)
+            var replacement = Self.appendingMarkdownBlock(aiMarkdown,
+                                                           to: existingEntry,
+                                                           newline: newline)
+            if range.upperBound < original.endIndex {
+                replacement = Self.ensuringBlankLineSuffix(replacement, newline: newline)
+            }
+            var mutable = original
+            mutable.replaceSubrange(range, with: replacement)
+            updated = mutable
+            result = .aiAddedToExistingEntry
+        } else {
+            let entryBlock = Self.combinedMarkdownBlock(for: content,
+                                                        aiSection: aiSection,
+                                                        newline: newline)
+            updated = Self.appendingMarkdownBlock(entryBlock, to: original, newline: newline)
+            result = .savedWithAI
+        }
+        try writeAtomically(updated, to: target)
+        return result
     }
 
     func save(_ entry: StructuredDictionaryEntry,
@@ -318,6 +506,90 @@ final class ObsidianNoteStore {
         return .saved
     }
 
+    func createOrSave(_ content: VocabularyNoteSaveContent,
+                      at candidateURL: URL) throws -> VocabularyNoteSaveResult {
+        guard content.isValid else { throw ObsidianNoteStoreError.invalidEntry }
+        if content.aiSection == nil, let localEntry = content.localEntry {
+            switch try createOrSave(localEntry, at: candidateURL) {
+            case .saved: return .localSaved
+            case .alreadySaved: return .localAlreadySaved
+            }
+        }
+        guard let aiSection = content.aiSection,
+              aiSection.isValid,
+              Self.normalizedHeadword(aiSection.headword) ==
+                Self.normalizedHeadword(content.headword) else {
+            throw ObsidianNoteStoreError.invalidEntry
+        }
+        let target = candidateURL.standardizedFileURL
+        guard target.isFileURL, target.pathExtension.lowercased() == "md" else {
+            throw ObsidianNoteStoreError.invalidTarget
+        }
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: target.path, isDirectory: &isDirectory) {
+            guard !isDirectory.boolValue else { throw ObsidianNoteStoreError.invalidTarget }
+            return try save(content, to: target)
+        }
+        let parent = target.deletingLastPathComponent()
+        guard fileManager.fileExists(atPath: parent.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              fileManager.isWritableFile(atPath: parent.path) else {
+            throw ObsidianNoteStoreError.targetNotWritable
+        }
+        let block = Self.combinedMarkdownBlock(for: content,
+                                               aiSection: aiSection,
+                                               newline: "\n")
+        guard let data = block.data(using: .utf8) else {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+        let temporary = parent.appendingPathComponent(
+            ".\(target.lastPathComponent).localdictionary-\(UUID().uuidString).tmp"
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+        do {
+            try data.write(to: temporary, options: .atomic)
+            try fileManager.linkItem(at: temporary, to: target)
+        } catch {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+        return .savedWithAI
+    }
+
+    func createOrSave(_ content: SentenceNoteSaveContent,
+                      at candidateURL: URL) throws -> SentenceNoteSaveResult {
+        guard content.isValid else { throw ObsidianNoteStoreError.invalidEntry }
+        let target = candidateURL.standardizedFileURL
+        guard target.isFileURL, target.pathExtension.lowercased() == "md" else {
+            throw ObsidianNoteStoreError.invalidTarget
+        }
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: target.path, isDirectory: &isDirectory) {
+            guard !isDirectory.boolValue else { throw ObsidianNoteStoreError.invalidTarget }
+            return try save(content, to: target)
+        }
+        let parent = target.deletingLastPathComponent()
+        guard fileManager.fileExists(atPath: parent.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              fileManager.isWritableFile(atPath: parent.path) else {
+            throw ObsidianNoteStoreError.targetNotWritable
+        }
+        let block = Self.sentenceMarkdownBlock(for: content, newline: "\n")
+        guard let data = block.data(using: .utf8) else {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+        let temporary = parent.appendingPathComponent(
+            ".\(target.lastPathComponent).localdictionary-\(UUID().uuidString).tmp"
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+        do {
+            try data.write(to: temporary, options: .atomic)
+            try fileManager.linkItem(at: temporary, to: target)
+        } catch {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+        return .saved
+    }
+
     static func containsEntry(in content: String, headword: String) -> Bool {
         let expected = normalizedHeadword(headword)
         guard !expected.isEmpty else { return false }
@@ -343,6 +615,10 @@ final class ObsidianNoteStore {
             if normalizedHeadword(heading) == expected { return true }
         }
         return false
+    }
+
+    static func containsSentence(in content: String, sourceText: String) -> Bool {
+        sentenceEntryRange(in: content, sourceText: sourceText) != nil
     }
 
     static func legacyMarker(for headword: String) -> String {
@@ -612,6 +888,278 @@ final class ObsidianNoteStore {
         }
     }
 
+    private func writeAtomically(_ content: String, to url: URL) throws {
+        guard let data = content.data(using: .utf8) else {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw ObsidianNoteStoreError.writeFailed
+        }
+    }
+
+    private static func combinedMarkdownBlock(
+        for content: VocabularyNoteSaveContent,
+        aiSection: AIExplanationNoteSection,
+        newline: String
+    ) -> String {
+        let localBlock: String
+        if let entry = content.localEntry, entry.isValid {
+            localBlock = markdownBlock(for: entry, newline: newline)
+        } else {
+            localBlock = "## \(singleLine(content.headword))"
+        }
+        return appendingMarkdownBlock(markdown(aiSection.markdown, using: newline),
+                                      to: localBlock,
+                                      newline: newline)
+    }
+
+    private static func sentenceMarkdownBlock(for content: SentenceNoteSaveContent,
+                                              newline: String) -> String {
+        var lines = [
+            "## \(singleLine(content.title))",
+            "",
+            "### 原句",
+            ""
+        ]
+        lines.append(contentsOf: blockquoteLines(for: content.sourceText))
+        var block = lines.joined(separator: newline)
+        if content.validAISection, let ai = content.aiSectionMarkdown {
+            block = appendingMarkdownBlock(markdown(ai, using: newline),
+                                            to: block,
+                                            newline: newline)
+        }
+        if content.validGlossarySection, let glossary = content.glossarySectionMarkdown {
+            block = appendingMarkdownBlock(markdown(glossary, using: newline),
+                                            to: block,
+                                            newline: newline)
+        }
+        return block
+    }
+
+    private static func blockquoteLines(for sourceText: String) -> [String] {
+        let sentence = SentenceNoteSaveContent.normalizedSentence(sourceText)
+        guard !sentence.isEmpty else { return [] }
+        let maximumLineLength = 76
+        var lines: [String] = []
+        var current = ""
+        for word in sentence.split(separator: " ").map(String.init) {
+            if current.isEmpty {
+                current = word
+            } else if current.count + 1 + word.count <= maximumLineLength {
+                current += " " + word
+            } else {
+                lines.append("> " + current)
+                current = word
+            }
+        }
+        if !current.isEmpty { lines.append("> " + current) }
+        return lines
+    }
+
+    private static func insertingSentenceAISection(_ aiSection: String,
+                                                   into entry: String,
+                                                   newline: String) -> String {
+        if let localSectionStart = levelThreeSectionStart(in: entry,
+                                                          title: "本地词语参考") {
+            let prefix = String(entry[..<localSectionStart])
+            let suffix = String(entry[localSectionStart...])
+            let withAI = appendingMarkdownBlock(aiSection, to: prefix, newline: newline)
+            return ensuringBlankLineSuffix(withAI, newline: newline) + suffix
+        }
+        return appendingMarkdownBlock(aiSection, to: entry, newline: newline)
+    }
+
+    private static func markdown(_ value: String, using newline: String) -> String {
+        let normalized = value.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        return newline == "\n" ? normalized
+            : normalized.replacingOccurrences(of: "\n", with: newline)
+    }
+
+    private static func appendingMarkdownBlock(_ block: String,
+                                               to content: String,
+                                               newline: String) -> String {
+        guard !content.isEmpty else { return block }
+        if content.hasSuffix(newline + newline) { return content + block }
+        if content.hasSuffix(newline) { return content + newline + block }
+        return content + newline + newline + block
+    }
+
+    private static func ensuringBlankLineSuffix(_ content: String,
+                                                newline: String) -> String {
+        if content.hasSuffix(newline + newline) { return content }
+        if content.hasSuffix(newline) { return content + newline }
+        return content + newline + newline
+    }
+
+    private struct MarkdownLine {
+        let content: String
+        let start: String.Index
+    }
+
+    private static func entryRange(in content: String,
+                                   headword: String) -> Range<String.Index>? {
+        let expected = normalizedHeadword(headword)
+        guard !expected.isEmpty else { return nil }
+        var activeFence: (character: Character, length: Int)?
+        var entryStart: String.Index?
+        for line in markdownLines(in: content) {
+            if let fence = activeFence {
+                if isClosingFence(line.content, fence: fence) { activeFence = nil }
+                continue
+            }
+            if let fence = openingFence(in: line.content) {
+                activeFence = fence
+                continue
+            }
+            guard let heading = levelTwoHeading(in: line.content) else { continue }
+            if let entryStart {
+                return entryStart..<line.start
+            }
+            if normalizedHeadword(heading) == expected {
+                entryStart = line.start
+            }
+        }
+        guard let entryStart else { return nil }
+        return entryStart..<content.endIndex
+    }
+
+    private static func sentenceEntryRange(in content: String,
+                                           sourceText: String) -> Range<String.Index>? {
+        let expected = SentenceNoteSaveContent.normalizedSentence(sourceText)
+        guard !expected.isEmpty else { return nil }
+        let lines = markdownLines(in: content)
+        var activeFence: (character: Character, length: Int)?
+        var candidateStart: String.Index?
+        for line in lines {
+            if let fence = activeFence {
+                if isClosingFence(line.content, fence: fence) { activeFence = nil }
+                continue
+            }
+            if let fence = openingFence(in: line.content) {
+                activeFence = fence
+                continue
+            }
+            guard levelTwoHeading(in: line.content) != nil else { continue }
+            if let start = candidateStart {
+                let range = start..<line.start
+                if sentenceSourceText(in: String(content[range])) == expected {
+                    return range
+                }
+            }
+            candidateStart = line.start
+        }
+        guard let start = candidateStart else { return nil }
+        let range = start..<content.endIndex
+        return sentenceSourceText(in: String(content[range])) == expected ? range : nil
+    }
+
+    private static func sentenceSourceText(in entry: String) -> String? {
+        var activeFence: (character: Character, length: Int)?
+        var waitingForQuote = false
+        var quoteParts: [String] = []
+        for line in markdownLines(in: entry) {
+            if let fence = activeFence {
+                if isClosingFence(line.content, fence: fence) { activeFence = nil }
+                continue
+            }
+            if let fence = openingFence(in: line.content) {
+                activeFence = fence
+                continue
+            }
+            if !waitingForQuote {
+                if levelThreeHeading(in: line.content)?
+                    .precomposedStringWithCanonicalMapping == "原句" {
+                    waitingForQuote = true
+                }
+                continue
+            }
+            if line.content.trimmingCharacters(in: .whitespaces).isEmpty {
+                if quoteParts.isEmpty { continue }
+                break
+            }
+            guard let quote = blockquoteContent(in: line.content) else { break }
+            quoteParts.append(quote)
+        }
+        guard !quoteParts.isEmpty else { return nil }
+        return SentenceNoteSaveContent.normalizedSentence(quoteParts.joined(separator: " "))
+    }
+
+    private static func blockquoteContent(in line: String) -> String? {
+        guard let content = contentAfterMarkdownIndent(in: line),
+              content.first == ">" else { return nil }
+        return content.dropFirst()
+            .drop(while: { $0 == " " || $0 == "\t" })
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func containsSentenceAISection(in entry: String) -> Bool {
+        levelThreeSectionStart(in: entry, title: "AI 解析") != nil
+    }
+
+    private static func levelThreeSectionStart(in content: String,
+                                               title: String) -> String.Index? {
+        var activeFence: (character: Character, length: Int)?
+        let expected = title.precomposedStringWithCanonicalMapping
+        for line in markdownLines(in: content) {
+            if let fence = activeFence {
+                if isClosingFence(line.content, fence: fence) { activeFence = nil }
+                continue
+            }
+            if let fence = openingFence(in: line.content) {
+                activeFence = fence
+                continue
+            }
+            if levelThreeHeading(in: line.content)?
+                .precomposedStringWithCanonicalMapping == expected {
+                return line.start
+            }
+        }
+        return nil
+    }
+
+    private static func containsAISection(in entry: String) -> Bool {
+        var activeFence: (character: Character, length: Int)?
+        for line in markdownLines(in: entry) {
+            if let fence = activeFence {
+                if isClosingFence(line.content, fence: fence) { activeFence = nil }
+                continue
+            }
+            if let fence = openingFence(in: line.content) {
+                activeFence = fence
+                continue
+            }
+            guard let heading = levelThreeHeading(in: line.content) else { continue }
+            if heading.precomposedStringWithCanonicalMapping == "AI 双语解释" { return true }
+        }
+        return false
+    }
+
+    private static func markdownLines(in content: String) -> [MarkdownLine] {
+        var lines: [MarkdownLine] = []
+        var cursor = content.startIndex
+        let scalars = content.unicodeScalars
+        while cursor < content.endIndex {
+            let start = cursor
+            while cursor < content.endIndex,
+                  scalars[cursor].value != 0x0A, scalars[cursor].value != 0x0D {
+                cursor = scalars.index(after: cursor)
+            }
+            lines.append(MarkdownLine(content: String(content[start..<cursor]), start: start))
+            if cursor < content.endIndex, scalars[cursor].value == 0x0D {
+                cursor = scalars.index(after: cursor)
+                if cursor < content.endIndex, scalars[cursor].value == 0x0A {
+                    cursor = scalars.index(after: cursor)
+                }
+            } else if cursor < content.endIndex {
+                cursor = scalars.index(after: cursor)
+            }
+        }
+        return lines
+    }
+
     private static func uniqueNonempty(_ values: [String], maximum: Int) -> [String] {
         var result: [String] = []
         for value in values {
@@ -654,6 +1202,17 @@ final class ObsidianNoteStore {
         guard let content = contentAfterMarkdownIndent(in: line),
               content.hasPrefix("##") else { return nil }
         let afterHashes = content.dropFirst(2)
+        guard let first = afterHashes.first,
+              first == " " || first == "\t" else { return nil }
+        let heading = afterHashes.drop(while: { $0 == " " || $0 == "\t" })
+            .trimmingCharacters(in: .whitespaces)
+        return heading.isEmpty ? nil : heading
+    }
+
+    private static func levelThreeHeading(in line: String) -> String? {
+        guard let content = contentAfterMarkdownIndent(in: line),
+              content.hasPrefix("###") else { return nil }
+        let afterHashes = content.dropFirst(3)
         guard let first = afterHashes.first,
               first == " " || first == "\t" else { return nil }
         let heading = afterHashes.drop(while: { $0 == " " || $0 == "\t" })

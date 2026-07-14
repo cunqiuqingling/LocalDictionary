@@ -9,6 +9,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let permissionPrompter = AccessibilityPermissionPrompter()
     private let noteStore = ObsidianNoteStore()
     private let notePicker = ObsidianNotePicker()
+    private let aiConfigurationStore = AIConfigurationStore()
+    private let aiKeychainStore = AIKeychainStore()
+    private let aiCache = AIExplanationCache()
+    private lazy var aiService = AIExplanationService(
+        configurationStore: aiConfigurationStore,
+        keychain: aiKeychainStore,
+        cache: aiCache
+    )
+    private lazy var aiSettingsController = AISettingsWindowController(
+        configurationStore: aiConfigurationStore,
+        keychain: aiKeychainStore,
+        service: aiService,
+        onConfigurationChanged: { [weak self] in
+            self?.panelController?.aiConfigurationDidChange()
+        }
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -73,17 +89,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleCapturedText(_ rawText: String,
                                     with panelController: DictionaryPanelController) {
-        switch SelectedTextCleaner.clean(rawText) {
-        case .value(let query):
-            debugLog("selection_nonempty=true characters=\(query.count)")
-            let found = panelController.showAndLookup(query)
+        let classification = QueryIntentClassifier.classify(rawText)
+        switch classification.intent {
+        case .word, .phrase, .sentence:
+            debugLog("selection_nonempty=true characters=\(classification.normalizedText.count)")
+            let found = panelController.showAndLookup(classification.normalizedText)
             debugLog("lookup_found=\(found)")
-        case .tooLong(let count):
-            debugLog("selection_nonempty=true characters=\(count) too_long=true")
-            panelController.showSelectionTooLongMessage()
-        case .empty:
+        case .textTooLong where classification.rejectionReason == .empty:
             debugLog("selection_nonempty=false")
             panelController.show()
+        case .textTooLong:
+            debugLog("selection_nonempty=true characters=\(classification.normalizedText.count) too_long=true")
+            panelController.showSelectionTooLongMessage()
         }
     }
 
@@ -168,6 +185,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                     keyEquivalent: "")
         selectNote.target = self
         menu.addItem(selectNote)
+        let aiSettings = NSMenuItem(title: "AI 服务设置…",
+                                    action: #selector(showAISettings),
+                                    keyEquivalent: "")
+        aiSettings.target = self
+        menu.addItem(aiSettings)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "退出", action: #selector(quitApplication), keyEquivalent: "q")
         quit.target = self
@@ -197,12 +219,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panelController = DictionaryPanelController(core: core,
                                                         supplementalDictionaries: supplementalDictionaries,
                                                         noteStore: noteStore,
-                                                        notePicker: notePicker)
+                                                        notePicker: notePicker,
+                                                        aiService: aiService,
+                                                        openAISettings: { [weak self] in
+                                                            self?.showAISettings()
+                                                        })
         } catch {
             let core = DictionaryCoreBridge(dictionaryPath: "", indexPath: "")
             panelController = DictionaryPanelController(core: core,
                                                         noteStore: noteStore,
-                                                        notePicker: notePicker)
+                                                        notePicker: notePicker,
+                                                        aiService: aiService,
+                                                        openAISettings: { [weak self] in
+                                                            self?.showAISettings()
+                                                        })
         }
     }
 
@@ -211,5 +241,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard notePicker.chooseTarget(for: noteStore) else { return }
         panelController?.targetNoteDidChange()
     }
+    @objc private func showAISettings() { aiSettingsController.show() }
     @objc private func quitApplication() { NSApp.terminate(nil) }
 }

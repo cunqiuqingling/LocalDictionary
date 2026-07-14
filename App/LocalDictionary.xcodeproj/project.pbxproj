@@ -36,6 +36,21 @@
 		A1000000000000000000001B /* ObsidianNotePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000021 /* ObsidianNotePicker.swift */; };
 		A1000000000000000000001C /* SupplementalEntryFormatters.mm in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000022 /* SupplementalEntryFormatters.mm */; };
 		A1000000000000000000001D /* DictionarySemanticModel.mm in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000024 /* DictionarySemanticModel.mm */; };
+		A1000000000000000000001E /* AIProviderConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000026 /* AIProviderConfiguration.swift */; };
+		A1000000000000000000001F /* AIKeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000027 /* AIKeychainStore.swift */; };
+		A10000000000000000000020 /* AIProviderClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000028 /* AIProviderClient.swift */; };
+		A10000000000000000000021 /* AIExplanationCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000029 /* AIExplanationCache.swift */; };
+		A10000000000000000000022 /* AIExplanationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002A /* AIExplanationService.swift */; };
+		A10000000000000000000023 /* AIEntryFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002B /* AIEntryFormatter.swift */; };
+		A10000000000000000000024 /* AISettingsWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002C /* AISettingsWindowController.swift */; };
+		A10000000000000000000025 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002D /* Security.framework */; };
+		A10000000000000000000026 /* AIExplanationMarkdownFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002E /* AIExplanationMarkdownFormatter.swift */; };
+		A10000000000000000000027 /* QueryIntentClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000002F /* QueryIntentClassifier.swift */; };
+		A10000000000000000000028 /* AISentenceAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000030 /* AISentenceAnalysis.swift */; };
+		A10000000000000000000029 /* AISentenceEntryFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000031 /* AISentenceEntryFormatter.swift */; };
+		A1000000000000000000002A /* LocalSentenceGlossaryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000032 /* LocalSentenceGlossaryService.swift */; };
+		A1000000000000000000002B /* LocalSentenceGlossaryFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000033 /* LocalSentenceGlossaryFormatter.swift */; };
+		A1000000000000000000002C /* SentenceAnalysisMarkdownFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000034 /* SentenceAnalysisMarkdownFormatter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -76,6 +91,21 @@
 		B10000000000000000000023 /* SupplementalEntryFormatters.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SupplementalEntryFormatters.h; sourceTree = "<group>"; };
 		B10000000000000000000024 /* DictionarySemanticModel.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DictionarySemanticModel.mm; sourceTree = "<group>"; };
 		B10000000000000000000025 /* DictionarySemanticModel.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DictionarySemanticModel.h; sourceTree = "<group>"; };
+		B10000000000000000000026 /* AIProviderConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIProviderConfiguration.swift; sourceTree = "<group>"; };
+		B10000000000000000000027 /* AIKeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIKeychainStore.swift; sourceTree = "<group>"; };
+		B10000000000000000000028 /* AIProviderClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIProviderClient.swift; sourceTree = "<group>"; };
+		B10000000000000000000029 /* AIExplanationCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIExplanationCache.swift; sourceTree = "<group>"; };
+		B1000000000000000000002A /* AIExplanationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIExplanationService.swift; sourceTree = "<group>"; };
+		B1000000000000000000002B /* AIEntryFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIEntryFormatter.swift; sourceTree = "<group>"; };
+		B1000000000000000000002C /* AISettingsWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISettingsWindowController.swift; sourceTree = "<group>"; };
+		B1000000000000000000002D /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		B1000000000000000000002E /* AIExplanationMarkdownFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIExplanationMarkdownFormatter.swift; sourceTree = "<group>"; };
+		B1000000000000000000002F /* QueryIntentClassifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueryIntentClassifier.swift; sourceTree = "<group>"; };
+		B10000000000000000000030 /* AISentenceAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISentenceAnalysis.swift; sourceTree = "<group>"; };
+		B10000000000000000000031 /* AISentenceEntryFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AISentenceEntryFormatter.swift; sourceTree = "<group>"; };
+		B10000000000000000000032 /* LocalSentenceGlossaryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSentenceGlossaryService.swift; sourceTree = "<group>"; };
+		B10000000000000000000033 /* LocalSentenceGlossaryFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSentenceGlossaryFormatter.swift; sourceTree = "<group>"; };
+		B10000000000000000000034 /* SentenceAnalysisMarkdownFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SentenceAnalysisMarkdownFormatter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -88,6 +118,7 @@
 				A10000000000000000000014 /* libsqlite3.tbd in Frameworks */,
 				A10000000000000000000016 /* libxml2.tbd in Frameworks */,
 				A10000000000000000000018 /* ApplicationServices.framework in Frameworks */,
+				A10000000000000000000025 /* Security.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -122,6 +153,20 @@
 				B10000000000000000000023 /* SupplementalEntryFormatters.h */,
 				B10000000000000000000024 /* DictionarySemanticModel.mm */,
 				B10000000000000000000025 /* DictionarySemanticModel.h */,
+				B10000000000000000000026 /* AIProviderConfiguration.swift */,
+				B10000000000000000000027 /* AIKeychainStore.swift */,
+				B10000000000000000000028 /* AIProviderClient.swift */,
+				B10000000000000000000029 /* AIExplanationCache.swift */,
+				B1000000000000000000002A /* AIExplanationService.swift */,
+				B1000000000000000000002B /* AIEntryFormatter.swift */,
+				B1000000000000000000002C /* AISettingsWindowController.swift */,
+				B1000000000000000000002E /* AIExplanationMarkdownFormatter.swift */,
+				B1000000000000000000002F /* QueryIntentClassifier.swift */,
+				B10000000000000000000030 /* AISentenceAnalysis.swift */,
+				B10000000000000000000031 /* AISentenceEntryFormatter.swift */,
+				B10000000000000000000032 /* LocalSentenceGlossaryService.swift */,
+				B10000000000000000000033 /* LocalSentenceGlossaryFormatter.swift */,
+				B10000000000000000000034 /* SentenceAnalysisMarkdownFormatter.swift */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
 				B10000000000000000000020 /* ObsidianNoteStore.swift */,
@@ -166,6 +211,7 @@
 				B10000000000000000000014 /* libsqlite3.tbd */,
 				B1000000000000000000001C /* libxml2.tbd */,
 				B1000000000000000000001E /* ApplicationServices.framework */,
+				B1000000000000000000002D /* Security.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -261,6 +307,20 @@
 				A10000000000000000000019 /* ClipboardSelectionFallback.swift in Sources */,
 				A1000000000000000000001A /* ObsidianNoteStore.swift in Sources */,
 				A1000000000000000000001B /* ObsidianNotePicker.swift in Sources */,
+				A1000000000000000000001E /* AIProviderConfiguration.swift in Sources */,
+				A1000000000000000000001F /* AIKeychainStore.swift in Sources */,
+				A10000000000000000000020 /* AIProviderClient.swift in Sources */,
+				A10000000000000000000021 /* AIExplanationCache.swift in Sources */,
+				A10000000000000000000022 /* AIExplanationService.swift in Sources */,
+				A10000000000000000000023 /* AIEntryFormatter.swift in Sources */,
+				A10000000000000000000024 /* AISettingsWindowController.swift in Sources */,
+				A10000000000000000000026 /* AIExplanationMarkdownFormatter.swift in Sources */,
+				A10000000000000000000027 /* QueryIntentClassifier.swift in Sources */,
+				A10000000000000000000028 /* AISentenceAnalysis.swift in Sources */,
+				A10000000000000000000029 /* AISentenceEntryFormatter.swift in Sources */,
+				A1000000000000000000002A /* LocalSentenceGlossaryService.swift in Sources */,
+				A1000000000000000000002B /* LocalSentenceGlossaryFormatter.swift in Sources */,
+				A1000000000000000000002C /* SentenceAnalysisMarkdownFormatter.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,

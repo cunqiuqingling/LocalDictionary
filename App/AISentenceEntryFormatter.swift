@@ -1,0 +1,174 @@
+import AppKit
+
+final class AISentenceEntryFormatter {
+    func placeholder(sourceText: String, status: String? = nil) -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        appendTitle(to: output)
+        appendSectionTitle("原句", to: output)
+        append(sourceText + "\n", font: .systemFont(ofSize: 14), color: .labelColor,
+               spacingAfter: status == nil ? 4 : 12, to: output)
+        if let status, !status.isEmpty {
+            append(status + "\n", font: .systemFont(ofSize: 13),
+                   color: .secondaryLabelColor, spacingBefore: 4, to: output)
+        }
+        return output
+    }
+
+    func format(_ presentation: AISentenceAnalysisPresentation) -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        append("AI 句子解析\n", font: .systemFont(ofSize: 15, weight: .semibold),
+               color: .systemPurple, spacingBefore: 6, spacingAfter: 2, to: output)
+        append("由 \(safeProviderName(presentation.providerDisplayName)) · \(presentation.model) 生成\n",
+               font: .systemFont(ofSize: 11), color: .secondaryLabelColor,
+               spacingAfter: 12, to: output)
+
+        let analysis = presentation.analysis
+        appendSectionTitle("原句", to: output)
+        append(analysis.sourceText + "\n", font: .systemFont(ofSize: 14),
+               color: .labelColor, spacingAfter: 8, to: output)
+
+        appendSectionTitle("自然翻译", to: output)
+        append(analysis.translationZH + "\n", font: .systemFont(ofSize: 15, weight: .medium),
+               color: .labelColor, spacingAfter: 8, to: output)
+
+        let core = analysis.coreStructure
+        if !core.subject.isEmpty || !core.predicate.isEmpty ||
+            !core.objectOrComplement.isEmpty || !core.structureSummaryZH.isEmpty ||
+            !analysis.sentenceType.isEmpty {
+            appendSectionTitle("句子主干", to: output)
+            appendMetadata("句型", value: analysis.sentenceType, to: output)
+            appendMetadata("主语", value: core.subject, to: output)
+            appendMetadata("谓语", value: core.predicate, to: output)
+            appendMetadata("宾语或补语", value: core.objectOrComplement, to: output)
+            appendMetadata("基本结构", value: core.structureSummaryZH, to: output)
+        }
+
+        if !analysis.clauses.isEmpty {
+            appendSectionTitle("分句与修饰关系", to: output)
+            for clause in analysis.clauses {
+                append("• \(clauseTitle(clause.type))：\(clause.text)\n",
+                       font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor,
+                       firstLineIndent: 0, headIndent: 14, spacingBefore: 2, spacingAfter: 2,
+                       to: output)
+                appendIndented(clause.functionZH, to: output)
+                if !clause.translationZH.isEmpty {
+                    appendIndented("中文：\(clause.translationZH)", to: output)
+                }
+            }
+        }
+
+        if !analysis.grammarPoints.isEmpty {
+            appendSectionTitle("重点语法", to: output)
+            for point in analysis.grammarPoints {
+                append("• \(point.grammarName)\n", font: .systemFont(ofSize: 13, weight: .semibold),
+                       color: .labelColor, headIndent: 14, spacingBefore: 2, spacingAfter: 1,
+                       to: output)
+                if !point.fragment.isEmpty { appendIndented("原文：\(point.fragment)", to: output) }
+                appendIndented(point.explanationZH, to: output)
+                if !point.pattern.isEmpty { appendIndented("句型：\(point.pattern)", to: output) }
+            }
+        }
+
+        if !analysis.collocations.isEmpty {
+            appendSectionTitle("搭配与句型", to: output)
+            for item in analysis.collocations {
+                append("• \(item.expression)：\(item.meaningZH)\n",
+                       font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor,
+                       headIndent: 14, spacingBefore: 2, spacingAfter: 1, to: output)
+                if !item.pattern.isEmpty { appendIndented("句型：\(item.pattern)", to: output) }
+                if !item.exampleEN.isEmpty { appendExample(item.exampleEN, to: output) }
+                if !item.exampleZH.isEmpty { appendIndented(item.exampleZH, to: output) }
+            }
+        }
+
+        if !analysis.difficultExpressions.isEmpty {
+            appendSectionTitle("难点表达", to: output)
+            for item in analysis.difficultExpressions {
+                append("• \(item.expression)：\(item.meaningZH)\n",
+                       font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor,
+                       headIndent: 14, spacingBefore: 2, spacingAfter: 1, to: output)
+                if !item.usageZH.isEmpty { appendIndented(item.usageZH, to: output) }
+            }
+        }
+
+        if !analysis.paraphraseEN.isEmpty {
+            appendSectionTitle("简化改写", to: output)
+            append(analysis.paraphraseEN + "\n", font: italicFont(ofSize: 14),
+                   color: .labelColor, spacingAfter: 8, to: output)
+        }
+        if !analysis.learningNoteZH.isEmpty {
+            appendSectionTitle("学习提示", to: output)
+            append(analysis.learningNoteZH + "\n", font: .systemFont(ofSize: 13),
+                   color: .secondaryLabelColor, spacingAfter: 6, to: output)
+        }
+        return output
+    }
+
+    private func appendTitle(to output: NSMutableAttributedString) {
+        append("AI 句子解析\n", font: .systemFont(ofSize: 15, weight: .semibold),
+               color: .systemPurple, spacingBefore: 6, spacingAfter: 10, to: output)
+    }
+
+    private func appendSectionTitle(_ title: String, to output: NSMutableAttributedString) {
+        append(title + "\n", font: .systemFont(ofSize: 14, weight: .semibold),
+               color: .labelColor, spacingBefore: 9, spacingAfter: 4, to: output)
+    }
+
+    private func appendMetadata(_ title: String, value: String,
+                                to output: NSMutableAttributedString) {
+        guard !value.isEmpty else { return }
+        append("• \(title)：\(value)\n", font: .systemFont(ofSize: 13),
+               color: .labelColor, headIndent: 14, spacingAfter: 2, to: output)
+    }
+
+    private func appendIndented(_ value: String, to output: NSMutableAttributedString) {
+        guard !value.isEmpty else { return }
+        append(value + "\n", font: .systemFont(ofSize: 12.5),
+               color: .secondaryLabelColor, firstLineIndent: 16, headIndent: 16,
+               spacingAfter: 2, to: output)
+    }
+
+    private func appendExample(_ value: String, to output: NSMutableAttributedString) {
+        append(value + "\n", font: italicFont(ofSize: 12.5),
+               color: .secondaryLabelColor, firstLineIndent: 16, headIndent: 16,
+               spacingAfter: 1, to: output)
+    }
+
+    private func clauseTitle(_ type: String) -> String {
+        switch type {
+        case "main": return "主句"
+        case "subordinate": return "从句"
+        case "relative": return "定语从句"
+        case "participial": return "分词结构"
+        default: return "其他成分"
+        }
+    }
+
+    private func safeProviderName(_ value: String) -> String {
+        let clean = SentenceTextNormalizer.normalize(value)
+        let lower = clean.lowercased()
+        return lower.contains("oxford") || clean.contains("牛津") || clean.isEmpty
+            ? "自定义 AI 服务" : clean
+    }
+
+    private func append(_ string: String, font: NSFont, color: NSColor,
+                        firstLineIndent: CGFloat = 0, headIndent: CGFloat = 0,
+                        spacingBefore: CGFloat = 0, spacingAfter: CGFloat = 0,
+                        to output: NSMutableAttributedString) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.firstLineHeadIndent = firstLineIndent
+        paragraph.headIndent = headIndent
+        paragraph.paragraphSpacingBefore = spacingBefore
+        paragraph.paragraphSpacing = spacingAfter
+        paragraph.lineBreakMode = .byWordWrapping
+        output.append(NSAttributedString(string: string, attributes: [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: paragraph
+        ]))
+    }
+
+    private func italicFont(ofSize size: CGFloat) -> NSFont {
+        NSFontManager.shared.convert(.systemFont(ofSize: size), toHaveTrait: .italicFontMask)
+    }
+}

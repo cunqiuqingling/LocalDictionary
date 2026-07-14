@@ -1,4 +1,5 @@
 import AppKit
+import ObjectiveC
 
 struct SupplementalDictionaryRuntime {
     let id: DictionarySourceID
@@ -28,11 +29,39 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private let affixRootFormatter = AffixRootEntryFormatter()
     private let noteStore: ObsidianNoteStore
     private let notePicker: ObsidianNotePicker
+    private let aiService: AIExplanationService
+    private let openAISettings: () -> Void
+    private let aiEntryFormatter = AIEntryFormatter()
+    private let aiSentenceFormatter = AISentenceEntryFormatter()
+    private let aiMarkdownFormatter = AIExplanationMarkdownFormatter()
+    private let localGlossaryFormatter = LocalSentenceGlossaryFormatter()
+    private let sentenceMarkdownFormatter = SentenceAnalysisMarkdownFormatter()
     private let searchField = NSSearchField()
     private let starButton = NSButton()
     private let textView: NSTextView
     private let scrollView: NSScrollView
+    private let aiFooter = NSStackView()
+    private let aiStatusLabel = NSTextField(wrappingLabelWithString: "")
+    private let aiActionButton = NSButton()
+    private let aiSettingsButton = NSButton()
+    private let aiIncludeCheckbox = NSButton(
+        checkboxWithTitle: "收藏时加入 AI 内容", target: nil, action: nil
+    )
+    private var aiFooterHeightConstraint: NSLayoutConstraint?
     private var currentEntry: StructuredDictionaryEntry?
+    private var currentQuery = ""
+    private var currentIntent: QueryIntent = .word
+    private var localResultContent: NSAttributedString?
+    private var localResultHasChinese = false
+    private var aiAction: AIAction = .none
+    private var aiTask: Task<Void, Never>?
+    private var localGlossaryTask: Task<Void, Never>?
+    private var currentAIPresentation: AIExplanationPresentation?
+    private var currentSentencePresentation: AISentenceAnalysisPresentation?
+    private var currentLocalGlossary: LocalSentenceGlossary?
+    private var currentSentenceStatus: String?
+    private var aiSectionCharacterLocation: Int?
+    private var queryGeneration = AIQueryGenerationGate()
     private var feedbackPopover: NSPopover?
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
@@ -41,16 +70,46 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var animating = false
     private var reportedUnavailableDictionaryIDs: Set<String> = []
 
+    private lazy var localGlossaryService = LocalSentenceGlossaryService(
+        sources: makeLocalGlossarySources()
+    )
+
+    private enum AIAction {
+        case none
+        case configure
+        case explain(domain: String)
+        case analyzeSentence
+        case cancelSentence
+    }
+
+    private enum NoteSaveContent {
+        case vocabulary(VocabularyNoteSaveContent)
+        case sentence(SentenceNoteSaveContent)
+
+        var identity: String {
+            switch self {
+            case .vocabulary(let content):
+                return content.headword.precomposedStringWithCanonicalMapping.lowercased()
+            case .sentence(let content):
+                return SentenceNoteSaveContent.normalizedSentence(content.sourceText)
+            }
+        }
+    }
+
     init(core: DictionaryCoreBridge,
          supplementalDictionaries: [SupplementalDictionaryRuntime] = [],
          noteStore: ObsidianNoteStore,
-         notePicker: ObsidianNotePicker) {
+         notePicker: ObsidianNotePicker,
+         aiService: AIExplanationService,
+         openAISettings: @escaping () -> Void) {
         oxfordCore = core
         self.supplementalDictionaries = supplementalDictionaries.sorted {
             $0.priority < $1.priority
         }
         self.noteStore = noteStore
         self.notePicker = notePicker
+        self.aiService = aiService
+        self.openAISettings = openAISettings
         let standardScrollView = NSTextView.scrollableTextView()
         guard let standardTextView = standardScrollView.documentView as? NSTextView else {
             fatalError("AppKit did not create an NSTextView document view")
@@ -69,6 +128,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     required init?(coder: NSCoder) { nil }
 
     deinit {
+        aiTask?.cancel()
+        localGlossaryTask?.cancel()
         if let globalClickMonitor { NSEvent.removeMonitor(globalClickMonitor) }
         if let localClickMonitor { NSEvent.removeMonitor(localClickMonitor) }
         if let localKeyMonitor { NSEvent.removeMonitor(localKeyMonitor) }
@@ -82,20 +143,29 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     @discardableResult
     func showAndLookup(_ query: String) -> Bool {
-        searchField.stringValue = query
-        let found = lookup(query)
+        let found = processQuery(query)
         show()
         return found
     }
 
     func showSelectionTooLongMessage() {
+        resetAIState(query: "", intent: .textTooLong)
         setCurrentEntry(nil)
-        displayText("所选文本超过 100 个字符，请缩短选择或手动输入。")
+        displayText("选择内容较长，请缩短为一个句子后再分析。")
         show()
     }
 
     func targetNoteDidChange() {
         refreshStarState()
+    }
+
+    func aiConfigurationDidChange() {
+        if currentIntent == .sentence, currentSentencePresentation == nil {
+            configureSentenceAction(for: currentQuery)
+        } else if currentIntent != .sentence {
+            configureAIAction(hasLocalResult: currentEntry?.isValid == true,
+                              hasChinese: localResultHasChinese)
+        }
     }
 
     func show() {
@@ -123,6 +193,11 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     func hide() {
         guard let panel = window as? DictionaryPanel, panel.isVisible, !animating else { return }
+        aiTask?.cancel()
+        aiTask = nil
+        localGlossaryTask?.cancel()
+        localGlossaryTask = nil
+        _ = queryGeneration.beginQuery()
         animating = true
         var hiddenFrame = panel.frame
         hiddenFrame.origin.x += 24
@@ -201,6 +276,15 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         textView.isHorizontallyResizable = false
         textView.textContainer?.widthTracksTextView = true
         textView.menu = editingContextMenu(includeModificationCommands: false)
+        aiIncludeCheckbox.controlSize = .small
+        aiIncludeCheckbox.font = .systemFont(ofSize: 11)
+        aiIncludeCheckbox.target = self
+        aiIncludeCheckbox.action = #selector(aiInclusionDidChange)
+        aiIncludeCheckbox.toolTip = "勾选后，点击星号会把当前已生成的 AI 解释一并写入 Markdown 笔记。"
+        aiIncludeCheckbox.setAccessibilityLabel("收藏时加入 AI 内容")
+        aiIncludeCheckbox.isHidden = true
+        aiIncludeCheckbox.autoresizingMask = [.minXMargin]
+        textView.addSubview(aiIncludeCheckbox)
         let hasReadyDictionary = oxfordCore.isReady || supplementalDictionaries.contains {
             $0.core.isReady
         }
@@ -214,8 +298,36 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         scrollView.borderType = .noBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
+        aiStatusLabel.font = .systemFont(ofSize: 11)
+        aiStatusLabel.textColor = .secondaryLabelColor
+        aiStatusLabel.maximumNumberOfLines = 2
+        aiActionButton.bezelStyle = .rounded
+        aiActionButton.controlSize = .small
+        aiActionButton.target = self
+        aiActionButton.action = #selector(performAIAction)
+        aiSettingsButton.title = "打开 AI 设置…"
+        aiSettingsButton.bezelStyle = .inline
+        aiSettingsButton.isBordered = false
+        aiSettingsButton.controlSize = .small
+        aiSettingsButton.target = self
+        aiSettingsButton.action = #selector(openAISettingsWindow)
+        let aiButtons = NSStackView(views: [aiActionButton, aiSettingsButton])
+        aiButtons.orientation = .horizontal
+        aiButtons.spacing = 8
+        aiButtons.alignment = .centerY
+        aiFooter.addArrangedSubview(aiStatusLabel)
+        aiFooter.addArrangedSubview(aiButtons)
+        aiFooter.orientation = .vertical
+        aiFooter.alignment = .leading
+        aiFooter.spacing = 4
+        aiFooter.translatesAutoresizingMaskIntoConstraints = false
+        aiFooter.isHidden = true
+
         material.addSubview(header)
         material.addSubview(scrollView)
+        material.addSubview(aiFooter)
+        let footerHeight = aiFooter.heightAnchor.constraint(equalToConstant: 0)
+        aiFooterHeightConstraint = footerHeight
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: material.topAnchor, constant: 14),
             header.leadingAnchor.constraint(equalTo: material.leadingAnchor, constant: 14),
@@ -224,7 +336,11 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10),
             scrollView.leadingAnchor.constraint(equalTo: material.leadingAnchor, constant: 8),
             scrollView.trailingAnchor.constraint(equalTo: material.trailingAnchor, constant: -8),
-            scrollView.bottomAnchor.constraint(equalTo: material.bottomAnchor, constant: -8)
+            scrollView.bottomAnchor.constraint(equalTo: aiFooter.topAnchor, constant: -6),
+            aiFooter.leadingAnchor.constraint(equalTo: material.leadingAnchor, constant: 22),
+            aiFooter.trailingAnchor.constraint(lessThanOrEqualTo: material.trailingAnchor, constant: -22),
+            aiFooter.bottomAnchor.constraint(equalTo: material.bottomAnchor, constant: -8),
+            footerHeight
         ])
     }
 
@@ -255,22 +371,67 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @objc private func performSearch() {
-        let query = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else {
+        guard !searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            resetAIState(query: "", intent: .textTooLong)
             setCurrentEntry(nil)
+            displayText("")
             return
         }
-        _ = lookup(query)
+        _ = processQuery(searchField.stringValue)
     }
 
-    private func lookup(_ query: String) -> Bool {
+    private func processQuery(_ source: String) -> Bool {
+        let classification = QueryIntentClassifier.classify(source)
+        switch classification.intent {
+        case .textTooLong:
+            resetAIState(query: classification.normalizedText, intent: .textTooLong)
+            setCurrentEntry(nil)
+            searchField.stringValue = classification.normalizedText
+            if classification.rejectionReason == .empty {
+                displayText("")
+            } else {
+                displayText("选择内容较长，请缩短为一个句子后再分析。")
+            }
+            return false
+        case .word, .phrase:
+            switch SelectedTextCleaner.clean(classification.normalizedText) {
+            case .value(let dictionaryQuery):
+                searchField.stringValue = dictionaryQuery
+                return lookup(dictionaryQuery, intent: classification.intent)
+            case .empty:
+                resetAIState(query: "", intent: .textTooLong)
+                setCurrentEntry(nil)
+                displayText("")
+                return false
+            case .tooLong:
+                resetAIState(query: classification.normalizedText, intent: .textTooLong)
+                setCurrentEntry(nil)
+                displayText("选择内容较长，请缩短为一个句子后再分析。")
+                return false
+            }
+        case .sentence:
+            let sentence = classification.normalizedText
+            if classification.shouldAttemptLocalLookupFirst,
+               case .value(let dictionaryQuery) = SelectedTextCleaner.clean(sentence),
+               lookup(dictionaryQuery, intent: .phrase) {
+                searchField.stringValue = dictionaryQuery
+                return true
+            }
+            searchField.stringValue = sentence
+            prepareSentenceMode(sentence)
+            return false
+        }
+    }
+
+    private func lookup(_ query: String, intent: QueryIntent) -> Bool {
+        resetAIState(query: query, intent: intent)
         setCurrentEntry(nil)
         var attributedSections: [NSAttributedString] = []
         var structuredSources: [StructuredDictionarySource] = []
         var headword = ""
         var failures: [(id: String, name: String)] = []
 
-        let oxfordResult = oxfordCore.lookup(query)
+        let oxfordResult = synchronizedLookup(core: oxfordCore, query: query)
         if let error = oxfordResult["error"] as? String, !error.isEmpty {
             failures.append((DictionarySourceID.oxfordOALD8.rawValue, "牛津高阶 8"))
         } else if oxfordResult["found"] as? Bool == true,
@@ -292,7 +453,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
 
         for dictionary in supplementalDictionaries {
-            let lookupResult = dictionary.core.lookup(query)
+            let lookupResult = synchronizedLookup(core: dictionary.core, query: query)
             if let error = lookupResult["error"] as? String, !error.isEmpty {
                 failures.append((dictionary.id.rawValue, dictionary.displayName))
                 continue
@@ -335,6 +496,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                 message += "\n部分词典暂不可用：" + newlyUnavailable.map { $0.name }.joined(separator: "、")
             }
             displayText(message)
+            localResultContent = textView.attributedString()
+            configureAIAction(hasLocalResult: false, hasChinese: false)
             return false
         }
 
@@ -352,8 +515,492 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         let entry = StructuredDictionaryEntry(headword: headword.isEmpty ? query : headword,
                                               sources: structuredSources)
         if entry.isValid { setCurrentEntry(entry) }
+        localResultContent = combined.copy() as? NSAttributedString
+        localResultHasChinese = containsChineseContent(entry)
+        configureAIAction(hasLocalResult: true, hasChinese: localResultHasChinese)
         textView.scrollToBeginningOfDocument(nil)
         return true
+    }
+
+    private func resetAIState(query: String, intent: QueryIntent) {
+        aiTask?.cancel()
+        aiTask = nil
+        localGlossaryTask?.cancel()
+        localGlossaryTask = nil
+        _ = queryGeneration.beginQuery()
+        currentQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        currentIntent = intent
+        localResultContent = nil
+        localResultHasChinese = false
+        aiAction = .none
+        currentAIPresentation = nil
+        currentSentencePresentation = nil
+        currentLocalGlossary = nil
+        currentSentenceStatus = nil
+        aiSectionCharacterLocation = nil
+        aiIncludeCheckbox.state = .off
+        aiIncludeCheckbox.isHidden = true
+        updateAIFooter(visible: false)
+    }
+
+    private func configureAIAction(hasLocalResult: Bool, hasChinese: Bool) {
+        guard !currentQuery.isEmpty else {
+            updateAIFooter(visible: false)
+            return
+        }
+        let query = currentQuery
+        let generation = queryGeneration.generation
+        aiTask?.cancel()
+        aiTask = Task { [weak self] in
+            guard let self else { return }
+            let availability = await aiService.availability()
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self.currentQuery == query,
+                      self.currentIntent != .sentence,
+                      self.queryGeneration.accepts(generation) else { return }
+                if !hasLocalResult && (!availability.isEnabled || !availability.isConfigured) {
+                    self.aiAction = .configure
+                    self.aiStatusLabel.stringValue = "未配置可用的 AI 服务"
+                    self.aiActionButton.title = "配置 AI 服务…"
+                    self.aiActionButton.isHidden = false
+                    self.aiActionButton.isEnabled = true
+                    self.aiSettingsButton.isHidden = true
+                    self.updateAIFooter(visible: true)
+                    return
+                }
+                guard availability.isEnabled && availability.isConfigured else {
+                    self.aiAction = .none
+                    self.updateAIFooter(visible: false)
+                    return
+                }
+                self.aiAction = .explain(domain: self.suggestedDomain())
+                self.aiStatusLabel.stringValue = ""
+                self.aiActionButton.isHidden = false
+                if !hasLocalResult {
+                    self.aiActionButton.title = "AI 双语解释"
+                } else if !hasChinese {
+                    self.aiActionButton.title = "AI 中文解读"
+                } else {
+                    self.aiActionButton.title = "AI 双语补充"
+                }
+                self.aiActionButton.isEnabled = true
+                self.aiSettingsButton.isHidden = true
+                self.updateAIFooter(visible: true)
+            }
+        }
+    }
+
+    @objc private func performAIAction() {
+        switch aiAction {
+        case .none:
+            return
+        case .configure:
+            openAISettings()
+        case .explain(let domain):
+            requestAIExplanation(domain: domain)
+        case .analyzeSentence:
+            requestSentenceAnalysis()
+        case .cancelSentence:
+            cancelSentenceAnalysis()
+        }
+    }
+
+    @objc private func openAISettingsWindow() {
+        openAISettings()
+    }
+
+    private func requestAIExplanation(domain: String) {
+        guard !currentQuery.isEmpty else { return }
+        let query = currentQuery
+        let generation = queryGeneration.generation
+        aiActionButton.isEnabled = false
+        aiActionButton.title = "正在生成…"
+        aiSettingsButton.isHidden = true
+        aiStatusLabel.stringValue = "正在请求所配置的第三方 AI 服务"
+        updateAIFooter(visible: true)
+        aiTask?.cancel()
+        aiTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let presentation = try await aiService.explain(query: query, domain: domain)
+                guard !Task.isCancelled else { return }
+                let formatted = aiEntryFormatter.format(presentation)
+                await MainActor.run {
+                    guard self.currentQuery == query,
+                          self.currentIntent != .sentence,
+                          self.queryGeneration.accepts(generation) else { return }
+                    let output = NSMutableAttributedString()
+                    if let local = self.localResultContent,
+                       self.currentEntry?.isValid == true {
+                        output.append(local)
+                        output.append(NSAttributedString(string: "\n\n"))
+                    }
+                    self.aiSectionCharacterLocation = output.length
+                    output.append(formatted)
+                    self.displayAttributedText(output)
+                    self.currentAIPresentation = presentation
+                    self.aiIncludeCheckbox.state = .off
+                    self.aiIncludeCheckbox.isHidden = false
+                    self.positionAIIncludeCheckbox()
+                    self.refreshStarState()
+                    self.textView.scrollToBeginningOfDocument(nil)
+                    self.aiAction = .none
+                    self.aiStatusLabel.stringValue = presentation.fromCache
+                        ? "已显示本机缓存的 AI 结果" : "AI 结果已生成"
+                    self.aiActionButton.isHidden = true
+                    self.aiSettingsButton.isHidden = true
+                    self.updateAIFooter(visible: true, compact: true)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard self.currentQuery == query,
+                          self.currentIntent != .sentence,
+                          self.queryGeneration.accepts(generation) else { return }
+                    self.aiAction = .explain(domain: domain)
+                    self.aiStatusLabel.stringValue = error.localizedDescription
+                    self.aiActionButton.title = "重试"
+                    self.aiActionButton.isHidden = false
+                    self.aiActionButton.isEnabled = true
+                    self.aiSettingsButton.isHidden = false
+                    self.updateAIFooter(visible: true)
+                }
+            }
+        }
+    }
+
+    private func prepareSentenceMode(_ sentence: String) {
+        resetAIState(query: sentence, intent: .sentence)
+        setCurrentEntry(nil)
+        renderSentenceContent()
+        refreshStarState()
+        textView.scrollToBeginningOfDocument(nil)
+        startLocalGlossaryAnalysis(for: sentence)
+        configureSentenceAction(for: sentence)
+    }
+
+    private func startLocalGlossaryAnalysis(for sentence: String) {
+        let generation = queryGeneration.generation
+        localGlossaryTask?.cancel()
+        localGlossaryTask = Task { [weak self] in
+            guard let self else { return }
+            let glossary = await localGlossaryService.analyze(sentence: sentence)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self.currentIntent == .sentence,
+                      self.currentQuery == sentence,
+                      self.currentSentencePresentation == nil,
+                      self.queryGeneration.accepts(generation) else { return }
+                self.currentLocalGlossary = glossary
+                self.renderSentenceContent()
+                self.refreshStarState()
+            }
+        }
+    }
+
+    private func renderSentenceContent() {
+        guard currentIntent == .sentence else { return }
+        if let presentation = currentSentencePresentation {
+            displayAttributedText(aiSentenceFormatter.format(presentation))
+            return
+        }
+        let output = NSMutableAttributedString(
+            attributedString: aiSentenceFormatter.placeholder(sourceText: currentQuery,
+                                                               status: currentSentenceStatus)
+        )
+        if let glossary = currentLocalGlossary {
+            output.append(NSAttributedString(string: "\n"))
+            output.append(localGlossaryFormatter.format(glossary))
+        }
+        displayAttributedText(output)
+    }
+
+    private func configureSentenceAction(for sentence: String) {
+        guard currentIntent == .sentence, !sentence.isEmpty,
+              currentSentencePresentation == nil else { return }
+        let generation = queryGeneration.generation
+        aiTask?.cancel()
+        aiTask = Task { [weak self] in
+            guard let self else { return }
+            let availability = await aiService.availability()
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self.currentIntent == .sentence,
+                      self.currentQuery == sentence,
+                      self.queryGeneration.accepts(generation) else { return }
+                guard availability.isEnabled, availability.isConfigured else {
+                    self.aiAction = .configure
+                    self.currentSentenceStatus = "未配置可用的 AI 服务"
+                    self.aiStatusLabel.stringValue = "未配置可用的 AI 服务"
+                    self.aiActionButton.title = "配置 AI 服务…"
+                    self.aiActionButton.isHidden = false
+                    self.aiActionButton.isEnabled = true
+                    self.aiSettingsButton.isHidden = true
+                    self.updateAIFooter(visible: true)
+                    self.renderSentenceContent()
+                    return
+                }
+                if availability.automaticSentenceAnalysisEnabled {
+                    self.requestSentenceAnalysis(expectedGeneration: generation)
+                } else {
+                    self.aiAction = .analyzeSentence
+                    self.currentSentenceStatus = "可按需请求 AI；本地词语参考不会联网"
+                    self.aiStatusLabel.stringValue = "完整句子不会自动发送"
+                    self.aiActionButton.title = "AI 翻译与句子解析"
+                    self.aiActionButton.isHidden = false
+                    self.aiActionButton.isEnabled = true
+                    self.aiSettingsButton.isHidden = true
+                    self.updateAIFooter(visible: true)
+                    self.renderSentenceContent()
+                }
+            }
+        }
+    }
+
+    private func requestSentenceAnalysis(expectedGeneration: UInt64? = nil) {
+        guard currentIntent == .sentence, !currentQuery.isEmpty else { return }
+        let sentence = currentQuery
+        let generation = expectedGeneration ?? queryGeneration.generation
+        guard queryGeneration.accepts(generation) else { return }
+        aiTask?.cancel()
+        aiAction = .cancelSentence
+        currentSentenceStatus = "正在分析句子…"
+        aiStatusLabel.stringValue = "正在分析句子…"
+        aiActionButton.title = "取消"
+        aiActionButton.isHidden = false
+        aiActionButton.isEnabled = true
+        aiSettingsButton.isHidden = true
+        updateAIFooter(visible: true)
+        renderSentenceContent()
+        aiTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let presentation = try await aiService.analyzeSentence(sentence)
+                guard !Task.isCancelled else { return }
+                let formatted = aiSentenceFormatter.format(presentation)
+                await MainActor.run {
+                    guard self.currentIntent == .sentence,
+                          self.currentQuery == sentence,
+                          self.queryGeneration.accepts(generation) else { return }
+                    self.currentSentencePresentation = presentation
+                    self.currentLocalGlossary = nil
+                    self.currentSentenceStatus = nil
+                    self.localGlossaryTask?.cancel()
+                    self.localGlossaryTask = nil
+                    self.currentAIPresentation = nil
+                    self.aiIncludeCheckbox.state = .off
+                    self.aiIncludeCheckbox.isHidden = true
+                    self.displayAttributedText(formatted)
+                    self.refreshStarState()
+                    self.textView.scrollToBeginningOfDocument(nil)
+                    self.aiAction = .none
+                    self.aiStatusLabel.stringValue = presentation.fromCache
+                        ? "已显示本机缓存的句子解析" : "句子解析已生成"
+                    self.aiSettingsButton.isHidden = true
+                    self.updateAIFooter(visible: true, compact: true)
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard self.currentIntent == .sentence,
+                          self.currentQuery == sentence,
+                          self.queryGeneration.accepts(generation) else { return }
+                    self.currentSentencePresentation = nil
+                    self.currentSentenceStatus = error.localizedDescription
+                    self.renderSentenceContent()
+                    self.aiAction = .analyzeSentence
+                    self.aiStatusLabel.stringValue = error.localizedDescription
+                    self.aiActionButton.title = "重试"
+                    self.aiActionButton.isHidden = false
+                    self.aiActionButton.isEnabled = true
+                    self.aiSettingsButton.isHidden = false
+                    self.updateAIFooter(visible: true)
+                    self.refreshStarState()
+                }
+            }
+        }
+    }
+
+    private func cancelSentenceAnalysis() {
+        guard currentIntent == .sentence else { return }
+        aiTask?.cancel()
+        aiTask = nil
+        _ = queryGeneration.beginQuery()
+        currentSentencePresentation = nil
+        currentSentenceStatus = "句子分析已取消"
+        localGlossaryTask?.cancel()
+        localGlossaryTask = nil
+        renderSentenceContent()
+        startLocalGlossaryAnalysis(for: currentQuery)
+        aiAction = .analyzeSentence
+        aiStatusLabel.stringValue = "句子分析已取消"
+        aiActionButton.title = "重试"
+        aiActionButton.isHidden = false
+        aiActionButton.isEnabled = true
+        aiSettingsButton.isHidden = false
+        updateAIFooter(visible: true)
+        refreshStarState()
+    }
+
+    private func updateAIFooter(visible: Bool, compact: Bool = false) {
+        aiFooter.isHidden = !visible
+        if visible { aiActionButton.isHidden = compact }
+        aiFooterHeightConstraint?.constant = visible ? (compact ? 22 : 52) : 0
+    }
+
+    @objc private func aiInclusionDidChange() {
+        refreshStarState()
+    }
+
+    private func positionAIIncludeCheckbox() {
+        guard let location = aiSectionCharacterLocation,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer,
+              location < textView.string.utf16.count else {
+            aiIncludeCheckbox.isHidden = true
+            return
+        }
+        layoutManager.ensureLayout(for: textContainer)
+        let characterRange = NSRange(location: location,
+                                     length: min(8, textView.string.utf16.count - location))
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: characterRange,
+                                                  actualCharacterRange: nil)
+        let titleRect = layoutManager.boundingRect(forGlyphRange: glyphRange,
+                                                   in: textContainer)
+        let origin = textView.textContainerOrigin
+        let size = NSSize(width: 162, height: 18)
+        let preferredX = textView.bounds.width - origin.x - size.width
+        aiIncludeCheckbox.frame = NSRect(x: max(origin.x + 126, preferredX),
+                                        y: origin.y + titleRect.minY,
+                                        width: size.width,
+                                        height: size.height)
+    }
+
+    private func suggestedDomain() -> String {
+        guard let entry = currentEntry else { return "general" }
+        return entry.sources.contains { $0.source.contains("医学") } ? "medicine" : "general"
+    }
+
+    private func containsChineseContent(_ entry: StructuredDictionaryEntry) -> Bool {
+        for source in entry.sources {
+            var values = source.definitions + source.examples
+            if let sections = source.partOfSpeechSections {
+                values += sections.flatMap { section in
+                    section.senses.flatMap { [$0.definition] + $0.labels + $0.examples }
+                }
+            }
+            if let semantic = source.semanticEntry {
+                values += semantic.partOfSpeechSections.flatMap { section in
+                    section.senses.flatMap(Self.semanticText)
+                }
+            }
+            if values.contains(where: Self.containsCJK) { return true }
+        }
+        return false
+    }
+
+    private static func semanticText(_ sense: StructuredSemanticSense) -> [String] {
+        var values = [sense.definitionEnglish] + sense.definitionChinese + sense.labels
+        values += sense.examples.flatMap { [$0.english] + $0.translations }
+        values += sense.subsenses.flatMap(semanticText)
+        return values
+    }
+
+    private static func containsCJK(_ value: String) -> Bool {
+        value.unicodeScalars.contains { scalar in
+            (0x3400...0x4DBF).contains(scalar.value) ||
+            (0x4E00...0x9FFF).contains(scalar.value) ||
+            (0xF900...0xFAFF).contains(scalar.value)
+        }
+    }
+
+    private func makeLocalGlossarySources() -> [LocalGlossaryDictionarySource] {
+        [
+            glossarySource(id: .century21, name: "21世纪大英汉词典", priority: 1),
+            glossarySource(id: .medicalEnglishChinese, name: "英中医学辞海", priority: 2),
+            LocalGlossaryDictionarySource(name: "牛津高阶 8", priority: 3) {
+                [weak self] term in self?.lookupOxfordGlossary(term)
+            },
+            glossarySource(id: .newOxford, name: "新牛津英文", priority: 4),
+            glossarySource(id: .affixRootA, name: "词根词缀", priority: 5)
+        ]
+    }
+
+    private func glossarySource(id: DictionarySourceID, name: String,
+                                priority: Int) -> LocalGlossaryDictionarySource {
+        LocalGlossaryDictionarySource(name: name, priority: priority) { [weak self] term in
+            self?.lookupSupplementalGlossary(term, sourceID: id, sourceName: name)
+        }
+    }
+
+    private func lookupOxfordGlossary(_ term: String) -> LocalGlossaryLookupResult? {
+        let result = synchronizedLookup(core: oxfordCore, query: term)
+        guard result["found"] as? Bool == true,
+              let html = result["html"] as? String else { return nil }
+        let parsed = OxfordEntryFormatter().formatHTML(html).structuredEntry
+        let definitions = parsed.definitions + Self.glossaryDefinitions(from: parsed.semanticEntry)
+        return LocalGlossaryLookupResult(
+            partOfSpeech: parsed.partsOfSpeech.first ?? "",
+            definitions: definitions,
+            source: "牛津高阶 8"
+        )
+    }
+
+    private func lookupSupplementalGlossary(_ term: String,
+                                            sourceID: DictionarySourceID,
+                                            sourceName: String) -> LocalGlossaryLookupResult? {
+        guard let dictionary = supplementalDictionaries.first(where: { $0.id == sourceID }) else {
+            return nil
+        }
+        let result = synchronizedLookup(core: dictionary.core, query: term)
+        guard result["found"] as? Bool == true,
+              let html = result["html"] as? String else { return nil }
+        let matched = (result["matchedHeadword"] as? String) ?? term
+        let formatted: SupplementalFormatResult
+        switch sourceID {
+        case .century21:
+            formatted = Century21EntryFormatter().formatHTML(html, matchedHeadword: matched)
+        case .newOxford:
+            formatted = NewOxfordEntryFormatter().formatHTML(html, matchedHeadword: matched)
+        case .medicalEnglishChinese:
+            formatted = MedicalEntryFormatter().formatHTML(html, matchedHeadword: matched)
+        case .affixRootA:
+            formatted = AffixRootEntryFormatter().formatHTML(html, matchedHeadword: matched)
+        case .oxfordOALD8:
+            return nil
+        }
+        let parsed = formatted.structuredEntry
+        var definitions = parsed.definitions
+        definitions += parsed.partOfSpeechSections.flatMap { section in
+            section.senses.flatMap { [$0.definition] + $0.labels }
+        }
+        definitions += Self.glossaryDefinitions(from: parsed.semanticEntry)
+        return LocalGlossaryLookupResult(
+            partOfSpeech: parsed.partsOfSpeech.first ?? "",
+            definitions: definitions,
+            source: sourceName
+        )
+    }
+
+    private static func glossaryDefinitions(from entry: DictionarySemanticEntry) -> [String] {
+        entry.partOfSpeechSections.flatMap { section in
+            section.senses.flatMap(glossaryDefinitions)
+        }
+    }
+
+    private static func glossaryDefinitions(from sense: DictionarySemanticSense) -> [String] {
+        var values = sense.definitionChinese
+        if containsCJK(sense.definitionEnglish) { values.append(sense.definitionEnglish) }
+        values += sense.subsenses.flatMap(glossaryDefinitions)
+        return values
+    }
+
+    private func synchronizedLookup(core: DictionaryCoreBridge,
+                                    query: String) -> [String: Any] {
+        objc_sync_enter(core)
+        defer { objc_sync_exit(core) }
+        return core.lookup(query)
     }
 
     private func formatSupplementalHTML(_ html: String,
@@ -514,8 +1161,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @objc private func showNoteMenu() {
-        guard let entry = currentEntry, entry.isValid, !isShowingNoteMenu else { return }
-        let menu = NSMenu(title: "保存词条")
+        guard let content = currentNoteSaveContent(), !isShowingNoteMenu else { return }
+        let menu = NSMenu(title: "保存到 Markdown 笔记")
         if let target = noteStore.targetURL {
             let filename = abbreviatedFilename(target.lastPathComponent)
             let addCurrent = NSMenuItem(title: "加入当前笔记：\(filename)",
@@ -523,8 +1170,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                                         keyEquivalent: "")
             addCurrent.target = self
             addCurrent.toolTip = target.path
-            addCurrent.state = (try? noteStore.contains(headword: entry.headword)) == true
-                ? .on : .off
+            addCurrent.state = isSaved(content) ? .on : .off
             menu.addItem(addCurrent)
             menu.addItem(.separator())
         }
@@ -549,8 +1195,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @objc private func addToCurrentNote() {
-        guard let entry = currentEntry, entry.isValid else { return }
-        save(entry)
+        guard let content = currentNoteSaveContent() else { return }
+        save(content)
     }
 
     @objc private func selectExistingNote() {
@@ -558,45 +1204,108 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @objc private func createNewNote() {
-        guard let entry = currentEntry, entry.isValid else { return }
+        guard let content = currentNoteSaveContent() else { return }
         let directory = noteStore.targetURL?.deletingLastPathComponent()
         guard let url = notePicker.chooseNewNote(initialDirectory: directory) else { return }
-        save(entry, to: url, creatingIfNeeded: true)
+        save(content, to: url, creatingIfNeeded: true)
     }
 
     private func selectExistingForCurrentEntry() {
-        guard let entry = currentEntry, entry.isValid else { return }
+        guard let content = currentNoteSaveContent() else { return }
         let directory = noteStore.targetURL?.deletingLastPathComponent()
         guard let url = notePicker.chooseExistingNote(initialDirectory: directory) else { return }
-        save(entry, to: url, creatingIfNeeded: false)
+        save(content, to: url, creatingIfNeeded: false)
     }
 
-    private func save(_ entry: StructuredDictionaryEntry) {
+    private func currentNoteSaveContent() -> NoteSaveContent? {
+        if currentIntent == .sentence {
+            guard let content = sentenceMarkdownFormatter.content(
+                sourceText: currentQuery,
+                aiPresentation: currentSentencePresentation,
+                glossary: currentLocalGlossary
+            ) else { return nil }
+            return .sentence(content)
+        }
+        let headword = currentEntry?.headword ?? currentQuery
+        let aiSection: AIExplanationNoteSection?
+        if aiIncludeCheckbox.state == .on, let presentation = currentAIPresentation {
+            aiSection = aiMarkdownFormatter.section(for: presentation, headword: headword)
+        } else {
+            aiSection = nil
+        }
+        let content = VocabularyNoteSaveContent(headword: headword,
+                                                localEntry: currentEntry,
+                                                aiSection: aiSection)
+        return content.isValid ? .vocabulary(content) : nil
+    }
+
+    private func save(_ content: NoteSaveContent) {
         do {
-            _ = try noteStore.save(entry)
+            let feedback: String
+            switch content {
+            case .vocabulary(let value):
+                feedback = feedbackText(for: try noteStore.save(value))
+            case .sentence(let value):
+                feedback = feedbackText(for: try noteStore.save(value), content: value)
+            }
             refreshStarState()
-            showFeedback("已保存")
+            showFeedback(feedback)
         } catch {
             refreshStarState()
-            presentSaveError(error, entry: entry)
+            presentSaveError(error, expectedIdentity: content.identity)
         }
     }
 
-    private func save(_ entry: StructuredDictionaryEntry,
+    private func save(_ content: NoteSaveContent,
                       to url: URL,
                       creatingIfNeeded: Bool) {
         do {
-            if creatingIfNeeded {
-                _ = try noteStore.createOrSave(entry, at: url)
-            } else {
-                _ = try noteStore.save(entry, to: url)
+            let feedback: String
+            switch content {
+            case .vocabulary(let value):
+                let result = creatingIfNeeded
+                    ? try noteStore.createOrSave(value, at: url)
+                    : try noteStore.save(value, to: url)
+                feedback = feedbackText(for: result)
+            case .sentence(let value):
+                let result = creatingIfNeeded
+                    ? try noteStore.createOrSave(value, at: url)
+                    : try noteStore.save(value, to: url)
+                feedback = feedbackText(for: result, content: value)
             }
             try noteStore.rememberTarget(url)
             refreshStarState()
-            showFeedback("已保存")
+            showFeedback(feedback)
         } catch {
             refreshStarState()
-            presentSaveError(error, entry: entry)
+            presentSaveError(error, expectedIdentity: content.identity)
+        }
+    }
+
+    private func feedbackText(for result: VocabularyNoteSaveResult) -> String {
+        switch result {
+        case .localSaved, .localAlreadySaved:
+            return "已收藏"
+        case .savedWithAI:
+            return "已收藏，并加入 AI 内容"
+        case .aiAddedToExistingEntry:
+            return "已将 AI 内容加入现有词条"
+        case .aiAlreadyPresent:
+            return "AI 内容已加入笔记"
+        }
+    }
+
+    private func feedbackText(for result: SentenceNoteSaveResult,
+                              content: SentenceNoteSaveContent) -> String {
+        switch result {
+        case .saved:
+            return content.validAISection ? "已收藏，并加入 AI 解析" : "已收藏"
+        case .alreadySaved:
+            return "该句子已加入笔记"
+        case .aiAddedToExistingSentence:
+            return "已将 AI 解析加入现有句子"
+        case .aiAlreadyPresent:
+            return "该句子已包含 AI 解析"
         }
     }
 
@@ -606,17 +1315,32 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     private func refreshStarState() {
-        guard let entry = currentEntry, entry.isValid else {
+        guard let content = currentNoteSaveContent() else {
             starButton.isEnabled = false
             setStarFilled(false)
-            starButton.toolTip = "当前没有可以保存的词条"
+            if currentIntent == .sentence {
+                starButton.toolTip = "当前没有可以保存的句子学习内容"
+            } else {
+                starButton.toolTip = currentAIPresentation != nil && currentEntry == nil
+                    ? "勾选“收藏时加入 AI 内容”后可保存"
+                    : "当前没有可以保存的词条"
+            }
             return
         }
 
         starButton.isEnabled = true
-        let isSaved = (try? noteStore.contains(headword: entry.headword)) == true
+        let isSaved = isSaved(content)
         setStarFilled(isSaved)
         starButton.toolTip = isSaved ? "已保存到 Obsidian 笔记" : "保存到 Obsidian 笔记"
+    }
+
+    private func isSaved(_ content: NoteSaveContent) -> Bool {
+        switch content {
+        case .vocabulary(let value):
+            return (try? noteStore.contains(headword: value.headword)) == true
+        case .sentence(let value):
+            return (try? noteStore.contains(sentence: value.sourceText)) == true
+        }
     }
 
     private func setStarFilled(_ filled: Bool) {
@@ -638,7 +1362,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         let label = NSTextField(labelWithString: message)
         label.alignment = .center
         label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.frame = NSRect(x: 0, y: 0, width: 92, height: 34)
+        let width = max(92, min(240, label.intrinsicContentSize.width + 24))
+        label.frame = NSRect(x: 0, y: 0, width: width, height: 34)
 
         let controller = NSViewController()
         controller.view = label
@@ -654,10 +1379,10 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
     }
 
-    private func presentSaveError(_ error: Error, entry: StructuredDictionaryEntry) {
+    private func presentSaveError(_ error: Error, expectedIdentity: String) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "无法保存词条"
+        alert.messageText = "无法保存到 Markdown 笔记"
         alert.informativeText = error.localizedDescription
         alert.addButton(withTitle: "选择已有笔记")
         alert.addButton(withTitle: "取消")
@@ -666,7 +1391,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         alert.beginSheetModal(for: panel) { [weak self] response in
             guard response == .alertFirstButtonReturn,
                   let self,
-                  self.currentEntry == entry else { return }
+                  self.currentNoteSaveContent()?.identity == expectedIdentity else { return }
             self.selectExistingForCurrentEntry()
         }
     }
