@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var panelController: DictionaryPanelController?
@@ -12,14 +13,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let aiConfigurationStore = AIConfigurationStore()
     private let aiKeychainStore = AIKeychainStore()
     private let aiCache = AIExplanationCache()
+    private lazy var aiProfileManager = AIProviderProfileManager(
+        store: aiConfigurationStore,
+        keychain: aiKeychainStore
+    )
     private lazy var aiService = AIExplanationService(
         configurationStore: aiConfigurationStore,
         keychain: aiKeychainStore,
-        cache: aiCache
+        cache: aiCache,
+        profileManager: aiProfileManager
     )
     private lazy var aiSettingsController = AISettingsWindowController(
-        configurationStore: aiConfigurationStore,
-        keychain: aiKeychainStore,
+        profileManager: aiProfileManager,
         service: aiService,
         onConfigurationChanged: { [weak self] in
             self?.panelController?.aiConfigurationDidChange()

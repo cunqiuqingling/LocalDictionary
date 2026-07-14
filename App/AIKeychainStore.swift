@@ -5,14 +5,17 @@ protocol AIKeychainStoring: AnyObject {
     func readKey(account: String) async throws -> String?
     func storeKey(_ key: String, account: String) async throws
     func deleteKey(account: String) async throws
+    func listAccounts() async throws -> [String]
 }
 
 enum AIKeychainError: LocalizedError {
+    case accessDenied
     case operationFailed
     case invalidStoredValue
 
     var errorDescription: String? {
         switch self {
+        case .accessDenied: return "macOS 钥匙串拒绝了密钥访问。"
         case .operationFailed: return "无法访问 macOS 钥匙串。"
         case .invalidStoredValue: return "钥匙串中的密钥格式无效。"
         }
@@ -41,6 +44,10 @@ final class AIKeychainStore: AIKeychainStoring {
                     continuation.resume(returning: nil)
                     return
                 }
+                if Self.isAuthorizationFailure(status) {
+                    continuation.resume(throwing: AIKeychainError.accessDenied)
+                    return
+                }
                 guard status == errSecSuccess, let data = result as? Data else {
                     continuation.resume(throwing: AIKeychainError.operationFailed)
                     return
@@ -62,7 +69,11 @@ final class AIKeychainStore: AIKeychainStoring {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [service] in
                 let query = Self.baseQuery(service: service, account: account)
-                let attributes = [kSecValueData as String: data]
+                let attributes: [String: Any] = [
+                    kSecValueData as String: data,
+                    kSecAttrAccessible as String:
+                        kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                ]
                 let updateStatus = SecItemUpdate(query as CFDictionary,
                                                  attributes as CFDictionary)
                 if updateStatus == errSecSuccess {
@@ -102,11 +113,50 @@ final class AIKeychainStore: AIKeychainStoring {
         }
     }
 
+    func listAccounts() async throws -> [String] {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async { [service] in
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecReturnAttributes as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitAll
+                ]
+                var result: CFTypeRef?
+                let status = SecItemCopyMatching(query as CFDictionary, &result)
+                if status == errSecItemNotFound {
+                    continuation.resume(returning: [])
+                    return
+                }
+                guard status == errSecSuccess else {
+                    continuation.resume(throwing: AIKeychainError.operationFailed)
+                    return
+                }
+                let items: [[String: Any]]
+                if let values = result as? [[String: Any]] {
+                    items = values
+                } else if let value = result as? [String: Any] {
+                    items = [value]
+                } else {
+                    continuation.resume(throwing: AIKeychainError.operationFailed)
+                    return
+                }
+                let accounts = items.compactMap { $0[kSecAttrAccount as String] as? String }
+                continuation.resume(returning: Array(Set(accounts)).sorted())
+            }
+        }
+    }
+
     private static func baseQuery(service: String, account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
+    }
+
+    private static func isAuthorizationFailure(_ status: OSStatus) -> Bool {
+        status == errSecAuthFailed || status == errSecUserCanceled ||
+            status == errSecInteractionNotAllowed
     }
 }

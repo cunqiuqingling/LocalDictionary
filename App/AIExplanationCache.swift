@@ -238,7 +238,7 @@ final class AIExplanationCache {
         let normalizedQuery = query.precomposedStringWithCanonicalMapping
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        return [configuration.providerType.rawValue,
+        return [configuration.providerType.cacheIdentity,
                 configuration.normalizedBaseURL.lowercased(),
                 configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                 normalizedQuery,
@@ -251,7 +251,7 @@ final class AIExplanationCache {
         let normalized = SentenceTextNormalizer.normalize(sentence)
             .precomposedStringWithCanonicalMapping
         return [AIExplanationMode.sentence.rawValue,
-                configuration.providerType.rawValue,
+                configuration.providerType.cacheIdentity,
                 configuration.normalizedBaseURL.lowercased(),
                 configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                 normalized,

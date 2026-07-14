@@ -20,6 +20,9 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/QueryIntentClassifier.swift" \
   "$ROOT/App/AIProviderConfiguration.swift" \
   "$ROOT/App/AIKeychainStore.swift" \
+  "$ROOT/App/AIProviderCredentialSession.swift" \
+  "$ROOT/App/AIProviderProfileManager.swift" \
+  "$ROOT/App/AIProviderSettingsSession.swift" \
   "$ROOT/App/AISentenceAnalysis.swift" \
   "$ROOT/App/AIProviderClient.swift" \
   "$ROOT/App/AIExplanationCache.swift" \
@@ -35,4 +38,4 @@ xcrun --sdk macosx swiftc \
   -framework AppKit -framework NaturalLanguage -framework Security -lsqlite3 \
   -o "$BUILD/AIServiceSmoke"
 
-LOCALDICTIONARY_SKIP_KEYCHAIN_SMOKE=1 "$BUILD/AIServiceSmoke"
+"$BUILD/AIServiceSmoke"

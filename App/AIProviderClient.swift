@@ -161,26 +161,37 @@ private func aiClean(_ value: String, limit: Int) -> String {
 }
 
 enum AIClientError: LocalizedError, Equatable {
-    case invalidRequest
+    case invalidRequest(code: String? = nil)
     case unauthorized
-    case quotaExceeded
+    case rateLimited(retryAfter: String? = nil)
+    case insufficientQuota(code: String? = nil)
     case modelNotFound
     case timeout
     case offline
     case serverError
+    case invalidJSON
+    case schemaInvalid(field: String)
     case invalidResponse
     case responseTooLarge
     case cancelled
 
     var errorDescription: String? {
         switch self {
-        case .invalidRequest: return "AI 请求参数无效。"
+        case .invalidRequest(let code):
+            return code.map { "AI 请求参数无效（错误码：\($0)）。" } ?? "AI 请求参数无效。"
         case .unauthorized: return "未授权，请检查 API 密钥。"
-        case .quotaExceeded: return "AI 服务额度不足或请求过于频繁。"
+        case .rateLimited(let retryAfter):
+            return retryAfter.map { "AI 请求频率受限，请在 \($0) 秒后重试。" }
+                ?? "AI 请求频率受限，请稍后重试。"
+        case .insufficientQuota(let code):
+            return code.map { "AI 服务额度不足或账户欠费（错误码：\($0)）。" }
+                ?? "AI 服务额度不足或账户欠费。"
         case .modelNotFound: return "模型不存在或当前账号无权访问。"
         case .timeout: return "AI 服务连接超时。"
         case .offline: return "当前无法连接 AI 服务。"
         case .serverError: return "AI 服务端暂时不可用。"
+        case .invalidJSON: return "AI 返回内容不是有效的 JSON。"
+        case .schemaInvalid(let field): return "AI 返回格式缺少或无法解析字段：\(field)。"
         case .invalidResponse: return "AI 返回格式错误。"
         case .responseTooLarge: return "AI 返回内容过长，已停止处理。"
         case .cancelled: return "AI 查询已取消。"
@@ -222,23 +233,25 @@ final class OpenAICompatibleClient: AIProviderClient {
     func explain(query: String, domain: String,
                  configuration: AIProviderConfiguration, apiKey: String) async throws -> AIExplanation {
         let cleanQuery = aiClean(query, limit: 100)
-        guard !cleanQuery.isEmpty else { throw AIClientError.invalidRequest }
+        guard !cleanQuery.isEmpty else { throw AIClientError.invalidRequest() }
         let content = try await send(
             configuration: configuration,
             apiKey: apiKey,
             systemPrompt: Self.dictionarySystemPrompt,
             userPrompt: "Query: \(cleanQuery)\nLanguage: English\nDomain: \(aiClean(domain, limit: 40))\nReturn the required JSON object only."
         )
-        guard let data = content.data(using: .utf8) else {
-            throw AIClientError.invalidResponse
+        guard let data = Self.extractedJSONObjectData(from: content) else {
+            throw AIClientError.invalidJSON
         }
         do {
             return try JSONDecoder().decode(AIExplanation.self, from: data)
                 .validated(fallbackHeadword: cleanQuery)
         } catch let error as AIClientError {
             throw error
+        } catch let error as DecodingError {
+            throw AIClientError.schemaInvalid(field: Self.decodingField(error))
         } catch {
-            throw AIClientError.invalidResponse
+            throw AIClientError.invalidJSON
         }
     }
 
@@ -247,13 +260,13 @@ final class OpenAICompatibleClient: AIProviderClient {
                          apiKey: String) async throws -> AISentenceAnalysis {
         let normalized = SentenceTextNormalizer.normalize(sentence)
         let classification = QueryIntentClassifier.classify(normalized)
-        guard classification.intent == .sentence else { throw AIClientError.invalidRequest }
+        guard classification.intent == .sentence else { throw AIClientError.invalidRequest() }
         let payload = try JSONSerialization.data(withJSONObject: [
             "source_text": normalized,
             "output_language": "zh-CN"
         ])
         guard let payloadText = String(data: payload, encoding: .utf8) else {
-            throw AIClientError.invalidRequest
+            throw AIClientError.invalidRequest()
         }
         let content = try await send(
             configuration: configuration,
@@ -263,15 +276,17 @@ final class OpenAICompatibleClient: AIProviderClient {
             maximumTokens: 2_600
         )
         guard let data = Self.extractedJSONObjectData(from: content) else {
-            throw AIClientError.invalidResponse
+            throw AIClientError.invalidJSON
         }
         do {
             return try JSONDecoder().decode(AISentenceAnalysis.self, from: data)
                 .validated(expectedSourceText: normalized)
         } catch let error as AIClientError {
             throw error
+        } catch let error as DecodingError {
+            throw AIClientError.schemaInvalid(field: Self.decodingField(error))
         } catch {
-            throw AIClientError.invalidResponse
+            throw AIClientError.invalidJSON
         }
     }
 
@@ -284,10 +299,10 @@ final class OpenAICompatibleClient: AIProviderClient {
             userPrompt: "Return exactly this JSON object: {\"status\":\"ok\"}"
         )
         struct Status: Decodable { let status: String }
-        guard let data = content.data(using: .utf8),
+        guard let data = Self.extractedJSONObjectData(from: content),
               let status = try? JSONDecoder().decode(Status.self, from: data),
               status.status == "ok" else {
-            throw AIClientError.invalidResponse
+            throw AIClientError.schemaInvalid(field: "status")
         }
     }
 
@@ -304,15 +319,15 @@ final class OpenAICompatibleClient: AIProviderClient {
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": userPrompt]
             ],
-            "temperature": 0.2,
+            "temperature": 0.1,
             "max_tokens": maximumTokens,
             "response_format": ["type": "json_object"]
         ]
         if configuration.providerType == .zhipu {
-            body["thinking"] = ["type": configuration.thinkingEnabled ? "enabled" : "disabled"]
+            body["thinking"] = ["type": "disabled"]
         }
         guard JSONSerialization.isValidJSONObject(body) else {
-            throw AIClientError.invalidRequest
+            throw AIClientError.invalidRequest()
         }
         var request = URLRequest(url: endpoint, timeoutInterval: 30)
         request.httpMethod = "POST"
@@ -329,16 +344,28 @@ final class OpenAICompatibleClient: AIProviderClient {
             guard let http = response as? HTTPURLResponse else {
                 throw AIClientError.invalidResponse
             }
-            try Self.validateStatus(http.statusCode, responseData: data)
+            try Self.validateStatus(http, responseData: data)
             struct Envelope: Decodable {
                 struct Choice: Decodable {
                     struct Message: Decodable { let content: String }
                     let message: Message
+                    let finishReason: String?
+
+                    enum CodingKeys: String, CodingKey {
+                        case message
+                        case finishReason = "finish_reason"
+                    }
                 }
                 let choices: [Choice]
             }
             guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
-                  let content = envelope.choices.first?.message.content,
+                  let choice = envelope.choices.first,
+                  [nil, "stop"].contains(choice.finishReason),
+                  !choice.message.content.isEmpty else {
+                throw AIClientError.invalidResponse
+            }
+            let content = choice.message.content
+            guard
                   !content.isEmpty else {
                 throw AIClientError.invalidResponse
             }
@@ -358,25 +385,43 @@ final class OpenAICompatibleClient: AIProviderClient {
         }
     }
 
-    private static func validateStatus(_ status: Int, responseData: Data) throws {
+    private static func validateStatus(_ response: HTTPURLResponse, responseData: Data) throws {
+        let status = response.statusCode
         guard !(200..<300).contains(status) else { return }
+        let details = errorDetails(from: responseData)
+        let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
         switch status {
         case 401, 403: throw AIClientError.unauthorized
-        case 402, 429: throw AIClientError.quotaExceeded
+        case 402: throw AIClientError.insufficientQuota(code: details.code)
+        case 429:
+            if details.indicatesQuotaExhaustion {
+                throw AIClientError.insufficientQuota(code: details.code)
+            }
+            throw AIClientError.rateLimited(retryAfter: retryAfter)
         case 404: throw AIClientError.modelNotFound
         case 408: throw AIClientError.timeout
         case 500...599: throw AIClientError.serverError
         case 400:
-            let message = String(data: responseData, encoding: .utf8)?.lowercased() ?? ""
-            throw message.contains("model") ? AIClientError.modelNotFound
-                                            : AIClientError.invalidRequest
+            throw details.message.lowercased().contains("model")
+                ? AIClientError.modelNotFound
+                : AIClientError.invalidRequest(code: details.code)
         default: throw AIClientError.invalidResponse
         }
     }
 
     private static func extractedJSONObjectData(from content: String) -> Data? {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.contains("```") else { return nil }
+        var trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("```") && trimmed.hasSuffix("```") {
+            let lines = trimmed.components(separatedBy: .newlines)
+            guard lines.count >= 3,
+                  lines.first?.lowercased().trimmingCharacters(in: .whitespaces) == "```json" ||
+                    lines.first?.trimmingCharacters(in: .whitespaces) == "```",
+                  lines.last?.trimmingCharacters(in: .whitespaces) == "```" else { return nil }
+            trimmed = lines.dropFirst().dropLast().joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !trimmed.contains("```") else { return nil }
         if let direct = trimmed.data(using: .utf8), isJSONObject(direct) { return direct }
         guard let first = trimmed.firstIndex(of: "{"),
               let last = trimmed.lastIndex(of: "}"), first <= last else { return nil }
@@ -388,6 +433,39 @@ final class OpenAICompatibleClient: AIProviderClient {
     private static func isJSONObject(_ data: Data) -> Bool {
         guard let value = try? JSONSerialization.jsonObject(with: data) else { return false }
         return value is [String: Any]
+    }
+
+    private static func decodingField(_ error: DecodingError) -> String {
+        switch error {
+        case .keyNotFound(let key, let context):
+            return (context.codingPath + [key]).map(\.stringValue).joined(separator: ".")
+        case .typeMismatch(_, let context), .valueNotFound(_, let context),
+             .dataCorrupted(let context):
+            let path = context.codingPath.map(\.stringValue).joined(separator: ".")
+            return path.isEmpty ? "root" : path
+        @unknown default:
+            return "unknown"
+        }
+    }
+
+    private static func errorDetails(from data: Data) -> (code: String?, message: String,
+                                                           indicatesQuotaExhaustion: Bool) {
+        var code: String?
+        var message = ""
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let nested = object["error"] as? [String: Any]
+            let rawCode = nested?["code"] ?? object["code"]
+            if let rawCode { code = String(describing: rawCode) }
+            message = (nested?["message"] as? String) ??
+                (object["message"] as? String) ?? (object["msg"] as? String) ?? ""
+        }
+        let lower = message.lowercased()
+        let quotaTerms = ["quota", "insufficient", "balance", "billing", "余额", "欠费", "额度"]
+        let knownQuotaCodes: Set<String> = ["1113", "1114"]
+        return (code, message,
+                (code.map(knownQuotaCodes.contains) ?? false) || quotaTerms.contains {
+                    lower.contains($0)
+                })
     }
 
     private static let dictionarySystemPrompt = """

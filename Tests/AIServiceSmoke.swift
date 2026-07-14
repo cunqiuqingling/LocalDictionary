@@ -9,6 +9,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 
 private final class MockURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, Data))?
+    static var responseHeaders: [String: String] = [:]
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -16,9 +17,11 @@ private final class MockURLProtocol: URLProtocol {
         do {
             guard let handler = Self.handler else { throw URLError(.badServerResponse) }
             let (status, data) = try handler(request)
+            var headers = ["Content-Type": "application/json"]
+            headers.merge(Self.responseHeaders) { _, new in new }
             let response = HTTPURLResponse(url: request.url!, statusCode: status,
                                            httpVersion: "HTTP/1.1",
-                                           headerFields: ["Content-Type": "application/json"])!
+                                           headerFields: headers)!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
             client?.urlProtocolDidFinishLoading(self)
@@ -30,11 +33,43 @@ private final class MockURLProtocol: URLProtocol {
 }
 
 private final class StubKeychain: AIKeychainStoring {
-    var value: String?
-    init(_ value: String?) { self.value = value }
-    func readKey(account: String) async throws -> String? { value }
-    func storeKey(_ key: String, account: String) async throws { value = key }
-    func deleteKey(account: String) async throws { value = nil }
+    var values: [String: String] = [:]
+    var failWrites = false
+    var failReads = false
+    private(set) var readCounts: [String: Int] = [:]
+    init(_ value: String?) {
+        if let value { values[AIProviderConfiguration.zhipuPreset.keychainAccount] = value }
+    }
+    init(values: [String: String]) { self.values = values }
+    func readKey(account: String) async throws -> String? {
+        readCounts[account, default: 0] += 1
+        if failReads { throw AIKeychainError.accessDenied }
+        return values[account]
+    }
+    func storeKey(_ key: String, account: String) async throws {
+        if failWrites { throw AIKeychainError.operationFailed }
+        values[account] = key
+    }
+    func deleteKey(account: String) async throws { values.removeValue(forKey: account) }
+    func listAccounts() async throws -> [String] { Array(values.keys).sorted() }
+}
+
+private final class MemoryDefaults: AIConfigurationPersisting {
+    var values: [String: Any] = [:]
+    var rejectWrites = false
+
+    func data(forKey defaultName: String) -> Data? { values[defaultName] as? Data }
+    func string(forKey defaultName: String) -> String? { values[defaultName] as? String }
+    func object(forKey defaultName: String) -> Any? { values[defaultName] }
+    func bool(forKey defaultName: String) -> Bool { values[defaultName] as? Bool ?? false }
+    func set(_ value: Any?, forKey defaultName: String) {
+        guard !rejectWrites else { return }
+        values[defaultName] = value
+    }
+    func removeObject(forKey defaultName: String) {
+        guard !rejectWrites else { return }
+        values.removeValue(forKey: defaultName)
+    }
 }
 
 private final class StubClient: AIProviderClient {
@@ -42,19 +77,35 @@ private final class StubClient: AIProviderClient {
     var sentenceCalls = 0
     var result: Result<AIExplanation, Error>
     var sentenceResult: Result<AISentenceAnalysis, Error> = .failure(AIClientError.offline)
+    var resultsByProvider: [UUID: Result<AIExplanation, Error>] = [:]
+    var sentenceResultsByProvider: [UUID: Result<AISentenceAnalysis, Error>] = [:]
+    var requestedProviderIDs: [UUID] = []
+    var sentenceInputs: [String] = []
+    var testedProviderIDs: [UUID] = []
+    var testedConfigurations: [AIProviderConfiguration] = []
+    var sentenceConfigurations: [AIProviderConfiguration] = []
+    var connectionResult: Result<Void, Error> = .success(())
     init(result: Result<AIExplanation, Error>) { self.result = result }
     func explain(query: String, domain: String,
                  configuration: AIProviderConfiguration, apiKey: String) async throws -> AIExplanation {
         calls += 1
-        return try result.get()
+        requestedProviderIDs.append(configuration.providerID)
+        return try (resultsByProvider[configuration.providerID] ?? result).get()
     }
     func analyzeSentence(_ sentence: String,
                          configuration: AIProviderConfiguration,
                          apiKey: String) async throws -> AISentenceAnalysis {
         sentenceCalls += 1
-        return try sentenceResult.get()
+        requestedProviderIDs.append(configuration.providerID)
+        sentenceInputs.append(sentence)
+        sentenceConfigurations.append(configuration)
+        return try (sentenceResultsByProvider[configuration.providerID] ?? sentenceResult).get()
     }
-    func testConnection(configuration: AIProviderConfiguration, apiKey: String) async throws {}
+    func testConnection(configuration: AIProviderConfiguration, apiKey: String) async throws {
+        testedProviderIDs.append(configuration.providerID)
+        testedConfigurations.append(configuration)
+        try connectionResult.get()
+    }
 }
 
 private func session() -> URLSession {
@@ -154,11 +205,17 @@ private struct AIServiceSmoke {
     static func main() async throws {
         try testQueryIntentAndNormalization()
         try testConfigurationAndUserDefaults()
+        try await testProviderProfilesAndMigration()
+        try await testTransactionalProviderSave()
+        try testProviderEditingSession()
+        try await testCredentialSession()
         if ProcessInfo.processInfo.environment["LOCALDICTIONARY_SKIP_KEYCHAIN_SMOKE"] != "1" {
             try await testKeychain()
         }
         try await testClientAndErrors()
         try await testCacheAndService()
+        try await testProviderFallback()
+        try await testSingleProviderConnectionSequence()
         try testFormatter()
         try testSentenceFormatterAndGenerationGate()
         try await testLocalSentenceGlossary()
@@ -200,6 +257,13 @@ private struct AIServiceSmoke {
 
     private static func testConfigurationAndUserDefaults() throws {
         let preset = AIProviderConfiguration.zhipuPreset
+        let builtIn = AIProviderCatalog.builtIn
+        try expect(builtIn.profiles.first?.providerID ==
+                   AIProviderConfiguration.googleProviderID &&
+                   builtIn.profiles.first?.enabled == true &&
+                   builtIn.profiles.first(where: { $0.providerType == .zhipu })?.enabled == false &&
+                   !builtIn.automaticFallbackEnabled,
+                   "Google is primary, Zhipu defaults off, fallback defaults off")
         try expect(preset.baseURL == "https://open.bigmodel.cn/api/paas/v4", "zhipu base URL")
         try expect(preset.model == "glm-4.7-flash", "zhipu model")
         let appendedEndpoint = try preset.validatedEndpointURL().absoluteString
@@ -222,12 +286,348 @@ private struct AIServiceSmoke {
                    "automatic sentence setting round trip")
         var saved = preset
         saved.enabled = true
+        saved.priority = 1
         store.save(saved)
         let secret = "test-secret-must-not-enter-defaults"
         try expect(!defaults.dictionaryRepresentation().values.contains {
             String(describing: $0).contains(secret)
         }, "API key leaked to UserDefaults")
         try expect(store.load() == saved, "configuration round trip")
+
+        let v2Defaults = MemoryDefaults()
+        var v2Catalog = AIProviderCatalog.builtIn
+        v2Catalog.schemaVersion = 2
+        v2Catalog.profiles[1].enabled = true
+        v2Catalog.automaticFallbackEnabled = true
+        v2Defaults.values["LocalDictionary.AI.providerCatalog.v2"] =
+            try JSONEncoder().encode(v2Catalog)
+        let migratedV2 = try AIConfigurationStore(defaults: v2Defaults).loadCatalog()
+        try expect(migratedV2?.schemaVersion == AIProviderCatalog.currentSchemaVersion &&
+                   migratedV2?.profiles.first?.providerType == .googleGemini &&
+                   migratedV2?.profiles.first?.enabled == true &&
+                   migratedV2?.profiles.first(where: { $0.providerType == .zhipu })?.enabled == false &&
+                   migratedV2?.automaticFallbackEnabled == false,
+                   "v2 catalog applies the Google-only default without deleting Zhipu")
+    }
+
+    private static func testProviderProfilesAndMigration() async throws {
+        let defaults = MemoryDefaults()
+        defaults.values["LocalDictionary.AI.enabled"] = true
+        defaults.values["LocalDictionary.AI.providerType"] = AIProviderType.zhipu.rawValue
+        defaults.values["LocalDictionary.AI.providerDisplayName"] = "智谱AI（北京智谱华章）"
+        defaults.values["LocalDictionary.AI.baseURL"] =
+            "https://open.bigmodel.cn/api/paas/v4"
+        defaults.values["LocalDictionary.AI.model"] = "GLM-4.7-Flash"
+        defaults.values["LocalDictionary.AI.automaticSentenceAnalysis"] = true
+        let oldGoogle = "openai-compatible|https://generativelanguage.googleapis.com/v1beta/openai"
+        let oldZhipu = "zhipu|https://open.bigmodel.cn/api/paas/v4"
+        let keychain = StubKeychain(values: [oldGoogle: "google-key", oldZhipu: "zhipu-key"])
+        let store = AIConfigurationStore(defaults: defaults)
+        let manager = AIProviderProfileManager(store: store, keychain: keychain)
+        let catalog = try await manager.catalog()
+        try expect(catalog.profiles.count == 2 &&
+                   catalog.automaticSentenceAnalysisEnabled,
+                   "legacy configuration migrated into provider catalog")
+        let google = catalog.profiles.first { $0.providerType == .googleGemini }!
+        let zhipu = catalog.profiles.first { $0.providerType == .zhipu }!
+        try expect(google.providerID == AIProviderConfiguration.googleProviderID &&
+                   zhipu.providerID == AIProviderConfiguration.zhipuProviderID,
+                   "built-in provider IDs are stable")
+        try expect(google.priority == 1 && zhipu.priority == 2 &&
+                   google.enabled && !zhipu.enabled &&
+                   !catalog.automaticFallbackEnabled &&
+                   zhipu.model == "glm-4.7-flash",
+                   "provider ordering and exact Zhipu model migration")
+        var legacyGoogleCacheIdentity = google
+        legacyGoogleCacheIdentity.providerType = .openAICompatible
+        try expect(AIExplanationCache.cacheKey(query: "prompt", configuration: google) ==
+                   AIExplanationCache.cacheKey(query: "prompt",
+                                               configuration: legacyGoogleCacheIdentity),
+                   "Gemini migration preserves existing cache identity")
+        let migratedGoogleKey = try await keychain.readKey(account: google.keychainAccount)
+        let migratedZhipuKey = try await keychain.readKey(account: zhipu.keychainAccount)
+        try expect(migratedGoogleKey == "google-key" && migratedZhipuKey == "zhipu-key",
+                   "legacy keys copied to independent UUID accounts")
+        let retainedGoogleKey = try await keychain.readKey(account: oldGoogle)
+        let retainedZhipuKey = try await keychain.readKey(account: oldZhipu)
+        try expect(retainedGoogleKey == "google-key" && retainedZhipuKey == "zhipu-key",
+                   "legacy keychain items retained")
+        let second = try await manager.catalog()
+        try expect(second == catalog, "migration is idempotent")
+
+        let unknownDefaults = MemoryDefaults()
+        let unknownAccount = "custom|https://legacy.example/v1"
+        let unknownKeychain = StubKeychain(values: [unknownAccount: "unknown-key"])
+        let unknownManager = AIProviderProfileManager(
+            store: AIConfigurationStore(defaults: unknownDefaults), keychain: unknownKeychain
+        )
+        let unknownCatalog = try await unknownManager.catalog()
+        let recovery = unknownCatalog.profiles.first { $0.options.requiresUserReview }
+        try expect(recovery?.providerDisplayName.hasPrefix("待恢复的旧服务") == true &&
+                   recovery?.enabled == false,
+                   "unknown legacy account is not assigned to a guessed provider")
+        let retainedUnknownKey = try await unknownKeychain.readKey(account: unknownAccount)
+        try expect(retainedUnknownKey == "unknown-key",
+                   "unknown legacy key retained")
+
+        do {
+            var invalid = AIProviderConfiguration.googlePreset
+            invalid.providerDisplayName = String(repeating: "网页内容", count: 20)
+            _ = try invalid.normalizedForSave()
+            throw SmokeFailure.failed("oversized display name accepted")
+        } catch let error as AIConfigurationError {
+            try expect(error == .displayNameTooLong, "oversized pasted name rejected")
+        }
+    }
+
+    private static func testTransactionalProviderSave() async throws {
+        let defaults = MemoryDefaults()
+        let store = AIConfigurationStore(defaults: defaults)
+        try store.saveCatalog(.builtIn)
+        let google = AIProviderConfiguration.googlePreset
+        let zhipu = AIProviderConfiguration.zhipuPreset
+        let keychain = StubKeychain(values: [google.keychainAccount: "google-old",
+                                             zhipu.keychainAccount: "zhipu-old"])
+        let manager = AIProviderProfileManager(store: store, keychain: keychain)
+
+        var edited = AIProviderCatalog.builtIn
+        edited.profiles[1].providerDisplayName = "智谱 AI（北京）"
+        edited.profiles[1].model = "glm-4.7-flash"
+        let snapshot = try await manager.save(catalog: edited, replacementKeys: [:])
+        let unchangedGoogleKey = try await keychain.readKey(account: google.keychainAccount)
+        let unchangedZhipuKey = try await keychain.readKey(account: zhipu.keychainAccount)
+        try expect(snapshot.catalog.profiles[1].providerID == zhipu.providerID &&
+                   unchangedGoogleKey == "google-old" && unchangedZhipuKey == "zhipu-old",
+                   "editing metadata preserves stable IDs and both keys")
+
+        var invalid = edited
+        invalid.profiles[0].baseURL = "http://unsafe.example/v1"
+        do {
+            _ = try await manager.save(catalog: invalid, replacementKeys: [:])
+            throw SmokeFailure.failed("invalid URL saved")
+        } catch let error as AIConfigurationError {
+            try expect(error == .invalidBaseURL, "invalid URL rejected before persistence")
+        }
+        let afterInvalid = try store.loadCatalog()
+        try expect(afterInvalid == snapshot.catalog,
+                   "invalid profile leaves prior catalog intact")
+
+        keychain.failWrites = true
+        var keyFailureCatalog = snapshot.catalog
+        keyFailureCatalog.profiles[0].providerDisplayName = "Google Edited"
+        do {
+            _ = try await manager.save(catalog: keyFailureCatalog,
+                                       replacementKeys: [google.providerID: "google-new"])
+            throw SmokeFailure.failed("keychain write failure accepted")
+        } catch {}
+        keychain.failWrites = false
+        let googleAfterKeyFailure = try await keychain.readKey(account: google.keychainAccount)
+        let afterKeyFailure = try store.loadCatalog()
+        try expect(afterKeyFailure == snapshot.catalog &&
+                   googleAfterKeyFailure == "google-old",
+                   "keychain failure leaves catalog and key intact")
+
+        defaults.rejectWrites = true
+        do {
+            _ = try await manager.save(catalog: keyFailureCatalog,
+                                       replacementKeys: [google.providerID: "google-new"])
+            throw SmokeFailure.failed("defaults write failure accepted")
+        } catch {}
+        defaults.rejectWrites = false
+        let googleAfterDefaultsFailure = try await keychain.readKey(account: google.keychainAccount)
+        let afterDefaultsFailure = try store.loadCatalog()
+        try expect(afterDefaultsFailure == snapshot.catalog &&
+                   googleAfterDefaultsFailure == "google-old",
+                   "catalog write failure rolls back replacement key")
+    }
+
+    private static func testProviderEditingSession() throws {
+        let google = AIProviderConfiguration.googlePreset
+        let zhipu = AIProviderConfiguration.zhipuPreset
+        let snapshot = AIProviderCatalogSnapshot(
+            catalog: .builtIn,
+            configuredProviderIDs: [google.providerID]
+        )
+        var session = AIProviderSettingsSession(snapshot: snapshot)
+        try expect(session.selectedDraft?.providerID == google.providerID &&
+                   session.selectedDraft?.providerType == .googleGemini &&
+                   session.selectedDraft?.baseURL == google.baseURL &&
+                   session.selectedDraft?.model == google.model,
+                   "Google selection atomically exposes one draft")
+
+        var editedGoogle = session.selectedDraft!
+        editedGoogle.providerDisplayName = "Google Draft"
+        editedGoogle.model = "gemini-draft-model"
+        session.updateDraft(editedGoogle)
+        session.setPendingAPIKey("google-window-key", for: google.providerID)
+        try expect(session.select(zhipu.providerID), "select Zhipu by stable ID")
+        try expect(session.selectedDraft?.providerID == zhipu.providerID &&
+                   session.selectedDraft?.providerType == .zhipu &&
+                   session.selectedDraft?.providerDisplayName == "智谱 AI" &&
+                   session.selectedDraft?.baseURL == zhipu.baseURL &&
+                   session.selectedDraft?.model == "glm-4.7-flash",
+                   "Zhipu fields never mix with Google")
+        try expect(session.pendingAPIKey(for: zhipu.providerID).isEmpty &&
+                   session.keyState(for: zhipu.providerID) == .notConfigured &&
+                   session.keyState(for: google.providerID) == .pendingReplacement,
+                   "provider key input and state are isolated")
+
+        var editedZhipu = session.selectedDraft!
+        editedZhipu.providerDisplayName = "智谱 Draft"
+        editedZhipu.model = "glm-4.7-flash"
+        session.updateDraft(editedZhipu)
+        session.setPendingAPIKey("zhipu-window-key", for: zhipu.providerID)
+        for index in 0..<50 {
+            let id = index.isMultiple(of: 2) ? google.providerID : zhipu.providerID
+            try expect(session.select(id), "repeated provider selection")
+            let expectedType: AIProviderType = id == google.providerID ? .googleGemini : .zhipu
+            try expect(session.selectedDraft?.providerID == id &&
+                       session.selectedDraft?.providerType == expectedType,
+                       "50 switches remain ID-consistent")
+        }
+        _ = session.select(google.providerID)
+        try expect(session.selectedDraft?.providerDisplayName == "Google Draft" &&
+                   session.selectedDraft?.model == "gemini-draft-model" &&
+                   session.pendingAPIKey(for: google.providerID) == "google-window-key",
+                   "unsaved Google draft survives switching")
+        _ = session.select(zhipu.providerID)
+        try expect(session.selectedDraft?.providerDisplayName == "智谱 Draft" &&
+                   session.pendingAPIKey(for: zhipu.providerID) == "zhipu-window-key",
+                   "unsaved Zhipu draft survives switching")
+
+        var deletionSession = AIProviderSettingsSession(snapshot: snapshot)
+        try expect(deletionSession.remove(google.providerID, deleteKey: false) &&
+                   !deletionSession.keyDeletionIDs.contains(google.providerID) &&
+                   deletionSession.selectedProviderID == zhipu.providerID,
+                   "deleting profile keeps key by default and selects another provider")
+
+        let freshSession = AIProviderSettingsSession(snapshot: snapshot)
+        try expect(freshSession.selectedDraft == google &&
+                   freshSession.pendingAPIKeys.isEmpty,
+                   "cancelling discards all editing drafts and pending keys")
+
+        var gate = AIConnectionTestGate()
+        try expect(gate.begin() && !gate.begin(),
+                   "connection test gate blocks duplicate clicks")
+        gate.finish()
+        try expect(gate.begin(), "connection test gate resets after completion")
+    }
+
+    private static func testCredentialSession() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalDictionary-CredentialSession-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AIConfigurationStore(defaults: MemoryDefaults())
+        try store.saveCatalog(.builtIn)
+        let google = AIProviderConfiguration.googlePreset
+        let zhipu = AIProviderConfiguration.zhipuPreset
+        let keychain = StubKeychain(values: [google.keychainAccount: "google-session-key",
+                                             zhipu.keychainAccount: "zhipu-session-key"])
+        let credentials = AIProviderCredentialSession(keychain: keychain)
+        let manager = AIProviderProfileManager(store: store, keychain: keychain,
+                                               credentialSession: credentials)
+
+        let statusSnapshot = try await manager.snapshot()
+        try expect(statusSnapshot.configuredProviderIDs.contains(google.providerID) &&
+                   keychain.readCounts.isEmpty,
+                   "settings status checks account metadata without reading secrets")
+
+        for _ in 0..<20 {
+            _ = try await manager.apiKey(for: google)
+        }
+        try expect(keychain.readCounts[google.keychainAccount] == 1,
+                   "20 Google uses read Keychain once per process")
+
+        let client = StubClient(result: .success(sample))
+        client.sentenceResult = .success(sampleSentenceAnalysis)
+        let service = AIExplanationService(
+            configurationStore: store,
+            keychain: keychain,
+            cache: AIExplanationCache(databaseURL: root.appendingPathComponent("cache.sqlite")),
+            profileManager: manager,
+            clientFactory: { client }
+        )
+        try await service.testConnection(configuration: google, replacementKey: nil)
+        _ = try await service.explain(query: "credential-session-word", domain: "general")
+        _ = try await service.analyzeSentence(sampleSentenceText)
+        try expect(keychain.readCounts[google.keychainAccount] == 1,
+                   "test, word, and sentence modes share one credential read")
+
+        await credentials.invalidate(google.providerID)
+        _ = try await service.explain(query: "credential-session-word", domain: "general")
+        try expect(keychain.readCounts[google.keychainAccount] == 1,
+                   "cache restoration does not read the Keychain")
+        _ = try await manager.apiKey(for: google)
+        try expect(keychain.readCounts[google.keychainAccount] == 2,
+                   "explicit invalidation causes exactly one later read")
+
+        _ = try await manager.apiKey(for: zhipu)
+        try expect(keychain.readCounts[zhipu.keychainAccount] == 1 &&
+                   keychain.readCounts[google.keychainAccount] == 2,
+                   "provider credential caches are isolated")
+
+        let currentCatalog = try await manager.catalog()
+        _ = try await manager.save(catalog: currentCatalog,
+                                   replacementKeys: [google.providerID: "google-replacement"])
+        let replacement = try await manager.apiKey(for: google)
+        try expect(replacement == "google-replacement" &&
+                   keychain.readCounts[google.keychainAccount] == 2,
+                   "replacement immediately replaces the in-memory credential")
+
+        _ = try await manager.save(catalog: currentCatalog,
+                                   replacementKeys: [:],
+                                   deletingKeys: [google.providerID])
+        let removed = try await manager.apiKey(for: google)
+        try expect(removed == nil && keychain.readCounts[google.keychainAccount] == 2,
+                   "clearing a key immediately clears its in-memory value")
+
+        let deniedKeychain = StubKeychain(values: [google.keychainAccount: "denied-key"])
+        deniedKeychain.failReads = true
+        let deniedCredentials = AIProviderCredentialSession(keychain: deniedKeychain)
+        let deniedManager = AIProviderProfileManager(
+            store: AIConfigurationStore(defaults: MemoryDefaults()),
+            keychain: deniedKeychain,
+            credentialSession: deniedCredentials
+        )
+        for _ in 0..<2 {
+            do {
+                _ = try await deniedManager.apiKey(for: google)
+                throw SmokeFailure.failed("denied credential read accepted")
+            } catch let error as AIProviderCredentialError {
+                try expect(error == .unavailable(providerDisplayName: "Google Gemini"),
+                           "credential denial maps to a provider-specific error")
+            }
+        }
+        try expect(deniedKeychain.readCounts[google.keychainAccount] == 1,
+                   "denied credential is not requested repeatedly in one process")
+
+        var deniedCatalog = AIProviderCatalog.builtIn
+        deniedCatalog.profiles[1].enabled = true
+        deniedCatalog.automaticFallbackEnabled = true
+        let deniedStore = AIConfigurationStore(defaults: MemoryDefaults())
+        try deniedStore.saveCatalog(deniedCatalog)
+        let deniedFallbackManager = AIProviderProfileManager(
+            store: deniedStore,
+            keychain: deniedKeychain,
+            credentialSession: deniedCredentials
+        )
+        let deniedService = AIExplanationService(
+            configurationStore: deniedStore,
+            keychain: deniedKeychain,
+            cache: AIExplanationCache(
+                databaseURL: root.appendingPathComponent("denied-cache.sqlite")
+            ),
+            profileManager: deniedFallbackManager,
+            clientFactory: { StubClient(result: .success(sample)) }
+        )
+        do {
+            _ = try await deniedService.explain(query: "denied-query", domain: "general")
+            throw SmokeFailure.failed("credential denial reached the provider client")
+        } catch is AIProviderCredentialError {}
+        try expect(deniedKeychain.readCounts[google.keychainAccount] == 1 &&
+                   deniedKeychain.readCounts[zhipu.keychainAccount] == nil,
+                   "credential denial stops the query without reading the backup provider")
     }
 
     private static func testKeychain() async throws {
@@ -238,6 +638,8 @@ private struct AIServiceSmoke {
         let first = try await keychain.readKey(account: account)
         try expect(first == "dummy-test-key-one",
                    "keychain insert/read")
+        let accounts = try await keychain.listAccounts()
+        try expect(accounts == [account], "keychain account listing excludes secret data")
         try await keychain.storeKey("dummy-test-key-two", account: account)
         let second = try await keychain.readKey(account: account)
         try expect(second == "dummy-test-key-two",
@@ -287,6 +689,19 @@ private struct AIServiceSmoke {
                    "sentence strict JSON decode")
 
         MockURLProtocol.handler = { _ in
+            let json = String(data: try JSONEncoder().encode(sampleSentenceAnalysis),
+                              encoding: .utf8)!
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "```json\n\(json)\n```"]]]
+            ]))
+        }
+        let fencedResult = try await client.analyzeSentence(sampleSentenceText,
+                                                            configuration: configuration,
+                                                            apiKey: "dummy-key")
+        try expect(fencedResult == sampleSentenceAnalysis,
+                   "outer JSON code fence is safely removed")
+
+        MockURLProtocol.handler = { _ in
             let invalid = try JSONSerialization.data(withJSONObject: [
                 "choices": [["message": ["content": "```json\n{}\n```"]]]
             ])
@@ -298,7 +713,7 @@ private struct AIServiceSmoke {
                                                  apiKey: "dummy-key")
             throw SmokeFailure.failed("sentence code fence accepted")
         } catch let error as AIClientError {
-            try expect(error == .invalidResponse, "sentence invalid JSON rejected")
+            try expect(error == .schemaInvalid(field: "mode"), "sentence fenced JSON validated")
         }
 
         MockURLProtocol.handler = { _ in
@@ -317,7 +732,7 @@ private struct AIServiceSmoke {
             try await client.testConnection(configuration: configuration, apiKey: "dummy-key")
             throw SmokeFailure.failed("invalid connection response accepted")
         } catch let error as AIClientError {
-            try expect(error == .invalidResponse, "connection response validation")
+            try expect(error == .schemaInvalid(field: "status"), "connection response validation")
         }
 
         var custom = configuration
@@ -331,8 +746,9 @@ private struct AIServiceSmoke {
                                      configuration: custom, apiKey: "dummy-key")
 
         for (status, expected) in [(401, AIClientError.unauthorized),
-                                   (429, AIClientError.quotaExceeded),
+                                   (429, AIClientError.rateLimited(retryAfter: nil)),
                                    (500, AIClientError.serverError)] {
+            MockURLProtocol.responseHeaders = [:]
             MockURLProtocol.handler = { _ in (status, Data("{}".utf8)) }
             do {
                 _ = try await client.explain(query: "prompt", domain: "general",
@@ -341,6 +757,27 @@ private struct AIServiceSmoke {
             } catch let error as AIClientError {
                 try expect(error == expected, "HTTP \(status) mapping")
             }
+        }
+        MockURLProtocol.responseHeaders = ["Retry-After": "7"]
+        MockURLProtocol.handler = { _ in (429, Data("{\"error\":{\"code\":\"1302\",\"message\":\"rate limit\"}}".utf8)) }
+        do {
+            _ = try await client.explain(query: "prompt", domain: "general",
+                                         configuration: custom, apiKey: "dummy-key")
+            throw SmokeFailure.failed("rate limit accepted")
+        } catch let error as AIClientError {
+            try expect(error == .rateLimited(retryAfter: "7"), "Retry-After classification")
+        }
+        MockURLProtocol.responseHeaders = [:]
+        MockURLProtocol.handler = { _ in
+            (429, Data("{\"error\":{\"code\":\"1113\",\"message\":\"余额不足\"}}".utf8))
+        }
+        do {
+            _ = try await client.explain(query: "prompt", domain: "general",
+                                         configuration: configuration, apiKey: "dummy-key")
+            throw SmokeFailure.failed("quota exhaustion accepted")
+        } catch let error as AIClientError {
+            try expect(error == .insufficientQuota(code: "1113"),
+                       "Zhipu quota business error classification")
         }
         MockURLProtocol.handler = { _ in
             let invalid = try JSONSerialization.data(withJSONObject: [
@@ -353,7 +790,7 @@ private struct AIServiceSmoke {
                                          configuration: custom, apiKey: "dummy-key")
             throw SmokeFailure.failed("invalid JSON accepted")
         } catch let error as AIClientError {
-            try expect(error == .invalidResponse, "invalid JSON mapping")
+            try expect(error == .invalidJSON, "invalid JSON mapping")
         }
         MockURLProtocol.handler = { _ in throw URLError(.timedOut) }
         do {
@@ -440,6 +877,137 @@ private struct AIServiceSmoke {
         let clearedSentence = try await cache.sentenceValue(for: sampleSentenceText,
                                                             configuration: configuration)
         try expect(clearedSentence == nil, "sentence cache clear")
+    }
+
+    private static func testProviderFallback() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalDictionary-AIFallback-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = MemoryDefaults()
+        let store = AIConfigurationStore(defaults: defaults)
+        var fallbackCatalog = AIProviderCatalog.builtIn
+        fallbackCatalog.profiles[1].enabled = true
+        fallbackCatalog.automaticFallbackEnabled = true
+        try store.saveCatalog(fallbackCatalog)
+        let google = AIProviderConfiguration.googlePreset
+        let zhipu = AIProviderConfiguration.zhipuPreset
+        let keychain = StubKeychain(values: [google.keychainAccount: "google-key",
+                                             zhipu.keychainAccount: "zhipu-key"])
+        let manager = AIProviderProfileManager(store: store, keychain: keychain)
+        let client = StubClient(result: .failure(AIClientError.offline))
+        client.resultsByProvider = [google.providerID: .failure(AIClientError.timeout),
+                                    zhipu.providerID: .success(sample)]
+        client.sentenceResultsByProvider = [
+            google.providerID: .failure(AIClientError.rateLimited()),
+            zhipu.providerID: .success(sampleSentenceAnalysis)
+        ]
+        let cache = AIExplanationCache(databaseURL: root.appendingPathComponent("cache.sqlite"))
+        let service = AIExplanationService(configurationStore: store,
+                                           keychain: keychain,
+                                           cache: cache,
+                                           profileManager: manager,
+                                           clientFactory: { client })
+        let result = try await service.explain(query: "fallback", domain: "general")
+        try expect(result.providerDisplayName == "智谱 AI" && client.calls == 2 &&
+                   client.requestedProviderIDs == [google.providerID, zhipu.providerID],
+                   "Google failure falls back to Zhipu once")
+
+        client.requestedProviderIDs.removeAll()
+        let sentence = try await service.analyzeSentence(sampleSentenceText)
+        try expect(sentence.providerDisplayName == "智谱 AI" && client.sentenceCalls == 2 &&
+                   client.requestedProviderIDs == [google.providerID, zhipu.providerID],
+                   "sentence provider fallback is ordered and non-duplicating")
+
+        let callsBeforeCache = client.sentenceCalls
+        client.sentenceResultsByProvider = [google.providerID: .failure(AIClientError.offline),
+                                            zhipu.providerID: .failure(AIClientError.offline)]
+        let cached = try await service.analyzeSentence(sampleSentenceText)
+        try expect(cached.fromCache && cached.providerDisplayName == "智谱 AI" &&
+                   client.sentenceCalls == callsBeforeCache,
+                   "valid fallback-provider cache prevents network calls")
+
+        client.requestedProviderIDs.removeAll()
+        client.resultsByProvider = [google.providerID: .failure(AIClientError.cancelled),
+                                    zhipu.providerID: .success(sample)]
+        do {
+            _ = try await service.explain(query: "cancelled-query", domain: "general")
+            throw SmokeFailure.failed("cancelled request fell through")
+        } catch let error as AIClientError {
+            try expect(error == .cancelled &&
+                       client.requestedProviderIDs == [google.providerID],
+                       "user cancellation never switches provider")
+        }
+    }
+
+    private static func testSingleProviderConnectionSequence() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalDictionary-AIConnection-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = MemoryDefaults()
+        let store = AIConfigurationStore(defaults: defaults)
+        try store.saveCatalog(.builtIn)
+        let persistedBeforeTests = try store.loadCatalog()
+        let google = AIProviderConfiguration.googlePreset
+        let zhipu = AIProviderConfiguration.zhipuPreset
+        let keychain = StubKeychain(values: [google.keychainAccount: "google-key",
+                                             zhipu.keychainAccount: "zhipu-key"])
+        let manager = AIProviderProfileManager(store: store, keychain: keychain)
+        let client = StubClient(result: .success(sample))
+        client.sentenceResult = .success(sampleSentenceAnalysis)
+        let service = AIExplanationService(
+            configurationStore: store,
+            keychain: keychain,
+            cache: AIExplanationCache(databaseURL: root.appendingPathComponent("cache.sqlite")),
+            profileManager: manager,
+            clientFactory: { client }
+        )
+
+        var googleDraft = google
+        googleDraft.providerDisplayName = "Google Draft"
+        googleDraft.baseURL = "https://draft.google.example/v1"
+        googleDraft.model = "gemini-draft-model"
+
+        client.connectionResult = .failure(AIClientError.unauthorized)
+        do {
+            try await service.testConnection(configuration: googleDraft,
+                                             replacementKey: "window-google-key")
+            throw SmokeFailure.failed("basic connection failure accepted")
+        } catch let error as AIClientError {
+            try expect(error == .unauthorized && client.sentenceCalls == 0,
+                       "basic failure stops before sentence test")
+        }
+
+        client.connectionResult = .success(())
+        client.sentenceResult = .failure(AIClientError.schemaInvalid(field: "translation_zh"))
+        try await service.testConnection(configuration: googleDraft,
+                                         replacementKey: "window-google-key")
+        do {
+            try await service.testSentenceFunction(configuration: googleDraft,
+                                                   replacementKey: "window-google-key")
+            throw SmokeFailure.failed("functional sentence failure accepted")
+        } catch let error as AIClientError {
+            try expect(error == .schemaInvalid(field: "translation_zh"),
+                       "functional failure remains distinct from basic connection")
+        }
+
+        client.sentenceResult = .success(sampleSentenceAnalysis)
+        try await service.testConnection(configuration: googleDraft,
+                                         replacementKey: "window-google-key")
+        try await service.testSentenceFunction(configuration: googleDraft,
+                                               replacementKey: "window-google-key")
+        try expect(client.testedConfigurations.last?.providerID == google.providerID &&
+                   client.testedConfigurations.last?.baseURL == googleDraft.normalizedBaseURL &&
+                   client.testedConfigurations.last?.model == "gemini-draft-model" &&
+                   client.sentenceConfigurations.last?.providerID == google.providerID,
+                   "two-stage test uses current unsaved draft and one provider only")
+        try expect(client.sentenceInputs.last ==
+                   "Because it was raining, the match was postponed.",
+                   "functional test uses the fixed minimal sentence")
+        let persisted = try store.loadCatalog()
+        try expect(persisted == persistedBeforeTests,
+                   "connection tests never save draft configuration")
     }
 
     private static func testFormatter() throws {

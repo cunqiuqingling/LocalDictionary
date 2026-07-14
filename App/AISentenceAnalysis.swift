@@ -153,14 +153,20 @@ struct AISentenceAnalysis: Codable, Equatable, Sendable {
 
     func validated(expectedSourceText: String) throws -> AISentenceAnalysis {
         let expected = SentenceTextNormalizer.normalize(expectedSourceText)
-        guard mode == "sentence_analysis",
-              !expected.isEmpty,
-              expected.count <= SentenceTextNormalizer.maximumCharacters,
-              SentenceTextNormalizer.normalize(sourceText) == expected else {
-            throw AIClientError.invalidResponse
+        guard mode == "sentence_analysis" else {
+            throw AIClientError.schemaInvalid(field: "mode")
+        }
+        guard !expected.isEmpty,
+              expected.count <= SentenceTextNormalizer.maximumCharacters else {
+            throw AIClientError.invalidRequest()
+        }
+        guard SentenceTextNormalizer.normalize(sourceText) == expected else {
+            throw AIClientError.schemaInvalid(field: "source_text")
         }
         let translation = sentenceClean(translationZH, limit: 1_200)
-        guard !translation.isEmpty else { throw AIClientError.invalidResponse }
+        guard !translation.isEmpty else {
+            throw AIClientError.schemaInvalid(field: "translation_zh")
+        }
 
         let cleanCore = AISentenceCoreStructure(
             subject: sentenceClean(coreStructure.subject, limit: 300),
