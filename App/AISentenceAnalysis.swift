@@ -242,6 +242,7 @@ struct AISentenceAnalysisPresentation: Sendable {
     let providerDisplayName: String
     let model: String
     let fromCache: Bool
+    var providerID: UUID? = nil
 }
 
 private func sentenceClean(_ value: String, limit: Int) -> String {

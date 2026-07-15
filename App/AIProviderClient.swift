@@ -11,8 +11,8 @@ struct AIExplanationExample: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        en = try values.decodeIfPresent(String.self, forKey: .en) ?? ""
-        zh = try values.decodeIfPresent(String.self, forKey: .zh) ?? ""
+        en = (try? values.decode(String.self, forKey: .en)) ?? ""
+        zh = (try? values.decode(String.self, forKey: .zh)) ?? ""
     }
 }
 
@@ -42,13 +42,11 @@ struct AIExplanationSense: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        definitionEN = try values.decodeIfPresent(String.self, forKey: .definitionEN) ?? ""
-        definitionZH = try values.decodeIfPresent(String.self, forKey: .definitionZH) ?? ""
-        usageNoteZH = try values.decodeIfPresent(String.self, forKey: .usageNoteZH) ?? ""
-        examples = try values.decodeIfPresent([AIExplanationExample].self,
-                                              forKey: .examples) ?? []
-        collocations = try values.decodeIfPresent([String].self,
-                                                  forKey: .collocations) ?? []
+        definitionEN = (try? values.decode(String.self, forKey: .definitionEN)) ?? ""
+        definitionZH = (try? values.decode(String.self, forKey: .definitionZH)) ?? ""
+        usageNoteZH = (try? values.decode(String.self, forKey: .usageNoteZH)) ?? ""
+        examples = (try? values.decode([AIExplanationExample].self, forKey: .examples)) ?? []
+        collocations = (try? values.decode([String].self, forKey: .collocations)) ?? []
     }
 }
 
@@ -68,50 +66,106 @@ struct AIExplanationPartOfSpeech: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        partOfSpeech = try values.decodeIfPresent(String.self, forKey: .partOfSpeech) ?? ""
-        senses = try values.decodeIfPresent([AIExplanationSense].self, forKey: .senses) ?? []
+        partOfSpeech = (try? values.decode(String.self, forKey: .partOfSpeech)) ?? ""
+        senses = (try? values.decode([AIExplanationSense].self, forKey: .senses)) ?? []
     }
 }
 
 struct AIExplanation: Codable, Equatable, Sendable {
     var headword: String
+    var entryType: String
     var pronunciations: [String]
     var partsOfSpeech: [AIExplanationPartOfSpeech]
+    var spellingSuggestions: [String]
     var domain: String
     var caution: String
 
     enum CodingKeys: String, CodingKey {
         case headword
+        case entryType = "entry_type"
         case pronunciations
         case partsOfSpeech = "parts_of_speech"
+        case spellingSuggestions = "spelling_suggestions"
         case domain
         case caution
     }
 
-    init(headword: String, pronunciations: [String] = [],
+    private enum AlternateCodingKeys: String, CodingKey {
+        case entryType = "entryType"
+        case definitions
+        case definitionEN = "definition_en"
+        case definitionZH = "definition_zh"
+        case descriptionEN = "description_en"
+        case descriptionZH = "description_zh"
+        case nameZH = "name_zh"
+        case chineseName = "chinese_name"
+        case spellingSuggestions = "spellingSuggestions"
+    }
+
+    init(headword: String, entryType: String = "", pronunciations: [String] = [],
          partsOfSpeech: [AIExplanationPartOfSpeech], domain: String = "",
-         caution: String = "") {
+         caution: String = "", spellingSuggestions: [String] = []) {
         self.headword = headword
+        self.entryType = entryType
         self.pronunciations = pronunciations
         self.partsOfSpeech = partsOfSpeech
+        self.spellingSuggestions = spellingSuggestions
         self.domain = domain
         self.caution = caution
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        headword = try values.decodeIfPresent(String.self, forKey: .headword) ?? ""
-        pronunciations = try values.decodeIfPresent([String].self,
-                                                    forKey: .pronunciations) ?? []
-        partsOfSpeech = try values.decodeIfPresent([AIExplanationPartOfSpeech].self,
-                                                   forKey: .partsOfSpeech) ?? []
-        domain = try values.decodeIfPresent(String.self, forKey: .domain) ?? ""
-        caution = try values.decodeIfPresent(String.self, forKey: .caution) ?? ""
+        let alternates = try decoder.container(keyedBy: AlternateCodingKeys.self)
+        headword = (try? values.decode(String.self, forKey: .headword)) ?? ""
+        entryType = (try? values.decode(String.self, forKey: .entryType))
+            ?? (try? alternates.decode(String.self, forKey: .entryType)) ?? ""
+        if let list = try? values.decode([String].self, forKey: .pronunciations) {
+            pronunciations = list
+        } else if let single = try? values.decode(String.self, forKey: .pronunciations) {
+            pronunciations = single.isEmpty ? [] : [single]
+        } else {
+            pronunciations = []
+        }
+        partsOfSpeech = (try? values.decode([AIExplanationPartOfSpeech].self,
+                                            forKey: .partsOfSpeech)) ?? []
+        spellingSuggestions = (try? values.decode([String].self,
+                                                   forKey: .spellingSuggestions))
+            ?? (try? alternates.decode([String].self, forKey: .spellingSuggestions)) ?? []
+        domain = (try? values.decode(String.self, forKey: .domain)) ?? ""
+        caution = (try? values.decode(String.self, forKey: .caution)) ?? ""
+
+        if partsOfSpeech.isEmpty {
+            var compactDefinitions = (try? alternates.decode(
+                [AICompactDefinition].self, forKey: .definitions
+            )) ?? []
+            let definitionEN = try? alternates.decode(String.self, forKey: .definitionEN)
+            let descriptionEN = try? alternates.decode(String.self, forKey: .descriptionEN)
+            let singleEN = definitionEN ?? descriptionEN ?? ""
+            let definitionZH = try? alternates.decode(String.self, forKey: .definitionZH)
+            let descriptionZH = try? alternates.decode(String.self, forKey: .descriptionZH)
+            let nameZH = try? alternates.decode(String.self, forKey: .nameZH)
+            let chineseName = try? alternates.decode(String.self, forKey: .chineseName)
+            let singleZH = definitionZH ?? descriptionZH ?? nameZH ?? chineseName ?? ""
+            if !singleEN.isEmpty || !singleZH.isEmpty {
+                compactDefinitions.append(AICompactDefinition(en: singleEN, zh: singleZH))
+            }
+            if !compactDefinitions.isEmpty {
+                let label = Self.partOfSpeechLabel(for: entryType)
+                partsOfSpeech = [AIExplanationPartOfSpeech(
+                    partOfSpeech: label,
+                    senses: compactDefinitions.map {
+                        AIExplanationSense(definitionEN: $0.en, definitionZH: $0.zh)
+                    }
+                )]
+            }
+        }
     }
 
     func validated(fallbackHeadword: String) throws -> AIExplanation {
         let cleanHeadword = aiClean(headword.isEmpty ? fallbackHeadword : headword, limit: 100)
         guard !cleanHeadword.isEmpty else { throw AIClientError.invalidResponse }
+        let cleanEntryType = aiClean(entryType, limit: 40).lowercased()
         let cleanParts = partsOfSpeech.prefix(8).compactMap { part -> AIExplanationPartOfSpeech? in
             let senses = part.senses.prefix(6).compactMap { sense -> AIExplanationSense? in
                 let english = aiClean(sense.definitionEN, limit: 700)
@@ -139,17 +193,62 @@ struct AIExplanation: Codable, Equatable, Sendable {
                 senses: senses
             )
         }
-        guard !cleanParts.isEmpty else { throw AIClientError.invalidResponse }
+        let cleanSuggestions = Array(spellingSuggestions.prefix(5)).compactMap {
+            let value = aiClean($0, limit: 100)
+            return value.isEmpty ? nil : value
+        }
+        guard !cleanParts.isEmpty || !cleanSuggestions.isEmpty else {
+            throw AIClientError.invalidResponse
+        }
         return AIExplanation(
             headword: cleanHeadword,
+            entryType: cleanEntryType,
             pronunciations: Array(pronunciations.prefix(4)).compactMap {
                 let value = aiClean($0, limit: 120)
                 return value.isEmpty ? nil : value
             },
             partsOfSpeech: cleanParts,
             domain: aiClean(domain, limit: 80),
-            caution: aiClean(caution, limit: 500)
+            caution: aiClean(caution, limit: 500),
+            spellingSuggestions: cleanSuggestions
         )
+    }
+
+    private static func partOfSpeechLabel(for entryType: String) -> String {
+        switch entryType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "proper_noun", "named_entity": return "专有名词"
+        case "brand": return "品牌名称"
+        case "organization": return "组织名称"
+        default: return ""
+        }
+    }
+}
+
+private struct AICompactDefinition: Decodable {
+    let en: String
+    let zh: String
+
+    private enum CodingKeys: String, CodingKey {
+        case en, zh
+        case definitionEN = "definition_en"
+        case definitionZH = "definition_zh"
+        case explanationEN = "explanation_en"
+        case explanationZH = "explanation_zh"
+    }
+
+    init(en: String, zh: String) {
+        self.en = en
+        self.zh = zh
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        en = (try? values.decode(String.self, forKey: .en))
+            ?? (try? values.decode(String.self, forKey: .definitionEN))
+            ?? (try? values.decode(String.self, forKey: .explanationEN)) ?? ""
+        zh = (try? values.decode(String.self, forKey: .zh))
+            ?? (try? values.decode(String.self, forKey: .definitionZH))
+            ?? (try? values.decode(String.self, forKey: .explanationZH)) ?? ""
     }
 }
 
@@ -207,6 +306,45 @@ protocol AIProviderClient: AnyObject {
                          apiKey: String) async throws -> AISentenceAnalysis
     func testConnection(configuration: AIProviderConfiguration,
                         apiKey: String) async throws
+    func inlineWordQuick(_ query: String,
+                         configuration: AIProviderConfiguration,
+                         apiKey: String) async throws -> InlineWordQuickAIResult
+    func inlineSentenceQuick(_ sentence: String,
+                             configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> InlineSentenceQuickAIResult
+    func inlineWordExpansion(_ query: String,
+                             configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> AIExplanation
+    func inlineSentenceExpansion(_ sentence: String,
+                                 configuration: AIProviderConfiguration,
+                                 apiKey: String) async throws -> AISentenceAnalysis
+}
+
+extension AIProviderClient {
+    func inlineWordQuick(_ query: String,
+                         configuration: AIProviderConfiguration,
+                         apiKey: String) async throws -> InlineWordQuickAIResult {
+        throw AIClientError.invalidRequest(code: AIRequestIntent.inlineWordQuick.rawValue)
+    }
+
+    func inlineSentenceQuick(_ sentence: String,
+                             configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> InlineSentenceQuickAIResult {
+        throw AIClientError.invalidRequest(code: AIRequestIntent.inlineSentenceQuick.rawValue)
+    }
+
+    func inlineWordExpansion(_ query: String,
+                             configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> AIExplanation {
+        try await explain(query: query, domain: "general",
+                          configuration: configuration, apiKey: apiKey)
+    }
+
+    func inlineSentenceExpansion(_ sentence: String,
+                                 configuration: AIProviderConfiguration,
+                                 apiKey: String) async throws -> AISentenceAnalysis {
+        try await analyzeSentence(sentence, configuration: configuration, apiKey: apiKey)
+    }
 }
 
 final class OpenAICompatibleClient: AIProviderClient {
@@ -240,7 +378,7 @@ final class OpenAICompatibleClient: AIProviderClient {
             systemPrompt: Self.dictionarySystemPrompt,
             userPrompt: "Query: \(cleanQuery)\nLanguage: English\nDomain: \(aiClean(domain, limit: 40))\nReturn the required JSON object only."
         )
-        guard let data = Self.extractedJSONObjectData(from: content) else {
+        guard let data = Self.extractedJSONObjectData(from: content.content) else {
             throw AIClientError.invalidJSON
         }
         do {
@@ -275,7 +413,7 @@ final class OpenAICompatibleClient: AIProviderClient {
             userPrompt: "Analyze only this JSON payload and return the required JSON object: \(payloadText)",
             maximumTokens: 2_600
         )
-        guard let data = Self.extractedJSONObjectData(from: content) else {
+        guard let data = Self.extractedJSONObjectData(from: content.content) else {
             throw AIClientError.invalidJSON
         }
         do {
@@ -299,16 +437,149 @@ final class OpenAICompatibleClient: AIProviderClient {
             userPrompt: "Return exactly this JSON object: {\"status\":\"ok\"}"
         )
         struct Status: Decodable { let status: String }
-        guard let data = Self.extractedJSONObjectData(from: content),
+        guard let data = Self.extractedJSONObjectData(from: content.content),
               let status = try? JSONDecoder().decode(Status.self, from: data),
               status.status == "ok" else {
             throw AIClientError.schemaInvalid(field: "status")
         }
     }
 
+    func inlineWordQuick(_ query: String,
+                         configuration: AIProviderConfiguration,
+                         apiKey: String) async throws -> InlineWordQuickAIResult {
+        let cleanQuery = aiClean(query, limit: 160)
+        guard !cleanQuery.isEmpty else { throw AIClientError.invalidRequest() }
+        let response = try await send(
+            configuration: configuration,
+            apiKey: apiKey,
+            systemPrompt: Self.inlineWordQuickSystemPrompt,
+            userPrompt: "Explain this English word or short phrase in concise Chinese: \(cleanQuery). Return JSON only.",
+            maximumTokens: AIRequestIntent.inlineWordQuick.maximumTokens,
+            intent: .inlineWordQuick
+        )
+        guard let data = Self.extractedJSONObjectData(from: response.content) else {
+            throw AIClientError.invalidJSON
+        }
+        do {
+            return try JSONDecoder().decode(InlineWordQuickAIResult.self, from: data).validated()
+        } catch let error as AIClientError {
+            throw error
+        } catch let error as DecodingError {
+            throw AIClientError.schemaInvalid(field: Self.decodingField(error))
+        } catch {
+            throw AIClientError.invalidJSON
+        }
+    }
+
+    func inlineSentenceQuick(_ sentence: String,
+                             configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> InlineSentenceQuickAIResult {
+        let normalized = SentenceTextNormalizer.normalize(sentence)
+        guard QueryIntentClassifier.classify(normalized).intent == .sentence else {
+            throw AIClientError.invalidRequest()
+        }
+        let payload = try JSONSerialization.data(withJSONObject: ["source_text": normalized])
+        guard let payloadText = String(data: payload, encoding: .utf8) else {
+            throw AIClientError.invalidRequest()
+        }
+        let response = try await send(
+            configuration: configuration,
+            apiKey: apiKey,
+            systemPrompt: Self.inlineSentenceQuickSystemPrompt,
+            userPrompt: "Translate only this JSON payload: \(payloadText)",
+            maximumTokens: AIRequestIntent.inlineSentenceQuick.maximumTokens,
+            intent: .inlineSentenceQuick
+        )
+        guard let data = Self.extractedJSONObjectData(from: response.content) else {
+            throw AIClientError.invalidJSON
+        }
+        do {
+            return try JSONDecoder().decode(InlineSentenceQuickAIResult.self, from: data).validated()
+        } catch let error as AIClientError {
+            throw error
+        } catch let error as DecodingError {
+            throw AIClientError.schemaInvalid(field: Self.decodingField(error))
+        } catch {
+            throw AIClientError.invalidJSON
+        }
+    }
+
+    func inlineWordExpansion(_ query: String,
+                             configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> AIExplanation {
+        let cleanQuery = aiClean(query, limit: 160)
+        guard !cleanQuery.isEmpty else { throw AIClientError.invalidRequest() }
+        let response = try await send(
+            configuration: configuration,
+            apiKey: apiKey,
+            systemPrompt: Self.dictionarySystemPrompt,
+            userPrompt: "Query: \(cleanQuery)\nLanguage: English\nDomain: general\nReturn the required JSON object only.",
+            maximumTokens: AIRequestIntent.inlineWordExpansion.maximumTokens,
+            intent: .inlineWordExpansion
+        )
+        guard let data = Self.extractedJSONObjectData(from: response.content) else {
+            throw AIClientError.invalidJSON
+        }
+        do {
+            return try JSONDecoder().decode(AIExplanation.self, from: data)
+                .validated(fallbackHeadword: cleanQuery)
+        } catch let error as AIClientError {
+            throw error
+        } catch let error as DecodingError {
+            throw AIClientError.schemaInvalid(field: Self.decodingField(error))
+        } catch {
+            throw AIClientError.invalidJSON
+        }
+    }
+
+    func inlineSentenceExpansion(_ sentence: String,
+                                 configuration: AIProviderConfiguration,
+                                 apiKey: String) async throws -> AISentenceAnalysis {
+        let normalized = SentenceTextNormalizer.normalize(sentence)
+        guard QueryIntentClassifier.classify(normalized).intent == .sentence else {
+            throw AIClientError.invalidRequest()
+        }
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "source_text": normalized,
+            "output_language": "zh-CN"
+        ])
+        guard let payloadText = String(data: payload, encoding: .utf8) else {
+            throw AIClientError.invalidRequest()
+        }
+        let response = try await send(
+            configuration: configuration,
+            apiKey: apiKey,
+            systemPrompt: Self.sentenceSystemPrompt,
+            userPrompt: "Analyze only this JSON payload and return the required JSON object: \(payloadText)",
+            maximumTokens: AIRequestIntent.inlineSentenceExpansion.maximumTokens,
+            intent: .inlineSentenceExpansion
+        )
+        guard let data = Self.extractedJSONObjectData(from: response.content) else {
+            throw AIClientError.invalidJSON
+        }
+        do {
+            return try JSONDecoder().decode(AISentenceAnalysis.self, from: data)
+                .validated(expectedSourceText: normalized)
+        } catch let error as AIClientError {
+            throw error
+        } catch let error as DecodingError {
+            throw AIClientError.schemaInvalid(field: Self.decodingField(error))
+        } catch {
+            throw AIClientError.invalidJSON
+        }
+    }
+
+    private struct ProviderResponse {
+        let content: String
+        let statusCode: Int
+        let outputTokens: Int?
+        let elapsedMilliseconds: Int
+    }
+
     private func send(configuration: AIProviderConfiguration, apiKey: String,
                       systemPrompt: String, userPrompt: String,
-                      maximumTokens: Int = 1_800) async throws -> String {
+                      maximumTokens: Int = 1_800,
+                      intent: AIRequestIntent? = nil) async throws -> ProviderResponse {
         try configuration.validate()
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { throw AIConfigurationError.missingAPIKey }
@@ -326,6 +597,9 @@ final class OpenAICompatibleClient: AIProviderClient {
         if configuration.providerType == .zhipu {
             body["thinking"] = ["type": "disabled"]
         }
+        if let intent {
+            try Self.applyThinkingPolicy(to: &body, configuration: configuration, intent: intent)
+        }
         guard JSONSerialization.isValidJSONObject(body) else {
             throw AIClientError.invalidRequest()
         }
@@ -335,6 +609,7 @@ final class OpenAICompatibleClient: AIProviderClient {
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        let startedAt = ContinuousClock.now
         do {
             let (data, response) = try await session.data(for: request)
             try Task.checkCancellation()
@@ -356,7 +631,13 @@ final class OpenAICompatibleClient: AIProviderClient {
                         case finishReason = "finish_reason"
                     }
                 }
+                struct Usage: Decodable { let completionTokens: Int?
+                    enum CodingKeys: String, CodingKey {
+                        case completionTokens = "completion_tokens"
+                    }
+                }
                 let choices: [Choice]
+                let usage: Usage?
             }
             guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
                   let choice = envelope.choices.first,
@@ -369,7 +650,20 @@ final class OpenAICompatibleClient: AIProviderClient {
                   !content.isEmpty else {
                 throw AIClientError.invalidResponse
             }
-            return content
+            let elapsed = startedAt.duration(to: .now)
+            let milliseconds = Int(elapsed.components.seconds * 1_000) +
+                Int(elapsed.components.attoseconds / 1_000_000_000_000_000)
+            if let intent {
+                Self.recordMetrics(configuration: configuration, intent: intent,
+                                   cacheHit: false, elapsedMilliseconds: milliseconds,
+                                   outputTokens: envelope.usage?.completionTokens,
+                                   statusCode: http.statusCode,
+                                   thinkingEnabled: false)
+            }
+            return ProviderResponse(content: content,
+                                    statusCode: http.statusCode,
+                                    outputTokens: envelope.usage?.completionTokens,
+                                    elapsedMilliseconds: milliseconds)
         } catch is CancellationError {
             throw AIClientError.cancelled
         } catch let error as AIClientError {
@@ -383,6 +677,48 @@ final class OpenAICompatibleClient: AIProviderClient {
         } catch {
             throw AIClientError.invalidResponse
         }
+    }
+
+    private static func applyThinkingPolicy(to body: inout [String: Any],
+                                            configuration: AIProviderConfiguration,
+                                            intent: AIRequestIntent) throws {
+        let base = configuration.normalizedBaseURL.lowercased()
+        let model = configuration.model.lowercased()
+        let isGemini = configuration.providerType == .googleGemini ||
+            base.contains("generativelanguage.googleapis.com")
+        guard !isGemini else { return }
+        let isSiliconFlow = base.contains("siliconflow.cn") || base.contains("siliconflow.com")
+        let isDeepSeek = base.contains("deepseek.com")
+        let isGLM = configuration.providerType == .zhipu || base.contains("bigmodel.cn") ||
+            model.hasPrefix("glm-")
+
+        if intent.isQuick, isDeepSeek, model.contains("reasoner") {
+            throw AIClientError.invalidRequest(code: "reasoner_not_allowed_for_quick")
+        }
+        if isSiliconFlow {
+            body["enable_thinking"] = false
+        } else if isDeepSeek || isGLM {
+            body["thinking"] = ["type": "disabled"]
+        }
+    }
+
+    static func recordMetrics(configuration: AIProviderConfiguration,
+                              intent: AIRequestIntent, cacheHit: Bool,
+                              elapsedMilliseconds: Int, outputTokens: Int?,
+                              statusCode: Int?, thinkingEnabled: Bool) {
+#if DEBUG
+        let fields = [
+            "providerID=\(configuration.providerID.uuidString.lowercased())",
+            "intent=\(intent.rawValue)",
+            "cacheHit=\(cacheHit)",
+            "firstValidMs=\(elapsedMilliseconds)",
+            "totalMs=\(elapsedMilliseconds)",
+            "thinking=\(thinkingEnabled)",
+            "outputTokens=\(outputTokens.map(String.init) ?? "unknown")",
+            "httpStatus=\(statusCode.map(String.init) ?? "cache")"
+        ]
+        fputs("[InlineAI] " + fields.joined(separator: " ") + "\n", stderr)
+#endif
     }
 
     private static func validateStatus(_ response: HTTPURLResponse, responseData: Data) throws {
@@ -493,6 +829,18 @@ final class OpenAICompatibleClient: AIProviderClient {
     repeating the sentence. Do not provide exhaustive word tagging, lengthy linguistic discussion,
     invented context, citations, Markdown, or code fences. State ambiguity briefly when necessary.
     Never claim the result comes from Oxford or any local dictionary.
+    """
+
+    private static let inlineWordQuickSystemPrompt = """
+    Prompt version 1 for inline_word_quick. Return one strict JSON object with exactly
+    part_of_speech and definitions_zh. Give at most three short, accurate Chinese core meanings.
+    Do not include examples, etymology, learning advice, reasoning, Markdown, or code fences.
+    """
+
+    private static let inlineSentenceQuickSystemPrompt = """
+    Prompt version 1 for inline_sentence_quick. Return one strict JSON object with exactly
+    translation. Give one natural complete Chinese translation only. Preserve the source meaning
+    and ambiguity; do not add grammar analysis, learning advice, reasoning, Markdown, or code fences.
     """
 }
 

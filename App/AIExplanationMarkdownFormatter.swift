@@ -55,6 +55,11 @@ final class AIExplanationMarkdownFormatter {
                 }
             }
         }
+        let spellingSuggestions = explanation.spellingSuggestions.prefix(5)
+            .map(inline).filter { !$0.isEmpty }
+        if !spellingSuggestions.isEmpty {
+            lines += ["", "- 拼写建议：\(spellingSuggestions.joined(separator: "、"))"]
+        }
         let caution = inline(explanation.caution)
         if !caution.isEmpty { lines += ["", "- 注意：\(caution)"] }
         let savedHeadword = headword?.trimmingCharacters(in: .whitespacesAndNewlines)

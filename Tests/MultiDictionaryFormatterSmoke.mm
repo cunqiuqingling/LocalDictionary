@@ -371,7 +371,7 @@ int main(int argc, const char *argv[]) {
     AffixRootEntryFormatter *rootFormatter = [[AffixRootEntryFormatter alloc] init];
 
     const std::vector<std::string> words = {
-        "prompt", "charge", "algorithm", "semiconductor", "nanotechnology", "machine learning",
+        "prompt", "charge", "assemble", "position", "harbour", "algorithm", "semiconductor", "nanotechnology", "machine learning",
         "interoperability", "sustainability", "hypertension", "pharmacokinetics",
         "metformin", "contraindication", "myocardial infarction", "pharmacology",
         "biotechnology", "biodegradable", "antihypertensive", "transcription"};
@@ -436,6 +436,34 @@ int main(int argc, const char *argv[]) {
         if ((sourceIndex == 1 || sourceIndex == 3 || sourceIndex == 4) &&
             !containsHan(definitions)) {
           return fail("Chinese structured content missing for " + word);
+        }
+        if (word == "assemble" && sourceIndex == 0) {
+          NSString *part = parts.firstObject ?: @"";
+          NSString *lowerPart = part.lowercaseString;
+          if (![lowerPart containsString:@"verb"] && ![lowerPart hasPrefix:@"v"]) {
+            return fail("assemble Oxford part of speech is not verb");
+          }
+          if (!containsHan(definitions)) {
+            return fail("assemble Oxford inline Chinese definitions missing");
+          }
+          std::cout << "assembleInline=Oxford|pos=" << utf8(part)
+                    << "|chineseDefinitions=present\n";
+        }
+        if (word == "position" && sourceIndex == 0 &&
+            [attributed.string rangeOfString:@"harbour"
+                                     options:NSCaseInsensitiveSearch].location == NSNotFound) {
+          return fail("position Oxford example does not contain harbour anchor fixture");
+        }
+        if (word == "harbour" && sourceIndex == 0) {
+          NSString *part = parts.firstObject ?: @"";
+          if (![part.lowercaseString containsString:@"noun"] &&
+              ![part.lowercaseString hasPrefix:@"n"]) {
+            return fail("harbour Oxford part of speech is not noun");
+          }
+          if (!containsHan(definitions)) {
+            return fail("harbour Oxford inline Chinese definitions missing");
+          }
+          std::cout << "harbourInline=Oxford|pos=noun|chineseDefinitions=present\n";
         }
         if (headword.length == 0 && parsedHeadword.length > 0) headword = parsedHeadword;
         [structuredSources addObject:serializedSource(sources[sourceIndex].name,
@@ -777,7 +805,7 @@ int main(int argc, const char *argv[]) {
     if (!output || ![output writeToFile:string(argv[2]) options:NSDataWritingAtomic error:&error]) {
       return fail("cannot write ignored multi-source fixture");
     }
-    std::cout << "MultiDictionaryFormatterSmoke: 18 queries passed; export fixtures="
+    std::cout << "MultiDictionaryFormatterSmoke: 21 queries passed; export fixtures="
               << exportEntries.count << "\n";
     return 0;
   }

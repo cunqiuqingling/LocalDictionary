@@ -7,6 +7,28 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
     if !condition() { throw SmokeFailure.failed(message) }
 }
 
+private func syntheticInlineSnapshot(_ text: String, kind: InlineLookupSelectionKind,
+                                     pageID: UUID, blockID: UUID = UUID())
+    -> InlineSelectionSnapshot {
+    let length = text.utf16.count
+    let normalized = InlineSelectionSnapshotFactory.normalizedIdentity(text, kind: kind) ?? text
+    return InlineSelectionSnapshot(
+        pageGenerationID: pageID,
+        selectedRange: NSRange(location: 0, length: length),
+        selectedText: text,
+        normalizedText: normalized,
+        containingParagraphRange: NSRange(location: 0, length: length),
+        anchor: InlineLookupAnchor(
+            blockID: blockID,
+            selectionUTF16RangeInBlock: NSRange(location: 0, length: length)
+        ),
+        selectionKind: kind,
+        contextBefore: "",
+        contextAfter: "",
+        currentEntryID: "test"
+    )
+}
+
 private final class MockURLProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, Data))?
     static var responseHeaders: [String: String] = [:]
@@ -85,6 +107,14 @@ private final class StubClient: AIProviderClient {
     var testedConfigurations: [AIProviderConfiguration] = []
     var sentenceConfigurations: [AIProviderConfiguration] = []
     var connectionResult: Result<Void, Error> = .success(())
+    var inlineWordQuickResult = InlineWordQuickAIResult(
+        partOfSpeech: "noun", definitionsZH: ["提示"]
+    )
+    var inlineSentenceQuickResult = InlineSentenceQuickAIResult(translation: "自然翻译。")
+    var inlineWordQuickCalls = 0
+    var inlineSentenceQuickCalls = 0
+    var inlineWordExpansionCalls = 0
+    var inlineSentenceExpansionCalls = 0
     init(result: Result<AIExplanation, Error>) { self.result = result }
     func explain(query: String, domain: String,
                  configuration: AIProviderConfiguration, apiKey: String) async throws -> AIExplanation {
@@ -105,6 +135,31 @@ private final class StubClient: AIProviderClient {
         testedProviderIDs.append(configuration.providerID)
         testedConfigurations.append(configuration)
         try connectionResult.get()
+    }
+    func inlineWordQuick(_ query: String, configuration: AIProviderConfiguration,
+                         apiKey: String) async throws -> InlineWordQuickAIResult {
+        inlineWordQuickCalls += 1
+        requestedProviderIDs.append(configuration.providerID)
+        return inlineWordQuickResult
+    }
+    func inlineSentenceQuick(_ sentence: String, configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> InlineSentenceQuickAIResult {
+        inlineSentenceQuickCalls += 1
+        requestedProviderIDs.append(configuration.providerID)
+        return inlineSentenceQuickResult
+    }
+    func inlineWordExpansion(_ query: String, configuration: AIProviderConfiguration,
+                             apiKey: String) async throws -> AIExplanation {
+        inlineWordExpansionCalls += 1
+        requestedProviderIDs.append(configuration.providerID)
+        return try result.get()
+    }
+    func inlineSentenceExpansion(_ sentence: String,
+                                 configuration: AIProviderConfiguration,
+                                 apiKey: String) async throws -> AISentenceAnalysis {
+        inlineSentenceExpansionCalls += 1
+        requestedProviderIDs.append(configuration.providerID)
+        return try sentenceResult.get()
     }
 }
 
@@ -200,6 +255,14 @@ private func sentenceEnvelope(_ analysis: AISentenceAnalysis) throws -> Data {
     ])
 }
 
+private func inlineEnvelope<T: Encodable>(_ value: T, outputTokens: Int = 24) throws -> Data {
+    let content = String(data: try JSONEncoder().encode(value), encoding: .utf8)!
+    return try JSONSerialization.data(withJSONObject: [
+        "choices": [["message": ["content": content], "finish_reason": "stop"]],
+        "usage": ["completion_tokens": outputTokens]
+    ])
+}
+
 @main
 private struct AIServiceSmoke {
     static func main() async throws {
@@ -213,14 +276,20 @@ private struct AIServiceSmoke {
             try await testKeychain()
         }
         try await testClientAndErrors()
+        try await testInlineLookupRequestsAndCache()
+        try await testInlineLocalLookupAndFormatting()
+        try await testInlineSelectionSnapshotsAndAnchors()
         try await testCacheAndService()
         try await testProviderFallback()
+        try await testProviderSwitchRetryAndScopedCacheClear()
         try await testSingleProviderConnectionSequence()
+        try testTolerantWordExplanationSchema()
         try testFormatter()
         try testSentenceFormatterAndGenerationGate()
         try await testLocalSentenceGlossary()
         try testAINoteExport()
         try testSentenceNoteExport()
+        try testInlineLookupNoteExport()
         print("AI service smoke: PASS")
     }
 
@@ -338,12 +407,12 @@ private struct AIServiceSmoke {
                    !catalog.automaticFallbackEnabled &&
                    zhipu.model == "glm-4.7-flash",
                    "provider ordering and exact Zhipu model migration")
-        var legacyGoogleCacheIdentity = google
-        legacyGoogleCacheIdentity.providerType = .openAICompatible
-        try expect(AIExplanationCache.cacheKey(query: "prompt", configuration: google) ==
+        var secondGoogleProfile = google
+        secondGoogleProfile.providerID = UUID()
+        try expect(AIExplanationCache.cacheKey(query: "prompt", configuration: google) !=
                    AIExplanationCache.cacheKey(query: "prompt",
-                                               configuration: legacyGoogleCacheIdentity),
-                   "Gemini migration preserves existing cache identity")
+                                               configuration: secondGoogleProfile),
+                   "provider UUID isolates cache identity")
         let migratedGoogleKey = try await keychain.readKey(account: google.keychainAccount)
         let migratedZhipuKey = try await keychain.readKey(account: zhipu.keychainAccount)
         try expect(migratedGoogleKey == "google-key" && migratedZhipuKey == "zhipu-key",
@@ -624,7 +693,11 @@ private struct AIServiceSmoke {
         do {
             _ = try await deniedService.explain(query: "denied-query", domain: "general")
             throw SmokeFailure.failed("credential denial reached the provider client")
-        } catch is AIProviderCredentialError {}
+        } catch let failure as AIProviderRequestFailure {
+            try expect(failure.providerID == google.providerID &&
+                       failure.underlying is AIProviderCredentialError,
+                       "credential denial identifies the attempted provider")
+        }
         try expect(deniedKeychain.readCounts[google.keychainAccount] == 1 &&
                    deniedKeychain.readCounts[zhipu.keychainAccount] == nil,
                    "credential denial stops the query without reading the backup provider")
@@ -812,6 +885,467 @@ private struct AIServiceSmoke {
         }
     }
 
+    private static func testInlineLookupRequestsAndCache() async throws {
+        let client = OpenAICompatibleClient(session: session())
+        var deepSeek = AIProviderConfiguration(
+            enabled: true, providerType: .openAICompatible, providerDisplayName: "DeepSeek",
+            baseURL: "https://api.deepseek.com", model: "deepseek-chat"
+        )
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            let thinking = body["thinking"] as? [String: String]
+            try expect(thinking?["type"] == "disabled", "DeepSeek quick thinking disabled")
+            try expect(body["enable_thinking"] == nil, "DeepSeek excludes SiliconFlow flag")
+            try expect(body["max_tokens"] as? Int == 256, "inline word quick token budget")
+            return (200, try inlineEnvelope(InlineWordQuickAIResult(
+                partOfSpeech: "noun", definitionsZH: ["提示；提示语"]
+            )))
+        }
+        let deepSeekQuick = try await client.inlineWordQuick(
+            "prompt", configuration: deepSeek, apiKey: "dummy-key"
+        )
+        try expect(deepSeekQuick.definitionsZH == ["提示；提示语"],
+                   "inline word quick strict JSON")
+
+        var requestCount = 0
+        deepSeek.model = "deepseek-reasoner"
+        MockURLProtocol.handler = { _ in requestCount += 1; return (500, Data()) }
+        do {
+            _ = try await client.inlineWordQuick("prompt", configuration: deepSeek,
+                                                apiKey: "dummy-key")
+            throw SmokeFailure.failed("reasoner used for quick lookup")
+        } catch let error as AIClientError {
+            try expect(error == .invalidRequest(code: "reasoner_not_allowed_for_quick") &&
+                       requestCount == 0, "DeepSeek reasoner rejected before quick request")
+        }
+
+        let silicon = AIProviderConfiguration(
+            enabled: true, providerType: .openAICompatible, providerDisplayName: "硅基流动",
+            baseURL: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen3-8B"
+        )
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            try expect(body["enable_thinking"] as? Bool == false,
+                       "SiliconFlow quick thinking disabled")
+            try expect(body["thinking"] == nil, "SiliconFlow excludes GLM/DeepSeek flag")
+            return (200, try inlineEnvelope(InlineWordQuickAIResult(
+                partOfSpeech: "verb", definitionsZH: ["促使"]
+            )))
+        }
+        _ = try await client.inlineWordQuick("prompt", configuration: silicon,
+                                             apiKey: "dummy-key")
+
+        let gemini = AIProviderConfiguration(
+            enabled: true, providerType: .googleGemini, providerDisplayName: "Google Gemini",
+            baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+            model: "gemini-3.1-flash-lite"
+        )
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            try expect(body["thinking"] == nil && body["enable_thinking"] == nil,
+                       "Gemini quick request has no foreign thinking flags")
+            try expect(body["max_tokens"] as? Int == 512,
+                       "inline sentence quick token budget")
+            let messages = body["messages"] as? [[String: String]] ?? []
+            try expect(!messages.description.contains("core_structure"),
+                       "sentence quick does not request full analysis")
+            return (200, try inlineEnvelope(InlineSentenceQuickAIResult(
+                translation: "这是一句自然的中文翻译。"
+            )))
+        }
+        let sentenceQuick = try await client.inlineSentenceQuick(
+            sampleSentenceText, configuration: gemini, apiKey: "dummy-key"
+        )
+        try expect(sentenceQuick.translation == "这是一句自然的中文翻译。",
+                   "sentence quick maps translation only")
+
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            try expect(body["max_tokens"] as? Int == 2_600,
+                       "sentence expansion uses full-analysis budget")
+            return (200, try sentenceEnvelope(sampleSentenceAnalysis))
+        }
+        let expansion = try await client.inlineSentenceExpansion(
+            sampleSentenceText, configuration: gemini, apiKey: "dummy-key"
+        )
+        try expect(expansion == sampleSentenceAnalysis,
+                   "sentence expansion reuses validated full analysis")
+
+        let intents = AIRequestIntent.allCases
+        let keys = Set(intents.map {
+            AIExplanationCache.inlineCacheKey(query: "Prompt", intent: $0,
+                                              configuration: gemini)
+        })
+        try expect(keys.count == 4, "four inline request intents have isolated cache keys")
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalDictionary-InlineCache-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = MemoryDefaults()
+        let store = AIConfigurationStore(defaults: defaults)
+        try store.saveCatalog(AIProviderCatalog(profiles: [gemini]))
+        let keychain = StubKeychain(values: [gemini.keychainAccount: "dummy-key"])
+        let manager = AIProviderProfileManager(store: store, keychain: keychain)
+        let stub = StubClient(result: .success(sample))
+        stub.sentenceResult = .success(sampleSentenceAnalysis)
+        let service = AIExplanationService(
+            configurationStore: store, keychain: keychain,
+            cache: AIExplanationCache(databaseURL: root.appendingPathComponent("cache.sqlite")),
+            profileManager: manager, clientFactory: { stub }
+        )
+        _ = try await service.inlineWordQuick("uncached-inline-word")
+        let cachedWord = try await service.inlineWordQuick("uncached-inline-word")
+        _ = try await service.inlineSentenceQuick(sampleSentenceText)
+        let cachedSentence = try await service.inlineSentenceQuick(sampleSentenceText)
+        try expect(stub.inlineWordQuickCalls == 1 && cachedWord.fromCache &&
+                   stub.inlineSentenceQuickCalls == 1 && cachedSentence.fromCache,
+                   "quick requests use isolated persistent cache without repeat network")
+        try expect(keychain.readCounts[gemini.keychainAccount] == 1,
+                   "word and sentence inline requests reuse one process credential")
+    }
+
+    private static func testInlineLocalLookupAndFormatting() async throws {
+        var localQueryCount = 0
+        let service = InlineLocalLookupService(sources: [
+            InlineLocalLookupSource(name: "English", priority: 1) { _ in
+                localQueryCount += 1
+                return InlineLocalDictionaryHit(source: "English", partOfSpeech: "noun",
+                    chineseDefinitions: [], additionalDefinitions: ["English definition"],
+                    examples: [], collocations: [], inflections: [], roots: [],
+                    isRootDictionary: false)
+            },
+            InlineLocalLookupSource(name: "医学", priority: 2) { _ in
+                localQueryCount += 1
+                return InlineLocalDictionaryHit(source: "英中医学辞海", partOfSpeech: "noun",
+                    chineseDefinitions: ["医学释义一", "医学释义二", "医学释义三", "医学释义四"],
+                    additionalDefinitions: ["医学释义四"], examples: ["A local example."],
+                    collocations: ["medical term"], inflections: [], roots: [],
+                    isRootDictionary: false)
+            },
+            InlineLocalLookupSource(name: "词根", priority: 3) { _ in
+                localQueryCount += 1
+                return InlineLocalDictionaryHit(source: "词根词缀", partOfSpeech: "",
+                    chineseDefinitions: ["构词说明"], additionalDefinitions: [], examples: [],
+                    collocations: [], inflections: [], roots: ["bio-：生命"],
+                    isRootDictionary: true)
+            }
+        ])
+        let local = await service.lookup("cardiology")
+        try expect(local.quick?.source == "英中医学辞海" &&
+                   local.quick?.definitions.count == 3,
+                   "local quick chooses first real Chinese definitions and caps at three")
+        try expect(local.quick?.source != "词根词缀" && local.expansion?.roots == ["bio-：生命"],
+                   "root source is expansion, not ordinary definition")
+        try expect(localQueryCount == 3, "local inline lookup is bounded to configured sources")
+
+        let id = UUID()
+        let pageID = UUID()
+        let snapshot = syntheticInlineSnapshot("cardiology", kind: .word,
+                                               pageID: pageID)
+        var supplement = InlineLookupSupplement(
+            supplementID: id, parentEntryID: pageID, selectionSnapshot: snapshot,
+            quickResult: .word(local.quick!), expandedResult: nil,
+            preparedLocalExpansion: local.expansion, localSource: local.quick?.source,
+            aiProvider: nil, aiModel: nil, state: .success, generation: 1
+        )
+        let formatter = InlineLookupAttributedFormatter()
+        let inlineLayout = InlineLayoutMetrics.calculate(
+            textContainerWidth: 360, textViewWidth: 404, lineFragmentPadding: 5,
+            pageInsetLeft: 22, pageInsetRight: 22
+        )
+        try expect(inlineLayout.isUsable && inlineLayout.availableWidth == 350 &&
+                   inlineLayout.blockContentWidth == 324,
+                   "inline width comes from text container, padding, and page insets")
+        let quick = formatter.format(supplement, layout: inlineLayout)
+        try expect(quick.string.contains("医学释义一") &&
+                   !quick.string.contains("A local example") &&
+                   !quick.string.contains("│") &&
+                   quick.attribute(.inlineSupplementID, at: 1, effectiveRange: nil) != nil,
+                   "initial word block is concise, uses real text-block styling, and is non-nestable")
+        let quickTitleRange = (quick.string as NSString).range(of: "cardiology")
+        let quickParagraph = quick.attribute(.paragraphStyle, at: quickTitleRange.location,
+                                             effectiveRange: nil) as? NSParagraphStyle
+        try expect(quickParagraph?.textBlocks.isEmpty == false,
+                   "inline block uses NSTextBlock background and border instead of glyphs")
+        let block = quickParagraph?.textBlocks.first
+        try expect(quickParagraph?.headIndent == 0 && quickParagraph?.tailIndent == 0 &&
+                   quickParagraph?.firstLineHeadIndent == 0 &&
+                   quickParagraph?.tabStops.isEmpty == true &&
+                   block?.contentWidth == inlineLayout.blockContentWidth &&
+                   (block?.contentWidth ?? 0) >= InlineLayoutMetrics.minimumAvailableWidth,
+                   "inline paragraphs reset inherited layout and block width exceeds minimum")
+        let harbourSnapshot = syntheticInlineSnapshot("harbour", kind: .word, pageID: pageID)
+        let harbour = InlineLookupSupplement(
+            supplementID: UUID(), parentEntryID: pageID, selectionSnapshot: harbourSnapshot,
+            quickResult: .word(InlineWordQuickResult(
+                partOfSpeech: "noun", definitions: ["港口", "海港", "港湾"],
+                source: "牛津高阶8", providerDisplayName: nil, model: nil, fromCache: false
+            )), expandedResult: nil, preparedLocalExpansion: nil, localSource: "牛津高阶8",
+            aiProvider: nil, aiModel: nil, state: .success, generation: 1
+        )
+        let harbourBlock = formatter.format(harbour, layout: inlineLayout)
+        try expect(harbourBlock.string.contains("harbour\nnoun\n• 港口\n• 海港\n• 港湾") &&
+                   harbourBlock.string.contains("来源：牛津高阶8"),
+                   "harbour title, POS, three Chinese definitions, and source stay horizontal")
+        var paragraphReset = true
+        harbourBlock.enumerateAttribute(
+            .paragraphStyle, in: NSRange(location: 0, length: harbourBlock.length)
+        ) { value, _, _ in
+            guard let style = value as? NSParagraphStyle else { return }
+            paragraphReset = paragraphReset && style.firstLineHeadIndent == 0 &&
+                style.headIndent == 0 && style.tailIndent == 0 && style.tabStops.isEmpty &&
+                style.baseWritingDirection == .leftToRight
+        }
+        try expect(paragraphReset, "every inline paragraph has an independent reset style")
+        let storage = NSTextStorage(attributedString: harbourBlock)
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(width: 360, height: 2_000))
+        container.lineFragmentPadding = 5
+        manager.addTextContainer(container)
+        storage.addLayoutManager(manager)
+        manager.ensureLayout(for: container)
+        let harbourCharacters = (harbourBlock.string as NSString).range(of: "harbour")
+        let harbourGlyphs = manager.glyphRange(forCharacterRange: harbourCharacters,
+                                               actualCharacterRange: nil)
+        var harbourLines = 0
+        manager.enumerateLineFragments(forGlyphRange: harbourGlyphs) { _, _, _, line, _ in
+            if NSIntersectionRange(line, harbourGlyphs).length > 0 { harbourLines += 1 }
+        }
+        try expect(harbourLines == 1,
+                   "harbour lays out on one horizontal line at normal panel width")
+        supplement.expandedResult = local.expansion.map(InlineLookupExpandedResult.local)
+        let expanded = formatter.format(supplement, layout: inlineLayout).string
+        try expect(expanded.contains("A local example") && expanded.contains("bio-：生命"),
+                   "local more view uses prepared MDX expansion")
+
+        let sentenceQuick = InlineSentenceQuickResult(
+            translation: sampleSentenceAnalysis.translationZH,
+            providerDisplayName: "Mock AI", model: "mock", fromCache: false
+        )
+        let sentencePageID = UUID()
+        supplement = InlineLookupSupplement(
+            supplementID: UUID(), parentEntryID: sentencePageID,
+            selectionSnapshot: syntheticInlineSnapshot(sampleSentenceText, kind: .sentence,
+                                                       pageID: sentencePageID),
+            quickResult: .sentence(sentenceQuick), expandedResult: nil,
+            preparedLocalExpansion: nil, localSource: nil, aiProvider: "Mock AI", aiModel: "mock",
+            state: .success, generation: 1
+        )
+        let quickSentenceText = formatter.format(supplement, layout: inlineLayout).string
+        try expect(quickSentenceText.contains(sampleSentenceAnalysis.translationZH) &&
+                   !quickSentenceText.contains("句子主干"),
+                   "initial sentence block contains translation only")
+        supplement.expandedResult = .aiSentence(AISentenceAnalysisPresentation(
+            analysis: sampleSentenceAnalysis, providerDisplayName: "Mock AI",
+            model: "mock", fromCache: false
+        ))
+        let fullSentenceText = formatter.format(supplement, layout: inlineLayout).string
+        try expect(fullSentenceText.components(separatedBy: sampleSentenceAnalysis.translationZH).count == 2 &&
+                   fullSentenceText.contains("句子主干"),
+                   "sentence expansion upgrades without duplicate translation")
+
+        let resizedLayout = InlineLayoutMetrics.calculate(
+            textContainerWidth: 456, textViewWidth: 500, lineFragmentPadding: 5,
+            pageInsetLeft: 22, pageInsetRight: 22
+        )
+        try expect(resizedLayout.blockContentWidth > inlineLayout.blockContentWidth &&
+                   InlineLookupAttributedFormatter().format(harbour, layout: resizedLayout)
+                    .string == harbourBlock.string,
+                   "resize recalculates display width without changing or re-querying content")
+
+        let visible = NSRect(x: 0, y: 0, width: 360, height: 240)
+        let buttonSize = NSSize(width: 52, height: 23)
+        let wordRect = NSRect(x: 100, y: 100, width: 48, height: 18)
+        let rightButton = InlineFloatingButtonLayout.place(
+            buttonSize: buttonSize, selectionLineRects: [wordRect], visibleRect: visible
+        )
+        try expect(rightButton?.placement == .right &&
+                   rightButton?.frame.intersects(wordRect) == false &&
+                   visible.insetBy(dx: 8, dy: 8).contains(rightButton!.frame),
+                   "word lookup button uses right-side whitespace without covering selection")
+        let nearEdge = NSRect(x: 295, y: 100, width: 45, height: 18)
+        let belowText = NSRect(x: 8, y: 124, width: 344, height: 24)
+        let alternate = InlineFloatingButtonLayout.place(
+            buttonSize: buttonSize, selectionLineRects: [nearEdge], visibleRect: visible,
+            selectionLineUsedRects: [nearEdge], anchorBlockRect: nearEdge,
+            occupiedTextRects: [nearEdge, belowText]
+        )
+        try expect(alternate?.placement == .above &&
+                   alternate?.frame.intersects(nearEdge) == false,
+                   "line-end selection falls back above when right side is insufficient")
+        let multiline = [NSRect(x: 30, y: 80, width: 300, height: 18),
+                         NSRect(x: 30, y: 100, width: 310, height: 18)]
+        let translated = InlineFloatingButtonLayout.place(
+            buttonSize: buttonSize, selectionLineRects: multiline, visibleRect: visible
+        )
+        try expect(translated?.placement == .below &&
+                   multiline.allSatisfy { translated?.frame.intersects($0) == false },
+                   "multiline translation button falls below the full selection")
+
+        let crowded = [NSRect(x: 8, y: 124, width: 344, height: 28),
+                       NSRect(x: 8, y: 68, width: 344, height: 24)]
+        let actionRow = InlineFloatingButtonLayout.place(
+            buttonSize: buttonSize, selectionLineRects: [nearEdge], visibleRect: visible,
+            selectionLineUsedRects: [nearEdge], anchorBlockRect: nearEdge,
+            occupiedTextRects: [nearEdge] + crowded
+        )
+        try expect(actionRow?.placement == .actionRow &&
+                   ([nearEdge] + crowded).allSatisfy {
+                       actionRow?.frame.intersects($0) == false
+                   }, "crowded text uses an independent safe action row")
+    }
+
+    private static func testInlineSelectionSnapshotsAndAnchors() async throws {
+        let base = NSMutableAttributedString()
+        func append(_ text: String, font: NSFont = .systemFont(ofSize: 13)) {
+            base.append(NSAttributedString(string: text, attributes: [.font: font]))
+        }
+        append("section\n")
+        append("sections  sectioned  sectioning\n")
+        append("The shed comes in sections that you assemble yourself.\n",
+               font: NSFontManager.shared.convert(.systemFont(ofSize: 13),
+                                                  toHaveTrait: .italicFontMask))
+        append("棚屋以组件形式提供，需要你自行组装。\n")
+        append("A later paragraph mentions sections and section.\n")
+        append("“Quoted”— /ˈsekʃn/ 中文不会改变 UTF-16 位置。\n")
+
+        let blocks = InlineBaseBlockBuilder.build(from: base)
+        let renderer = InlinePageRenderer()
+        let pageID = UUID()
+        let entryID = "word|section"
+        let inlineLayout = InlineLayoutMetrics.calculate(
+            textContainerWidth: 360, textViewWidth: 404, lineFragmentPadding: 5,
+            pageInsetLeft: 22, pageInsetRight: 22
+        )
+        let initial = renderer.render(baseBlocks: blocks, supplements: [], layout: inlineLayout)
+        let initialNSString = initial.string as NSString
+        let assembleRange = initialNSString.range(of: "assemble")
+        let snapshot = InlineSelectionSnapshotFactory.capture(
+            from: initial, selectedRange: assembleRange,
+            pageGenerationID: pageID, currentEntryID: entryID
+        )
+        try expect(snapshot?.selectedText == "assemble" &&
+                   snapshot?.normalizedText == "assemble",
+                   "UTF-16 selection snapshot captures assemble exactly")
+        try expect(snapshot?.selectedText != "section" && snapshot?.selectedText != "ctions se",
+                   "selection snapshot never substitutes adjacent main-entry text")
+        let anchorBlock = blocks.first { $0.blockID == snapshot?.anchor.blockID }
+        try expect(anchorBlock?.kind == .exampleWithTranslation &&
+                   anchorBlock?.content.string.contains("棚屋以组件形式") == true,
+                   "English example and following Chinese translation share a stable block")
+        try expect(InlineSelectionSnapshotFactory.validate(
+            snapshot!, in: initial, pageGenerationID: pageID, currentEntryID: entryID
+        ), "unchanged UTF-16 snapshot validates before lookup")
+        let changedPage = NSMutableAttributedString(attributedString: initial)
+        changedPage.replaceCharacters(in: assembleRange, with: "sections")
+        try expect(!InlineSelectionSnapshotFactory.validate(
+            snapshot!, in: changedPage, pageGenerationID: pageID, currentEntryID: entryID
+        ), "changed page text invalidates selection instead of querying adjacent content")
+
+        var queried: [String] = []
+        let localService = InlineLocalLookupService(sources: [
+            InlineLocalLookupSource(name: "21世纪大英汉词典", priority: 1) { query in
+                queried.append(query)
+                guard query == "assemble" else { return nil }
+                return InlineLocalDictionaryHit(
+                    source: "21世纪大英汉词典", partOfSpeech: "v.",
+                    chineseDefinitions: ["组装；装配；集合"], additionalDefinitions: [],
+                    examples: ["assemble the parts"], collocations: [], inflections: [],
+                    roots: [], isRootDictionary: false
+                )
+            }
+        ])
+        let local = await localService.lookup(snapshot!.selectedText)
+        try expect(queried == ["assemble"] && local.quick?.partOfSpeech == "v." &&
+                   local.quick?.definitions == ["组装；装配；集合"],
+                   "assemble local lookup preserves query, verb POS, and Chinese definition")
+
+        let supplement = InlineLookupSupplement(
+            supplementID: UUID(), parentEntryID: pageID, selectionSnapshot: snapshot!,
+            quickResult: local.quick.map(InlineLookupQuickResult.word), expandedResult: nil,
+            preparedLocalExpansion: local.expansion, localSource: local.quick?.source,
+            aiProvider: nil, aiModel: nil, state: .success, generation: 1
+        )
+        let noteItem = InlineLookupMarkdownFormatter().items(from: [supplement]).first
+        try expect(noteItem?.selectedText == "assemble" &&
+                   noteItem?.normalizedText == "assemble",
+                   "collection exports the immutable assemble selection snapshot")
+        let rendered = renderer.render(baseBlocks: blocks, supplements: [supplement],
+                                       layout: inlineLayout)
+        let renderedText = rendered.string as NSString
+        let english = renderedText.range(of: "The shed comes in sections")
+        let chinese = renderedText.range(of: "棚屋以组件形式")
+        let inlineTitle = renderedText.range(of: "assemble", options: [],
+                                             range: NSRange(location: NSMaxRange(chinese),
+                                                            length: renderedText.length -
+                                                                NSMaxRange(chinese)))
+        let later = renderedText.range(of: "A later paragraph")
+        try expect(english.location < chinese.location && chinese.location < inlineTitle.location &&
+                   inlineTitle.location < later.location,
+                   "inline result is anchored after example translation, not page inflections")
+
+        let sectionsRange = initialNSString.range(of: "sections", options: .backwards)
+        let sectionRange = initialNSString.range(of: "section", options: .backwards)
+        let sectionsSnapshot = InlineSelectionSnapshotFactory.capture(
+            from: initial, selectedRange: sectionsRange,
+            pageGenerationID: pageID, currentEntryID: entryID
+        )
+        let sectionSnapshot = InlineSelectionSnapshotFactory.capture(
+            from: initial, selectedRange: sectionRange,
+            pageGenerationID: pageID, currentEntryID: entryID
+        )
+        try expect(sectionsSnapshot?.selectedText == "sections" &&
+                   sectionSnapshot?.selectedText == "section" &&
+                   sectionsRange.location != sectionRange.location,
+                   "adjacent UTF-16 ranges preserve sections and section independently")
+
+        let unicodeRange = initialNSString.range(of: "/ˈsekʃn/")
+        let unicodeSnapshot = InlineSelectionSnapshotFactory.capture(
+            from: initial, selectedRange: unicodeRange,
+            pageGenerationID: pageID, currentEntryID: entryID
+        )
+        try expect(unicodeSnapshot?.selectedText == "/ˈsekʃn/",
+                   "curly quotes, em dash, IPA, and CJK do not shift UTF-16 selection")
+        try expect(!InlineSelectionSnapshotFactory.validate(
+            snapshot!, in: initial, pageGenerationID: UUID(), currentEntryID: entryID
+        ), "page generation mismatch invalidates stale selection")
+
+        let laterSnapshot = InlineSelectionSnapshotFactory.capture(
+            from: rendered, selectedRange: (rendered.string as NSString).range(of: "sections",
+                                                                                options: .backwards),
+            pageGenerationID: pageID, currentEntryID: entryID
+        )
+        try expect(laterSnapshot?.selectedText == "sections",
+                   "selection after an earlier supplement still maps to its base block")
+        let second = InlineLookupSupplement(
+            supplementID: UUID(), parentEntryID: pageID, selectionSnapshot: laterSnapshot!,
+            quickResult: .word(InlineWordQuickResult(
+                partOfSpeech: "noun", definitions: ["部分"], source: "本地",
+                providerDisplayName: nil, model: nil, fromCache: false
+            )), expandedResult: nil, preparedLocalExpansion: nil, localSource: "本地",
+            aiProvider: nil, aiModel: nil, state: .success, generation: 1
+        )
+        let thirdSnapshot = syntheticInlineSnapshot("section", kind: .word, pageID: pageID,
+                                                    blockID: blocks[0].blockID)
+        let third = InlineLookupSupplement(
+            supplementID: UUID(), parentEntryID: pageID, selectionSnapshot: thirdSnapshot,
+            quickResult: .word(InlineWordQuickResult(
+                partOfSpeech: "noun", definitions: ["章节"], source: "本地",
+                providerDisplayName: nil, model: nil, fromCache: false
+            )), expandedResult: nil, preparedLocalExpansion: nil, localSource: "本地",
+            aiProvider: nil, aiModel: nil, state: .success, generation: 1
+        )
+        let three = renderer.render(baseBlocks: blocks, supplements: [supplement, second, third],
+                                    layout: inlineLayout)
+        try expect(three.string.components(separatedBy: "来源：").count == 4,
+                   "three supplements remain independently anchored after re-render")
+        try expect(InlineSelectionSnapshotFactory.capture(
+            from: three,
+            selectedRange: (three.string as NSString).range(of: "组装；装配；集合"),
+            pageGenerationID: pageID, currentEntryID: entryID
+        ) == nil, "inline result cannot create nested inline lookup")
+    }
+
     private static func testCacheAndService() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalDictionary-AISmoke-\(UUID().uuidString)", isDirectory: true)
@@ -865,8 +1399,10 @@ private struct AIServiceSmoke {
         do {
             _ = try await service.explain(query: "prompt", domain: "technology")
             throw SmokeFailure.failed("old model cache reused")
-        } catch let error as AIClientError {
-            try expect(error == .offline, "model cache isolation")
+        } catch let failure as AIProviderRequestFailure {
+            try expect(failure.providerID == configuration.providerID &&
+                       (failure.underlying as? AIClientError) == .offline,
+                       "model cache isolation")
         }
         try await service.clearCache()
         configuration.model = "model-a"
@@ -924,8 +1460,9 @@ private struct AIServiceSmoke {
                                             zhipu.providerID: .failure(AIClientError.offline)]
         let cached = try await service.analyzeSentence(sampleSentenceText)
         try expect(cached.fromCache && cached.providerDisplayName == "智谱 AI" &&
-                   client.sentenceCalls == callsBeforeCache,
-                   "valid fallback-provider cache prevents network calls")
+                   client.sentenceCalls == callsBeforeCache + 1 &&
+                   client.requestedProviderIDs.last == google.providerID,
+                   "primary provider is tried before isolated fallback-provider cache")
 
         client.requestedProviderIDs.removeAll()
         client.resultsByProvider = [google.providerID: .failure(AIClientError.cancelled),
@@ -933,8 +1470,8 @@ private struct AIServiceSmoke {
         do {
             _ = try await service.explain(query: "cancelled-query", domain: "general")
             throw SmokeFailure.failed("cancelled request fell through")
-        } catch let error as AIClientError {
-            try expect(error == .cancelled &&
+        } catch let failure as AIProviderRequestFailure {
+            try expect((failure.underlying as? AIClientError) == .cancelled &&
                        client.requestedProviderIDs == [google.providerID],
                        "user cancellation never switches provider")
         }
@@ -1010,6 +1547,85 @@ private struct AIServiceSmoke {
                    "connection tests never save draft configuration")
     }
 
+    private static func testProviderSwitchRetryAndScopedCacheClear() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalDictionary-AIProviderSwitch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = MemoryDefaults()
+        let store = AIConfigurationStore(defaults: defaults)
+        var google = AIProviderConfiguration.googlePreset
+        google.enabled = true
+        let deepSeek = AIProviderConfiguration(
+            providerID: UUID(), enabled: false, providerType: .openAICompatible,
+            providerDisplayName: "DeepSeek",
+            baseURL: "https://api.deepseek.com/v1", model: "deepseek-chat", priority: 2
+        )
+        try store.saveCatalog(AIProviderCatalog(profiles: [google, deepSeek]))
+        let keychain = StubKeychain(values: [google.keychainAccount: "google-key",
+                                             deepSeek.keychainAccount: "deepseek-key"])
+        let manager = AIProviderProfileManager(store: store, keychain: keychain)
+        let client = StubClient(result: .failure(AIClientError.timeout))
+        client.resultsByProvider[google.providerID] = .failure(AIClientError.timeout)
+        client.resultsByProvider[deepSeek.providerID] = .success(sample)
+        let cache = AIExplanationCache(databaseURL: root.appendingPathComponent("cache.sqlite"))
+        let service = AIExplanationService(configurationStore: store, keychain: keychain,
+                                           cache: cache, profileManager: manager,
+                                           clientFactory: { client })
+
+        do {
+            _ = try await service.explain(query: "Tencent", domain: "general")
+            throw SmokeFailure.failed("Google timeout accepted")
+        } catch let failure as AIProviderRequestFailure {
+            try expect(failure.providerID == google.providerID &&
+                       (failure.underlying as? AIClientError) == .timeout,
+                       "failure reports the actual Google provider and model")
+        }
+
+        var switchedGoogle = google
+        switchedGoogle.enabled = false
+        var switchedDeepSeek = deepSeek
+        switchedDeepSeek.enabled = true
+        switchedDeepSeek.priority = 1
+        switchedGoogle.priority = 2
+        try store.saveCatalog(AIProviderCatalog(profiles: [switchedDeepSeek, switchedGoogle]))
+        client.requestedProviderIDs.removeAll()
+        let switched = try await service.explain(query: "Tencent", domain: "general",
+                                                 bypassCache: true)
+        try expect(switched.providerID == deepSeek.providerID &&
+                   switched.providerDisplayName == "DeepSeek" &&
+                   client.requestedProviderIDs == [deepSeek.providerID],
+                   "provider switch retry uses DeepSeek and cannot reuse Google state")
+
+        let callsBeforeReload = client.calls
+        _ = try await service.explain(query: "Tencent", domain: "general", bypassCache: true)
+        try expect(client.calls == callsBeforeReload + 1,
+                   "explicit re-query bypasses a successful cache")
+        let hasDeepSeekCache = await service.hasCurrentCache(
+            for: "Tencent", intent: .word, providerID: deepSeek.providerID
+        )
+        try expect(hasDeepSeekCache,
+                   "successful response creates a scoped cache entry")
+        try await service.clearCurrentCache(for: "Tencent", intent: .word,
+                                            providerID: deepSeek.providerID)
+        let hasCacheAfterClear = await service.hasCurrentCache(
+            for: "Tencent", intent: .word, providerID: deepSeek.providerID
+        )
+        try expect(!hasCacheAfterClear,
+                   "clear removes only the current query/provider/mode key")
+
+        client.resultsByProvider[deepSeek.providerID] = .failure(AIClientError.invalidJSON)
+        do {
+            _ = try await service.explain(query: "invalid-result", domain: "general",
+                                          bypassCache: true)
+            throw SmokeFailure.failed("invalid response accepted")
+        } catch {}
+        let failureWasCached = await service.hasCurrentCache(
+            for: "invalid-result", intent: .word, providerID: deepSeek.providerID
+        )
+        try expect(!failureWasCached,
+                   "format and request failures are never cached")
+    }
+
     private static func testFormatter() throws {
         let presentation = AIExplanationPresentation(explanation: sample,
                                                      providerDisplayName: "智谱 AI",
@@ -1020,6 +1636,57 @@ private struct AIServiceSmoke {
         try expect(rendered.contains("由 智谱 AI · glm-4.7-flash 生成"), "AI attribution")
         try expect(rendered.contains("促使行动的提示"), "Chinese definition")
         try expect(!rendered.contains("<") && !rendered.contains("Oxford"), "unsafe attribution")
+    }
+
+    private static func testTolerantWordExplanationSchema() throws {
+        let tencent = Data(#"""
+        {
+          "headword":"Tencent",
+          "entryType":"proper_noun",
+          "definitions":[{"zh":"腾讯，一家中国科技公司。","en":"A Chinese technology company."}]
+        }
+        """#.utf8)
+        let decoded = try JSONDecoder().decode(AIExplanation.self, from: tencent)
+            .validated(fallbackHeadword: "Tencent")
+        try expect(decoded.pronunciations.isEmpty &&
+                   decoded.partsOfSpeech.first?.partOfSpeech == "专有名词" &&
+                   decoded.partsOfSpeech.first?.senses.first?.definitionZH.contains("腾讯") == true,
+                   "proper-name response succeeds without pronunciation or explicit POS")
+
+        let missingOptional = Data(#"""
+        {
+          "headword":"example",
+          "parts_of_speech":[{"senses":[{"definition_zh":"示例"}]}]
+        }
+        """#.utf8)
+        let optionalDecoded = try JSONDecoder().decode(AIExplanation.self, from: missingOptional)
+            .validated(fallbackHeadword: "example")
+        try expect(optionalDecoded.pronunciations.isEmpty &&
+                   optionalDecoded.partsOfSpeech.first?.partOfSpeech.isEmpty == true,
+                   "missing optional pronunciation and part-of-speech fields default safely")
+
+        let singlePronunciation = Data(#"{"headword":"Tencent","pronunciations":"","definitions":[{"zh":"腾讯公司"}]}"#.utf8)
+        let singlePronunciationDecoded = try JSONDecoder().decode(
+            AIExplanation.self, from: singlePronunciation
+        ).validated(fallbackHeadword: "tencent")
+        try expect(singlePronunciationDecoded.pronunciations.isEmpty,
+                   "an empty scalar pronunciation cannot invalidate a useful definition")
+
+        let suggestion = Data(#"{"headword":"teh","spelling_suggestions":["the"]}"#.utf8)
+        let suggestionDecoded = try JSONDecoder().decode(AIExplanation.self, from: suggestion)
+            .validated(fallbackHeadword: "teh")
+        try expect(suggestionDecoded.partsOfSpeech.isEmpty &&
+                   suggestionDecoded.spellingSuggestions == ["the"],
+                   "spelling suggestion is a displayable result")
+
+        do {
+            _ = try JSONDecoder().decode(AIExplanation.self,
+                                         from: Data(#"{"headword":"empty"}"#.utf8))
+                .validated(fallbackHeadword: "empty")
+            throw SmokeFailure.failed("empty word explanation accepted")
+        } catch let error as AIClientError {
+            try expect(error == .invalidResponse, "empty response remains invalid")
+        }
     }
 
     private static func testSentenceFormatterAndGenerationGate() throws {
@@ -1408,6 +2075,78 @@ private struct AIServiceSmoke {
         _ = try store.save(combined, to: combinedURL)
         try expect(networkProbe.calls == 0 && networkProbe.sentenceCalls == 0,
                    "sentence collection performs no provider request")
+    }
+
+    private static func testInlineLookupNoteExport() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LocalDictionary-InlineNote-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("inline.md")
+        try Data().write(to: url)
+        let store = ObsidianNoteStore()
+        let local = StructuredDictionaryEntry(headword: "prompt", phonetics: [],
+                                              partsOfSpeech: ["noun"],
+                                              definitions: ["提示"], examples: [],
+                                              source: "牛津高阶 8")
+        let quick = InlineLookupNoteItem(
+            selectedText: "compound", normalizedText: "compound", kind: "word",
+            quickLines: ["- 简释：化合物；复合物"], expandedLines: [],
+            source: "英中医学辞海", provider: nil, model: nil
+        )
+        let content = VocabularyNoteSaveContent(headword: "prompt", localEntry: local,
+                                                aiSection: nil,
+                                                inlineSupplements: [quick])
+        _ = try store.save(content, to: url)
+        let first = try String(contentsOf: url, encoding: .utf8)
+        try expect(exactHeading("### 应用内划词补充", in: first) == 1 &&
+                   exactHeading("#### compound", in: first) == 1 &&
+                   first.contains("- 类型：word") &&
+                   first.contains("- 选中内容：compound") &&
+                   !first.contains("supplementID") && !first.contains("<!--"),
+                   "inline supplement exports readable Markdown without technical IDs")
+
+        let beforeDuplicate = try Data(contentsOf: url)
+        _ = try store.save(content, to: url)
+        let afterDuplicate = try Data(contentsOf: url)
+        try expect(afterDuplicate == beforeDuplicate,
+                   "duplicate inline quick supplement is not appended")
+
+        let expanded = InlineLookupNoteItem(
+            selectedText: "compound", normalizedText: "compound", kind: "word",
+            quickLines: quick.quickLines,
+            expandedLines: ["- 例句：The compound was isolated.", "- 搭配：chemical compound"],
+            source: quick.source, provider: nil, model: nil
+        )
+        let expandedContent = VocabularyNoteSaveContent(
+            headword: "prompt", localEntry: local, aiSection: nil,
+            inlineSupplements: [expanded]
+        )
+        _ = try store.save(expandedContent, to: url)
+        let augmented = try String(contentsOf: url, encoding: .utf8)
+        try expect(exactHeading("#### compound", in: augmented) == 1 &&
+                   exactHeading("##### 了解更多", in: augmented) == 1 &&
+                   augmented.contains("The compound was isolated."),
+                   "later collection fills expansion without duplicate quick block")
+
+        let sentenceItem = InlineLookupNoteItem(
+            selectedText: sampleSentenceText, normalizedText: sampleSentenceText,
+            kind: "sentence", quickLines: ["- 中文翻译：自然中文翻译。"],
+            expandedLines: [], source: "", provider: "Mock AI", model: "mock-model"
+        )
+        let sentenceContent = SentenceNoteSaveContent(
+            sourceText: "This parent sentence contains enough words to be analyzed.",
+            title: "句子解析｜This parent sentence…", aiSectionMarkdown: nil,
+            glossarySectionMarkdown: nil, inlineSupplements: [sentenceItem]
+        )
+        let sentenceURL = root.appendingPathComponent("sentence-inline.md")
+        try Data().write(to: sentenceURL)
+        _ = try store.save(sentenceContent, to: sentenceURL)
+        let sentenceText = try String(contentsOf: sentenceURL, encoding: .utf8)
+        try expect(sentenceText.contains("### 原句") &&
+                   sentenceText.contains("### 应用内划词补充") &&
+                   sentenceText.contains("- AI 来源：Mock AI · mock-model"),
+                   "sentence parent exports only already generated inline AI content")
     }
 
     private static func exactHeading(_ heading: String, in content: String) -> Int {

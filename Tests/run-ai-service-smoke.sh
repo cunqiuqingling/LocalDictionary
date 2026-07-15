@@ -24,6 +24,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/AIProviderProfileManager.swift" \
   "$ROOT/App/AIProviderSettingsSession.swift" \
   "$ROOT/App/AISentenceAnalysis.swift" \
+  "$ROOT/App/InlineLookupModels.swift" \
   "$ROOT/App/AIProviderClient.swift" \
   "$ROOT/App/AIExplanationCache.swift" \
   "$ROOT/App/AIExplanationService.swift" \

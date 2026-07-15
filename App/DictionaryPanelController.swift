@@ -19,7 +19,8 @@ final class DictionaryPanel: NSPanel {
     }
 }
 
-final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate {
+final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate,
+                                       NSTextViewDelegate {
     private let oxfordCore: DictionaryCoreBridge
     private let supplementalDictionaries: [SupplementalDictionaryRuntime]
     private let entryFormatter = OxfordEntryFormatter()
@@ -36,6 +37,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private let aiMarkdownFormatter = AIExplanationMarkdownFormatter()
     private let localGlossaryFormatter = LocalSentenceGlossaryFormatter()
     private let sentenceMarkdownFormatter = SentenceAnalysisMarkdownFormatter()
+    private let inlineAttributedFormatter = InlineLookupAttributedFormatter()
+    private let inlineMarkdownFormatter = InlineLookupMarkdownFormatter()
+    private lazy var inlinePageRenderer = InlinePageRenderer(formatter: inlineAttributedFormatter)
     private let searchField = NSSearchField()
     private let starButton = NSButton()
     private let textView: NSTextView
@@ -44,6 +48,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private let aiStatusLabel = NSTextField(wrappingLabelWithString: "")
     private let aiActionButton = NSButton()
     private let aiSettingsButton = NSButton()
+    private let aiClearCacheButton = NSButton()
     private let aiIncludeCheckbox = NSButton(
         checkboxWithTitle: "收藏时加入 AI 内容", target: nil, action: nil
     )
@@ -63,22 +68,35 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var aiSectionCharacterLocation: Int?
     private var queryGeneration = AIQueryGenerationGate()
     private var feedbackPopover: NSPopover?
-    private var globalClickMonitor: Any?
-    private var localClickMonitor: Any?
     private var localKeyMonitor: Any?
     private var isShowingNoteMenu = false
     private var animating = false
     private var reportedUnavailableDictionaryIDs: Set<String> = []
+    private var inlinePageID = UUID()
+    private var inlineBaseContent = NSAttributedString(string: "")
+    private var inlineBaseBlocks: [InlineBaseBlock] = []
+    private var inlineSupplements: [InlineLookupSupplement] = []
+    private var inlineTasks: [UUID: Task<Void, Never>] = [:]
+    private var inlineControlButtons: [NSButton] = []
+    private let inlineSelectionButton = NSButton()
+    private var pendingInlineSelection: InlineSelectionSnapshot?
+    private var inlineLayoutRetryScheduled = false
+#if DEBUG
+    private var didLogInlineLayoutDiagnostics = false
+#endif
 
     private lazy var localGlossaryService = LocalSentenceGlossaryService(
         sources: makeLocalGlossarySources()
     )
+    private lazy var inlineLocalLookupService = InlineLocalLookupService(
+        sources: makeInlineLocalLookupSources()
+    )
 
-    private enum AIAction {
+    private enum AIAction: Equatable {
         case none
         case configure
-        case explain(domain: String)
-        case analyzeSentence
+        case explain(domain: String, bypassCache: Bool)
+        case analyzeSentence(bypassCache: Bool)
         case cancelSentence
     }
 
@@ -130,9 +148,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     deinit {
         aiTask?.cancel()
         localGlossaryTask?.cancel()
-        if let globalClickMonitor { NSEvent.removeMonitor(globalClickMonitor) }
-        if let localClickMonitor { NSEvent.removeMonitor(localClickMonitor) }
+        inlineTasks.values.forEach { $0.cancel() }
         if let localKeyMonitor { NSEvent.removeMonitor(localKeyMonitor) }
+        NotificationCenter.default.removeObserver(self)
     }
 
     var isVisible: Bool { window?.isVisible == true }
@@ -160,6 +178,22 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     func aiConfigurationDidChange() {
+        aiTask?.cancel()
+        aiTask = nil
+        _ = queryGeneration.beginQuery()
+        currentAIPresentation = nil
+        currentSentencePresentation = nil
+        currentSentenceStatus = nil
+        aiSectionCharacterLocation = nil
+        aiIncludeCheckbox.state = .off
+        aiIncludeCheckbox.isHidden = true
+        aiStatusLabel.stringValue = ""
+        aiClearCacheButton.isHidden = true
+        if currentIntent == .sentence {
+            renderSentenceContent()
+        } else if let localResultContent {
+            displayAttributedText(localResultContent)
+        }
         if currentIntent == .sentence, currentSentencePresentation == nil {
             configureSentenceAction(for: currentQuery)
         } else if currentIntent != .sentence {
@@ -197,6 +231,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiTask = nil
         localGlossaryTask?.cancel()
         localGlossaryTask = nil
+        cancelAllInlineLookups(clear: true)
+        renderInlinePage()
+        hideInlineSelectionButton()
         _ = queryGeneration.beginQuery()
         animating = true
         var hiddenFrame = panel.frame
@@ -221,7 +258,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         panel.becomesKeyOnlyIfNeeded = false
         panel.hidesOnDeactivate = false
         panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
@@ -269,6 +306,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
         textView.isEditable = false
         textView.isSelectable = true
+        textView.delegate = self
         textView.drawsBackground = false
         textView.font = .systemFont(ofSize: 14)
         textView.textColor = .labelColor
@@ -285,6 +323,15 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiIncludeCheckbox.isHidden = true
         aiIncludeCheckbox.autoresizingMask = [.minXMargin]
         textView.addSubview(aiIncludeCheckbox)
+        inlineSelectionButton.bezelStyle = .rounded
+        inlineSelectionButton.controlSize = .small
+        inlineSelectionButton.font = .systemFont(ofSize: 11, weight: .medium)
+        inlineSelectionButton.target = self
+        inlineSelectionButton.action = #selector(performInlineLookupFromSelection)
+        inlineSelectionButton.sendAction(on: .leftMouseDown)
+        inlineSelectionButton.isHidden = true
+        inlineSelectionButton.setAccessibilityLabel("查询选中的正文")
+        scrollView.addSubview(inlineSelectionButton)
         let hasReadyDictionary = oxfordCore.isReady || supplementalDictionaries.contains {
             $0.core.isReady
         }
@@ -297,6 +344,13 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(inlineScrollBoundsDidChange),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
 
         aiStatusLabel.font = .systemFont(ofSize: 11)
         aiStatusLabel.textColor = .secondaryLabelColor
@@ -311,7 +365,14 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiSettingsButton.controlSize = .small
         aiSettingsButton.target = self
         aiSettingsButton.action = #selector(openAISettingsWindow)
-        let aiButtons = NSStackView(views: [aiActionButton, aiSettingsButton])
+        aiClearCacheButton.title = "清除本条缓存"
+        aiClearCacheButton.bezelStyle = .inline
+        aiClearCacheButton.isBordered = false
+        aiClearCacheButton.controlSize = .small
+        aiClearCacheButton.target = self
+        aiClearCacheButton.action = #selector(clearCurrentAICache)
+        aiClearCacheButton.isHidden = true
+        let aiButtons = NSStackView(views: [aiActionButton, aiSettingsButton, aiClearCacheButton])
         aiButtons.orientation = .horizontal
         aiButtons.spacing = 8
         aiButtons.alignment = .centerY
@@ -345,22 +406,6 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     private func installEventMonitors() {
-        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
-            [weak self] _ in DispatchQueue.main.async { self?.hide() }
-        }
-        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) {
-            [weak self] event in
-            if self?.notePicker.isChoosing == true || self?.isShowingNoteMenu == true {
-                return event
-            }
-            if let attachedSheet = self?.window?.attachedSheet, event.window === attachedSheet {
-                return event
-            }
-            if let panel = self?.window, panel.isVisible, event.window !== panel {
-                self?.hide()
-            }
-            return event
-        }
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             if event.keyCode == 53, self?.isVisible == true {
                 self?.hide()
@@ -540,7 +585,10 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiSectionCharacterLocation = nil
         aiIncludeCheckbox.state = .off
         aiIncludeCheckbox.isHidden = true
+        aiClearCacheButton.isHidden = true
+        aiSettingsButton.title = "打开 AI 设置…"
         updateAIFooter(visible: false)
+        clearInlinePage()
     }
 
     private func configureAIAction(hasLocalResult: Bool, hasChinese: Bool) {
@@ -574,7 +622,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     self.updateAIFooter(visible: false)
                     return
                 }
-                self.aiAction = .explain(domain: self.suggestedDomain())
+                self.aiAction = .explain(domain: self.suggestedDomain(), bypassCache: false)
                 self.aiStatusLabel.stringValue = ""
                 self.aiActionButton.isHidden = false
                 if !hasLocalResult {
@@ -597,10 +645,10 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             return
         case .configure:
             openAISettings()
-        case .explain(let domain):
-            requestAIExplanation(domain: domain)
-        case .analyzeSentence:
-            requestSentenceAnalysis()
+        case .explain(let domain, let bypassCache):
+            requestAIExplanation(domain: domain, bypassCache: bypassCache)
+        case .analyzeSentence(let bypassCache):
+            requestSentenceAnalysis(bypassCache: bypassCache)
         case .cancelSentence:
             cancelSentenceAnalysis()
         }
@@ -610,7 +658,68 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         openAISettings()
     }
 
-    private func requestAIExplanation(domain: String) {
+    @objc private func clearCurrentAICache() {
+        let query = currentQuery
+        let intent = currentIntent
+        let providerID = intent == .sentence
+            ? currentSentencePresentation?.providerID : currentAIPresentation?.providerID
+        let generation = queryGeneration.generation
+        guard !query.isEmpty else { return }
+        aiClearCacheButton.isEnabled = false
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await aiService.clearCurrentCache(for: query, intent: intent,
+                                                      providerID: providerID)
+                await MainActor.run {
+                    guard self.currentQuery == query, self.currentIntent == intent,
+                          self.queryGeneration.accepts(generation) else { return }
+                    self.aiClearCacheButton.isHidden = true
+                    self.aiClearCacheButton.isEnabled = true
+                    self.aiStatusLabel.stringValue = "本条 AI 缓存已清除。"
+                    self.updateAIFooter(visible: true, compact: self.aiAction == .none)
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.currentQuery == query, self.currentIntent == intent,
+                          self.queryGeneration.accepts(generation) else { return }
+                    self.aiClearCacheButton.isEnabled = true
+                    self.aiStatusLabel.stringValue = "无法清除本条缓存：\(error.localizedDescription)"
+                    self.updateAIFooter(visible: true)
+                }
+            }
+        }
+    }
+
+    private func refreshCurrentAICacheControl(query: String) {
+        let intent = currentIntent
+        let providerID = intent == .sentence
+            ? currentSentencePresentation?.providerID : currentAIPresentation?.providerID
+        let generation = queryGeneration.generation
+        Task { [weak self] in
+            guard let self else { return }
+            let exists = await aiService.hasCurrentCache(for: query, intent: intent,
+                                                         providerID: providerID)
+            await MainActor.run {
+                guard self.currentQuery == query, self.currentIntent == intent,
+                      self.queryGeneration.accepts(generation) else { return }
+                self.aiClearCacheButton.isHidden = !exists
+                self.aiClearCacheButton.isEnabled = true
+                if !self.aiFooter.isHidden {
+                    self.aiFooterHeightConstraint?.constant = exists ? 48 : 22
+                }
+            }
+        }
+    }
+
+    private func aiFailureMessage(_ error: Error) -> String {
+        if let failure = error as? AIProviderRequestFailure {
+            return failure.localizedDescription
+        }
+        return error.localizedDescription
+    }
+
+    private func requestAIExplanation(domain: String, bypassCache: Bool = false) {
         guard !currentQuery.isEmpty else { return }
         let query = currentQuery
         let generation = queryGeneration.generation
@@ -623,7 +732,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let presentation = try await aiService.explain(query: query, domain: domain)
+                let presentation = try await aiService.explain(query: query, domain: domain,
+                                                                bypassCache: bypassCache)
                 guard !Task.isCancelled else { return }
                 let formatted = aiEntryFormatter.format(presentation)
                 await MainActor.run {
@@ -650,6 +760,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                         ? "已显示本机缓存的 AI 结果" : "AI 结果已生成"
                     self.aiActionButton.isHidden = true
                     self.aiSettingsButton.isHidden = true
+                    self.refreshCurrentAICacheControl(query: query)
                     self.updateAIFooter(visible: true, compact: true)
                 }
             } catch {
@@ -658,12 +769,14 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     guard self.currentQuery == query,
                           self.currentIntent != .sentence,
                           self.queryGeneration.accepts(generation) else { return }
-                    self.aiAction = .explain(domain: domain)
-                    self.aiStatusLabel.stringValue = error.localizedDescription
-                    self.aiActionButton.title = "重试"
+                    self.aiAction = .explain(domain: domain, bypassCache: true)
+                    self.aiStatusLabel.stringValue = self.aiFailureMessage(error)
+                    self.aiActionButton.title = "重新查询"
                     self.aiActionButton.isHidden = false
                     self.aiActionButton.isEnabled = true
                     self.aiSettingsButton.isHidden = false
+                    self.aiSettingsButton.title = "更换 AI 服务…"
+                    self.refreshCurrentAICacheControl(query: query)
                     self.updateAIFooter(visible: true)
                 }
             }
@@ -744,7 +857,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                 if availability.automaticSentenceAnalysisEnabled {
                     self.requestSentenceAnalysis(expectedGeneration: generation)
                 } else {
-                    self.aiAction = .analyzeSentence
+                    self.aiAction = .analyzeSentence(bypassCache: false)
                     self.currentSentenceStatus = "可按需请求 AI；本地词语参考不会联网"
                     self.aiStatusLabel.stringValue = "完整句子不会自动发送"
                     self.aiActionButton.title = "AI 翻译与句子解析"
@@ -758,7 +871,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
     }
 
-    private func requestSentenceAnalysis(expectedGeneration: UInt64? = nil) {
+    private func requestSentenceAnalysis(expectedGeneration: UInt64? = nil,
+                                         bypassCache: Bool = false) {
         guard currentIntent == .sentence, !currentQuery.isEmpty else { return }
         let sentence = currentQuery
         let generation = expectedGeneration ?? queryGeneration.generation
@@ -776,7 +890,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let presentation = try await aiService.analyzeSentence(sentence)
+                let presentation = try await aiService.analyzeSentence(
+                    sentence, bypassCache: bypassCache
+                )
                 guard !Task.isCancelled else { return }
                 let formatted = aiSentenceFormatter.format(presentation)
                 await MainActor.run {
@@ -798,6 +914,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     self.aiStatusLabel.stringValue = presentation.fromCache
                         ? "已显示本机缓存的句子解析" : "句子解析已生成"
                     self.aiSettingsButton.isHidden = true
+                    self.refreshCurrentAICacheControl(query: sentence)
                     self.updateAIFooter(visible: true, compact: true)
                 }
             } catch {
@@ -809,12 +926,14 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     self.currentSentencePresentation = nil
                     self.currentSentenceStatus = error.localizedDescription
                     self.renderSentenceContent()
-                    self.aiAction = .analyzeSentence
-                    self.aiStatusLabel.stringValue = error.localizedDescription
-                    self.aiActionButton.title = "重试"
+                    self.aiAction = .analyzeSentence(bypassCache: true)
+                    self.aiStatusLabel.stringValue = self.aiFailureMessage(error)
+                    self.aiActionButton.title = "重新查询"
                     self.aiActionButton.isHidden = false
                     self.aiActionButton.isEnabled = true
                     self.aiSettingsButton.isHidden = false
+                    self.aiSettingsButton.title = "更换 AI 服务…"
+                    self.refreshCurrentAICacheControl(query: sentence)
                     self.updateAIFooter(visible: true)
                     self.refreshStarState()
                 }
@@ -833,9 +952,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         localGlossaryTask = nil
         renderSentenceContent()
         startLocalGlossaryAnalysis(for: currentQuery)
-        aiAction = .analyzeSentence
+        aiAction = .analyzeSentence(bypassCache: true)
         aiStatusLabel.stringValue = "句子分析已取消"
-        aiActionButton.title = "重试"
+        aiActionButton.title = "重新查询"
         aiActionButton.isHidden = false
         aiActionButton.isEnabled = true
         aiSettingsButton.isHidden = false
@@ -845,8 +964,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     private func updateAIFooter(visible: Bool, compact: Bool = false) {
         aiFooter.isHidden = !visible
-        if visible { aiActionButton.isHidden = compact }
-        aiFooterHeightConstraint?.constant = visible ? (compact ? 22 : 52) : 0
+        if visible, compact { aiActionButton.isHidden = true }
+        let compactHeight: CGFloat = aiClearCacheButton.isHidden ? 22 : 48
+        aiFooterHeightConstraint?.constant = visible ? (compact ? compactHeight : 52) : 0
     }
 
     @objc private func aiInclusionDidChange() {
@@ -925,6 +1045,123 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             glossarySource(id: .newOxford, name: "新牛津英文", priority: 4),
             glossarySource(id: .affixRootA, name: "词根词缀", priority: 5)
         ]
+    }
+
+    private func makeInlineLocalLookupSources() -> [InlineLocalLookupSource] {
+        var sources: [InlineLocalLookupSource] = [
+            InlineLocalLookupSource(name: "牛津高阶 8", priority: 1) { [weak self] term in
+                self?.lookupOxfordInline(term)
+            }
+        ]
+        let ordered: [(DictionarySourceID, String, Int)] = [
+            (.century21, "21世纪大英汉词典", 2),
+            (.newOxford, "新牛津英文", 3),
+            (.medicalEnglishChinese, "英中医学辞海", 4),
+            (.affixRootA, "词根词缀", 5)
+        ]
+        sources += ordered.map { id, name, priority in
+            InlineLocalLookupSource(name: name, priority: priority) { [weak self] term in
+                self?.lookupSupplementalInline(term, sourceID: id, sourceName: name)
+            }
+        }
+        return sources
+    }
+
+    private func lookupOxfordInline(_ term: String) -> InlineLocalDictionaryHit? {
+        let result = synchronizedLookup(core: oxfordCore, query: term)
+        guard result["found"] as? Bool == true,
+              let html = result["html"] as? String else { return nil }
+        let parsed = OxfordEntryFormatter().formatHTML(html).structuredEntry
+        let semantic = parsed.semanticEntry
+        let chinese = Self.uniqueInlineStrings(
+            parsed.definitions.filter(Self.containsCJK) + Self.glossaryDefinitions(from: semantic),
+            maximum: 12
+        )
+        let examples = Self.uniqueInlineStrings(
+            parsed.examples + semantic.partOfSpeechSections.flatMap { section in
+                section.senses.flatMap(Self.inlineExamples)
+            }, maximum: 8
+        )
+        let relations = semantic.partOfSpeechSections.flatMap { section in
+            section.relations.flatMap(\.values) + section.senses.flatMap(Self.inlineRelations)
+        } + semantic.entryLevelRelations.flatMap(\.values)
+        return InlineLocalDictionaryHit(
+            source: "牛津高阶 8",
+            partOfSpeech: parsed.partsOfSpeech.first ?? "",
+            chineseDefinitions: chinese,
+            additionalDefinitions: Array(chinese.dropFirst(3)),
+            examples: examples,
+            collocations: Self.uniqueInlineStrings(relations, maximum: 8),
+            inflections: semantic.inflections,
+            roots: [],
+            isRootDictionary: false
+        )
+    }
+
+    private func lookupSupplementalInline(_ term: String, sourceID: DictionarySourceID,
+                                          sourceName: String) -> InlineLocalDictionaryHit? {
+        guard let dictionary = supplementalDictionaries.first(where: { $0.id == sourceID }) else {
+            return nil
+        }
+        let result = synchronizedLookup(core: dictionary.core, query: term)
+        guard result["found"] as? Bool == true,
+              let html = result["html"] as? String else { return nil }
+        let matched = (result["matchedHeadword"] as? String) ?? term
+        let parsed = formatSupplementalHTML(html, matchedHeadword: matched,
+                                           sourceID: sourceID).structuredEntry
+        var values = parsed.definitions
+        values += parsed.partOfSpeechSections.flatMap { section in
+            section.senses.flatMap { [$0.definition] + $0.labels }
+        }
+        values += Self.glossaryDefinitions(from: parsed.semanticEntry)
+        let chinese = Self.uniqueInlineStrings(values.filter(Self.containsCJK), maximum: 12)
+        var examples = parsed.examples
+        examples += parsed.partOfSpeechSections.flatMap { $0.senses.flatMap(\.examples) }
+        examples += parsed.semanticEntry.partOfSpeechSections.flatMap { section in
+            section.senses.flatMap(Self.inlineExamples)
+        }
+        let relations = parsed.semanticEntry.partOfSpeechSections.flatMap { section in
+            section.relations.flatMap(\.values) + section.senses.flatMap(Self.inlineRelations)
+        } + parsed.semanticEntry.entryLevelRelations.flatMap(\.values)
+        let isRoot = sourceID == .affixRootA
+        return InlineLocalDictionaryHit(
+            source: sourceName,
+            partOfSpeech: parsed.partsOfSpeech.first ?? "",
+            chineseDefinitions: chinese,
+            additionalDefinitions: Array(chinese.dropFirst(3)),
+            examples: Self.uniqueInlineStrings(examples, maximum: 8),
+            collocations: Self.uniqueInlineStrings(relations, maximum: 8),
+            inflections: parsed.semanticEntry.inflections,
+            roots: isRoot ? Self.uniqueInlineStrings(values, maximum: 8) : [],
+            isRootDictionary: isRoot
+        )
+    }
+
+    private static func inlineExamples(_ sense: DictionarySemanticSense) -> [String] {
+        var values = sense.examples.map { example in
+            let translations = example.translations.joined(separator: "；")
+            return translations.isEmpty ? example.english : "\(example.english) — \(translations)"
+        }
+        values += sense.subsenses.flatMap(inlineExamples)
+        return values
+    }
+
+    private static func inlineRelations(_ sense: DictionarySemanticSense) -> [String] {
+        var values = sense.relations.flatMap(\.values)
+        values += sense.subsenses.flatMap(inlineRelations)
+        return values
+    }
+
+    private static func uniqueInlineStrings(_ values: [String], maximum: Int) -> [String] {
+        var seen: Set<String> = []
+        var output: [String] = []
+        for value in values {
+            let clean = SentenceTextNormalizer.normalize(value)
+            guard !clean.isEmpty, seen.insert(clean).inserted else { continue }
+            output.append(clean)
+            if output.count == maximum { break }
+        }
+        return output
     }
 
     private func glossarySource(id: DictionarySourceID, name: String,
@@ -1115,20 +1352,555 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     private func displayText(_ value: String) {
         precondition(Thread.isMainThread)
-        textView.string = value
-        let range = NSRange(location: 0, length: textView.string.utf16.count)
-        textView.textStorage?.setAttributes([
+        let attributed = NSMutableAttributedString(string: value)
+        let range = NSRange(location: 0, length: attributed.length)
+        attributed.setAttributes([
             .font: NSFont.systemFont(ofSize: 14),
             .foregroundColor: NSColor.labelColor
         ], range: range)
-        textView.needsDisplay = true
+        setInlineBaseContent(attributed)
     }
 
     private func displayAttributedText(_ value: NSAttributedString) {
         precondition(Thread.isMainThread)
-        textView.textStorage?.setAttributedString(value)
+        setInlineBaseContent(value)
+    }
+
+    private func setInlineBaseContent(_ value: NSAttributedString) {
+        let next = value.copy() as? NSAttributedString ?? value
+        let contentChanged = !inlineBaseContent.isEqual(to: next)
+        if inlineBaseContent.length > 0, contentChanged {
+            if !inlineSupplements.isEmpty { cancelAllInlineLookups(clear: true) }
+            inlinePageID = UUID()
+            pendingInlineSelection = nil
+            hideInlineSelectionButton()
+        }
+        inlineBaseContent = next
+        if contentChanged || inlineBaseBlocks.isEmpty {
+            inlineBaseBlocks = InlineBaseBlockBuilder.build(from: next)
+        }
+        renderInlinePage()
+    }
+
+    private func clearInlinePage() {
+        cancelAllInlineLookups(clear: true)
+        inlinePageID = UUID()
+        inlineBaseContent = NSAttributedString(string: "")
+        inlineBaseBlocks = []
+        pendingInlineSelection = nil
+        hideInlineSelectionButton()
+    }
+
+    private func cancelAllInlineLookups(clear: Bool) {
+        inlineTasks.values.forEach { $0.cancel() }
+        inlineTasks.removeAll()
+        if clear { inlineSupplements.removeAll() }
+    }
+
+    private func renderInlinePage(allowRetry: Bool = true) {
+        precondition(Thread.isMainThread)
+        window?.contentView?.layoutSubtreeIfNeeded()
+        scrollView.layoutSubtreeIfNeeded()
+        textView.layoutSubtreeIfNeeded()
+        let visibleOrigin = scrollView.contentView.bounds.origin
+        let layoutMetrics = currentInlineLayoutMetrics()
+        let output = inlinePageRenderer.render(baseBlocks: inlineBaseBlocks,
+                                               supplements: inlineSupplements,
+                                               layout: layoutMetrics)
+        textView.textStorage?.setAttributedString(output)
         textView.needsLayout = true
         textView.needsDisplay = true
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        scrollView.contentView.scroll(to: visibleOrigin)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        positionInlineControlButtons()
+        if !aiIncludeCheckbox.isHidden { positionAIIncludeCheckbox() }
+        if !inlineSupplements.isEmpty, layoutMetrics == nil, allowRetry {
+            scheduleInlineLayoutRetry()
+        }
+    }
+
+    private func currentInlineLayoutMetrics() -> InlineLayoutMetrics? {
+        guard let container = textView.textContainer else { return nil }
+        let metrics = InlineLayoutMetrics.calculate(
+            textContainerWidth: container.containerSize.width,
+            textViewWidth: textView.bounds.width,
+            lineFragmentPadding: container.lineFragmentPadding,
+            pageInsetLeft: textView.textContainerInset.width,
+            pageInsetRight: textView.textContainerInset.width
+        )
+#if DEBUG
+        if !didLogInlineLayoutDiagnostics, !inlineSupplements.isEmpty {
+            didLogInlineLayoutDiagnostics = true
+            NSLog("Inline layout: container=%.1f available=%.1f content=%.1f indent=0 tail=0 first=0 attachment=none",
+                  metrics.textContainerWidth, metrics.availableWidth, metrics.blockContentWidth)
+        }
+#endif
+        return metrics.isUsable ? metrics : nil
+    }
+
+    private func scheduleInlineLayoutRetry() {
+        guard !inlineLayoutRetryScheduled else { return }
+        inlineLayoutRetryScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.inlineLayoutRetryScheduled = false
+            self.renderInlinePage(allowRetry: false)
+        }
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard notification.object as? NSTextView === textView else { return }
+        updateInlineSelectionButton()
+    }
+
+    private func updateInlineSelectionButton() {
+        let range = textView.selectedRange()
+        guard range.length > 0, let storage = textView.textStorage,
+              NSMaxRange(range) <= storage.length,
+              !renderedRangeContainsInlineSupplement(range),
+              let snapshot = InlineSelectionSnapshotFactory.capture(
+                from: storage,
+                selectedRange: range,
+                pageGenerationID: inlinePageID,
+                currentEntryID: currentInlineEntryID
+              ) else {
+            hideInlineSelectionButton()
+            return
+        }
+        pendingInlineSelection = snapshot
+        inlineSelectionButton.title = snapshot.selectionKind == .sentence ? "翻译" : "查词"
+        inlineSelectionButton.sizeToFit()
+        inlineSelectionButton.frame.size = NSSize(
+            width: max(48, inlineSelectionButton.frame.width + 12), height: 23
+        )
+        inlineSelectionButton.isHidden = !positionInlineSelectionButton(for: range)
+    }
+
+    private func renderedRangeContainsInlineSupplement(_ range: NSRange) -> Bool {
+        var contains = false
+        textView.textStorage?.enumerateAttribute(.inlineSupplementID, in: range) { value, _, stop in
+            if value != nil { contains = true; stop.pointee = true }
+        }
+        return contains
+    }
+
+    @discardableResult
+    private func positionInlineSelectionButton(for range: NSRange) -> Bool {
+        guard let layout = textView.layoutManager, let container = textView.textContainer else {
+            return false
+        }
+        layout.ensureLayout(for: container)
+        let glyphs = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+        var lineRects: [NSRect] = []
+        var usedLineRects: [NSRect] = []
+        layout.enumerateLineFragments(forGlyphRange: glyphs) { _, usedRect, _, lineGlyphs, _ in
+            let selectedGlyphs = NSIntersectionRange(glyphs, lineGlyphs)
+            guard selectedGlyphs.length > 0 else { return }
+            let textRect = layout.boundingRect(forGlyphRange: selectedGlyphs, in: container)
+                .offsetBy(dx: self.textView.textContainerOrigin.x,
+                          dy: self.textView.textContainerOrigin.y)
+            lineRects.append(self.scrollView.convert(textRect, from: self.textView))
+            let fullLine = usedRect.offsetBy(dx: self.textView.textContainerOrigin.x,
+                                             dy: self.textView.textContainerOrigin.y)
+            usedLineRects.append(self.scrollView.convert(fullLine, from: self.textView))
+        }
+        let visible = scrollView.contentView.frame
+        var occupiedTextRects: [NSRect] = []
+        let allGlyphs = layout.glyphRange(for: container)
+        layout.enumerateLineFragments(forGlyphRange: allGlyphs) { _, usedRect, _, _, _ in
+            let textRect = usedRect.offsetBy(dx: self.textView.textContainerOrigin.x,
+                                             dy: self.textView.textContainerOrigin.y)
+            let converted = self.scrollView.convert(textRect, from: self.textView)
+            if converted.intersects(visible) { occupiedTextRects.append(converted) }
+        }
+        let anchorBlockRect = pendingInlineSelection.flatMap {
+            renderedRect(forBaseBlockID: $0.anchor.blockID, layout: layout, container: container)
+        }
+        guard let result = InlineFloatingButtonLayout.place(
+            buttonSize: inlineSelectionButton.frame.size,
+            selectionLineRects: lineRects,
+            visibleRect: visible,
+            selectionLineUsedRects: usedLineRects,
+            anchorBlockRect: anchorBlockRect,
+            occupiedTextRects: occupiedTextRects
+        ) else { return false }
+        inlineSelectionButton.frame = result.frame
+        return true
+    }
+
+    private func renderedRect(forBaseBlockID blockID: UUID, layout: NSLayoutManager,
+                              container: NSTextContainer) -> NSRect? {
+        guard let storage = textView.textStorage, storage.length > 0 else { return nil }
+        var renderedRange: NSRange?
+        storage.enumerateAttribute(.inlineBaseBlockID,
+                                   in: NSRange(location: 0, length: storage.length)) {
+            value, range, stop in
+            if (value as? String) == blockID.uuidString {
+                renderedRange = range
+                stop.pointee = true
+            }
+        }
+        guard let renderedRange else { return nil }
+        let glyphRange = layout.glyphRange(forCharacterRange: renderedRange,
+                                           actualCharacterRange: nil)
+        let textRect = layout.boundingRect(forGlyphRange: glyphRange, in: container)
+            .offsetBy(dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y)
+        return scrollView.convert(textRect, from: textView)
+    }
+
+    private func hideInlineSelectionButton(clearSnapshot: Bool = true) {
+        inlineSelectionButton.isHidden = true
+        if clearSnapshot { pendingInlineSelection = nil }
+    }
+
+    @objc private func inlineScrollBoundsDidChange(_ notification: Notification) {
+        guard !inlineSelectionButton.isHidden, pendingInlineSelection != nil else { return }
+        let positioned = positionInlineSelectionButton(for: textView.selectedRange())
+        if !positioned { hideInlineSelectionButton() }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        renderInlinePage()
+        if !inlineSelectionButton.isHidden, pendingInlineSelection != nil,
+           !positionInlineSelectionButton(for: textView.selectedRange()) {
+            hideInlineSelectionButton(clearSnapshot: false)
+        }
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        hideInlineSelectionButton()
+        window?.level = .normal
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        window?.level = .floating
+    }
+
+    @objc private func performInlineLookupFromSelection() {
+        guard let snapshot = pendingInlineSelection, let storage = textView.textStorage else {
+            return
+        }
+        guard InlineSelectionSnapshotFactory.validate(
+            snapshot, in: storage, pageGenerationID: inlinePageID,
+            currentEntryID: currentInlineEntryID
+        ), inlineBaseBlocks.contains(where: { $0.blockID == snapshot.anchor.blockID }) else {
+            hideInlineSelectionButton()
+            showFeedback("页面内容已变化，请重新选择文字")
+            return
+        }
+        hideInlineSelectionButton()
+        if let existing = inlineSupplements.first(where: {
+            $0.duplicateKey == snapshot.duplicateKey
+        }) {
+            scrollInlineSupplementToVisible(existing.supplementID)
+            return
+        }
+        let id = UUID()
+        let pageID = inlinePageID
+        inlineSupplements.append(InlineLookupSupplement(
+            supplementID: id,
+            parentEntryID: pageID,
+            selectionSnapshot: snapshot,
+            quickResult: nil,
+            expandedResult: nil,
+            preparedLocalExpansion: nil,
+            localSource: nil,
+            aiProvider: nil,
+            aiModel: nil,
+            state: .loadingQuick,
+            generation: 1
+        ))
+        renderInlinePage()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            switch snapshot.selectionKind {
+            case .sentence:
+                await self.performInlineSentenceQuick(id: id, pageID: pageID,
+                                                      text: snapshot.selectedText,
+                                                      normalizedText: snapshot.normalizedText,
+                                                      generation: 1)
+            case .word, .phrase:
+                await self.performInlineWordQuick(id: id, pageID: pageID,
+                                                  text: snapshot.selectedText,
+                                                  normalizedText: snapshot.normalizedText,
+                                                  generation: 1)
+            }
+        }
+        inlineTasks[id] = task
+    }
+
+    private var currentInlineEntryID: String {
+        let kind: String
+        switch currentIntent {
+        case .word: kind = "word"
+        case .phrase: kind = "phrase"
+        case .sentence: kind = "sentence"
+        case .textTooLong: kind = "invalid"
+        }
+        return "\(kind)|\(currentQuery.precomposedStringWithCanonicalMapping)"
+    }
+
+    private func performInlineWordQuick(id: UUID, pageID: UUID, text: String,
+                                        normalizedText: String, generation: UInt64) async {
+        let local = await inlineLocalLookupService.lookup(text)
+        guard !Task.isCancelled else { return }
+        if let quick = local.quick {
+            await MainActor.run {
+                self.updateInlineSupplement(id: id, pageID: pageID, generation: generation,
+                                            expectedNormalizedText: normalizedText) {
+                    $0.quickResult = .word(quick)
+                    $0.preparedLocalExpansion = local.expansion
+                    $0.localSource = quick.source
+                    $0.state = .success
+                }
+            }
+            return
+        }
+        let mayRequestAI = await MainActor.run {
+            self.inlineQueryStillValid(id: id, pageID: pageID, generation: generation,
+                                       expectedNormalizedText: normalizedText)
+        }
+        guard mayRequestAI, !Task.isCancelled else { return }
+        do {
+            let quick = try await aiService.inlineWordQuick(text)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.updateInlineSupplement(id: id, pageID: pageID, generation: generation,
+                                            expectedNormalizedText: normalizedText) {
+                    $0.quickResult = .word(quick)
+                    $0.preparedLocalExpansion = local.expansion
+                    $0.aiProvider = quick.providerDisplayName
+                    $0.aiModel = quick.model
+                    $0.state = .success
+                }
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            let message = Self.inlineFailureMessage(error, localMiss: true)
+            await MainActor.run {
+                self.updateInlineSupplement(id: id, pageID: pageID, generation: generation,
+                                            expectedNormalizedText: normalizedText) {
+                    $0.state = .failed(message)
+                }
+            }
+        }
+    }
+
+    private func performInlineSentenceQuick(id: UUID, pageID: UUID, text: String,
+                                            normalizedText: String, generation: UInt64) async {
+        let mayRequestAI = await MainActor.run {
+            self.inlineQueryStillValid(id: id, pageID: pageID, generation: generation,
+                                       expectedNormalizedText: normalizedText)
+        }
+        guard mayRequestAI, !Task.isCancelled else { return }
+        do {
+            let result = try await aiService.inlineSentenceQuick(text)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.updateInlineSupplement(id: id, pageID: pageID, generation: generation,
+                                            expectedNormalizedText: normalizedText) {
+                    $0.quickResult = .sentence(result)
+                    $0.aiProvider = result.providerDisplayName
+                    $0.aiModel = result.model
+                    $0.state = .success
+                }
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.updateInlineSupplement(id: id, pageID: pageID, generation: generation,
+                                            expectedNormalizedText: normalizedText) {
+                    $0.state = .failed(Self.inlineFailureMessage(error, localMiss: false))
+                }
+            }
+        }
+    }
+
+    private static func inlineFailureMessage(_ error: Error, localMiss: Bool) -> String {
+        if localMiss, error is AIConfigurationError { return "本地词典未收录" }
+        if localMiss, let client = error as? AIClientError,
+           client == .offline || client == .timeout { return "本地词典未收录" }
+        return error.localizedDescription
+    }
+
+    private func updateInlineSupplement(id: UUID, pageID: UUID, generation: UInt64,
+                                        expectedNormalizedText: String,
+                                        mutate: (inout InlineLookupSupplement) -> Void) {
+        guard inlinePageID == pageID,
+              let index = inlineSupplements.firstIndex(where: {
+                $0.supplementID == id && $0.parentEntryID == pageID &&
+                    $0.generation == generation &&
+                    $0.normalizedText == expectedNormalizedText
+              }),
+              inlineBaseBlocks.contains(where: {
+                $0.blockID == inlineSupplements[index].anchor.blockID
+              }) else { return }
+        mutate(&inlineSupplements[index])
+        inlineTasks[id] = nil
+        renderInlinePage()
+        refreshStarState()
+    }
+
+    private func inlineQueryStillValid(id: UUID, pageID: UUID, generation: UInt64,
+                                       expectedNormalizedText: String) -> Bool {
+        guard inlinePageID == pageID,
+              let supplement = inlineSupplements.first(where: {
+                $0.supplementID == id && $0.parentEntryID == pageID &&
+                    $0.generation == generation &&
+                    $0.normalizedText == expectedNormalizedText &&
+                    $0.selectionSnapshot.pageGenerationID == pageID
+              }),
+              inlineBaseBlocks.contains(where: { $0.blockID == supplement.anchor.blockID }) else {
+            return false
+        }
+        return InlineSelectionSnapshotFactory.normalizedIdentity(
+            supplement.selectedText, kind: supplement.selectionKind
+        ) == expectedNormalizedText
+    }
+
+    @objc private func expandInlineSupplement(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, let id = UUID(uuidString: raw),
+              let index = inlineSupplements.firstIndex(where: { $0.supplementID == id }),
+              inlineSupplements[index].quickResult != nil,
+              inlineSupplements[index].expandedResult == nil else { return }
+        inlineTasks[id]?.cancel()
+        inlineSupplements[index].generation &+= 1
+        let generation = inlineSupplements[index].generation
+        let pageID = inlinePageID
+        if let local = inlineSupplements[index].preparedLocalExpansion, local.hasContent {
+            inlineSupplements[index].expandedResult = .local(local)
+            let sources = Self.uniqueInlineStrings(
+                [inlineSupplements[index].localSource ?? ""] + local.sources,
+                maximum: 5
+            )
+            inlineSupplements[index].localSource = sources.joined(separator: "、")
+            inlineSupplements[index].state = .success
+            renderInlinePage()
+            refreshStarState()
+            return
+        }
+        let text = inlineSupplements[index].selectedText
+        let normalizedText = inlineSupplements[index].normalizedText
+        let kind = inlineSupplements[index].selectionKind
+        inlineSupplements[index].state = .loadingExpansion
+        renderInlinePage()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            let mayRequestAI = await MainActor.run {
+                self.inlineQueryStillValid(id: id, pageID: pageID, generation: generation,
+                                           expectedNormalizedText: normalizedText)
+            }
+            guard mayRequestAI, !Task.isCancelled else { return }
+            do {
+                let expanded: InlineLookupExpandedResult
+                switch kind {
+                case .sentence:
+                    expanded = .aiSentence(try await self.aiService.inlineSentenceExpansion(text))
+                case .word, .phrase:
+                    expanded = .aiWord(try await self.aiService.inlineWordExpansion(text))
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.updateInlineSupplement(id: id, pageID: pageID,
+                                                generation: generation,
+                                                expectedNormalizedText: normalizedText) {
+                        $0.expandedResult = expanded
+                        switch expanded {
+                        case .aiWord(let value):
+                            $0.aiProvider = value.providerDisplayName; $0.aiModel = value.model
+                        case .aiSentence(let value):
+                            $0.aiProvider = value.providerDisplayName; $0.aiModel = value.model
+                        case .local: break
+                        }
+                        $0.state = .success
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self.updateInlineSupplement(id: id, pageID: pageID,
+                                                generation: generation,
+                                                expectedNormalizedText: normalizedText) {
+                        $0.state = .failed(error.localizedDescription)
+                    }
+                }
+            }
+        }
+        inlineTasks[id] = task
+    }
+
+    @objc private func closeInlineSupplement(_ sender: NSButton) {
+        guard let raw = sender.identifier?.rawValue, let id = UUID(uuidString: raw),
+              let index = inlineSupplements.firstIndex(where: { $0.supplementID == id }) else {
+            return
+        }
+        inlineTasks[id]?.cancel()
+        inlineTasks[id] = nil
+        inlineSupplements[index].generation &+= 1
+        inlineSupplements.remove(at: index)
+        renderInlinePage()
+        refreshStarState()
+    }
+
+    private func positionInlineControlButtons() {
+        inlineControlButtons.forEach { $0.removeFromSuperview() }
+        inlineControlButtons.removeAll()
+        guard let storage = textView.textStorage, let layout = textView.layoutManager,
+              let container = textView.textContainer else { return }
+        for supplement in inlineSupplements {
+            let marker = supplement.supplementID.uuidString
+            var anchorRange: NSRange?
+            storage.enumerateAttribute(.inlineControlAnchor,
+                                       in: NSRange(location: 0, length: storage.length)) {
+                value, range, stop in
+                if value as? String == marker { anchorRange = range; stop.pointee = true }
+            }
+            guard let range = anchorRange else { continue }
+            let glyph = layout.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            let rect = layout.boundingRect(forGlyphRange: glyph, in: container)
+                .offsetBy(dx: textView.textContainerOrigin.x, dy: textView.textContainerOrigin.y)
+            var x = rect.minX + 12
+            if supplement.quickResult != nil && supplement.expandedResult == nil {
+                let more = inlineControlButton(title: supplement.state == .loadingExpansion
+                                               ? "正在展开…" : "了解更多",
+                                               id: supplement.supplementID,
+                                               action: #selector(expandInlineSupplement))
+                more.isEnabled = supplement.state != .loadingExpansion
+                more.frame.origin = NSPoint(x: x, y: rect.minY)
+                x += more.frame.width + 8
+            }
+            let close = inlineControlButton(title: "关闭", id: supplement.supplementID,
+                                            action: #selector(closeInlineSupplement))
+            close.frame.origin = NSPoint(x: x, y: rect.minY)
+        }
+    }
+
+    private func inlineControlButton(title: String, id: UUID, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.identifier = NSUserInterfaceItemIdentifier(id.uuidString)
+        button.isBordered = false
+        button.bezelStyle = .inline
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 10.5, weight: .medium)
+        button.contentTintColor = .secondaryLabelColor
+        button.sizeToFit()
+        button.frame.size.height = 18
+        textView.addSubview(button)
+        inlineControlButtons.append(button)
+        return button
+    }
+
+    private func scrollInlineSupplementToVisible(_ id: UUID) {
+        guard let storage = textView.textStorage else { return }
+        storage.enumerateAttribute(.inlineSupplementID,
+                                   in: NSRange(location: 0, length: storage.length)) {
+            value, range, stop in
+            if value as? String == id.uuidString {
+                self.textView.scrollRangeToVisible(range)
+                stop.pointee = true
+            }
+        }
     }
 
     func controlTextDidBeginEditing(_ notification: Notification) {
@@ -1218,12 +1990,21 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     private func currentNoteSaveContent() -> NoteSaveContent? {
+        let inlineItems = inlineMarkdownFormatter.items(from: inlineSupplements)
         if currentIntent == .sentence {
-            guard let content = sentenceMarkdownFormatter.content(
+            let base = sentenceMarkdownFormatter.content(
                 sourceText: currentQuery,
                 aiPresentation: currentSentencePresentation,
                 glossary: currentLocalGlossary
-            ) else { return nil }
+            )
+            guard base != nil || !inlineItems.isEmpty else { return nil }
+            let content = SentenceNoteSaveContent(
+                sourceText: base?.sourceText ?? currentQuery,
+                title: base?.title ?? sentenceMarkdownFormatter.title(for: currentQuery),
+                aiSectionMarkdown: base?.aiSectionMarkdown,
+                glossarySectionMarkdown: base?.glossarySectionMarkdown,
+                inlineSupplements: inlineItems
+            )
             return .sentence(content)
         }
         let headword = currentEntry?.headword ?? currentQuery
@@ -1235,7 +2016,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
         let content = VocabularyNoteSaveContent(headword: headword,
                                                 localEntry: currentEntry,
-                                                aiSection: aiSection)
+                                                aiSection: aiSection,
+                                                inlineSupplements: inlineItems)
         return content.isValid ? .vocabulary(content) : nil
     }
 

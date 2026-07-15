@@ -60,6 +60,14 @@ final class AIEntryFormatter {
                 }
             }
         }
+        if !explanation.spellingSuggestions.isEmpty {
+            append("拼写建议\n", font: .systemFont(ofSize: 13, weight: .semibold),
+                   color: .secondaryLabelColor, spacingBefore: 8, spacingAfter: 3,
+                   to: output)
+            append(explanation.spellingSuggestions.joined(separator: "、") + "\n",
+                   font: .systemFont(ofSize: 13), color: .secondaryLabelColor,
+                   firstLineIndent: 18, headIndent: 18, spacingAfter: 4, to: output)
+        }
         if !explanation.caution.isEmpty {
             append("注意：\(explanation.caution)\n", font: .systemFont(ofSize: 12),
                    color: .secondaryLabelColor, spacingBefore: 8, spacingAfter: 3, to: output)

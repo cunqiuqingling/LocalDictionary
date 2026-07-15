@@ -184,10 +184,42 @@ struct AIExplanationNoteSection: Equatable {
     }
 }
 
+struct InlineLookupNoteItem: Equatable {
+    let selectedText: String
+    let normalizedText: String
+    let kind: String
+    let quickLines: [String]
+    let expandedLines: [String]
+    let source: String
+    let provider: String?
+    let model: String?
+
+    var identity: String {
+        let normalized = normalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            .precomposedStringWithCanonicalMapping
+            .lowercased(with: Locale(identifier: "en_US_POSIX"))
+        return "\(kind.lowercased())|\(normalized)"
+    }
+
+    var isValid: Bool {
+        !identity.hasSuffix("|") && !quickLines.isEmpty
+    }
+}
+
 struct VocabularyNoteSaveContent: Equatable {
     let headword: String
     let localEntry: StructuredDictionaryEntry?
     let aiSection: AIExplanationNoteSection?
+    let inlineSupplements: [InlineLookupNoteItem]
+
+    init(headword: String, localEntry: StructuredDictionaryEntry?,
+         aiSection: AIExplanationNoteSection?,
+         inlineSupplements: [InlineLookupNoteItem] = []) {
+        self.headword = headword
+        self.localEntry = localEntry
+        self.aiSection = aiSection
+        self.inlineSupplements = inlineSupplements.filter(\.isValid)
+    }
 
     var isValid: Bool {
         let expected = Self.normalized(headword)
@@ -221,10 +253,21 @@ struct SentenceNoteSaveContent: Equatable {
     let title: String
     let aiSectionMarkdown: String?
     let glossarySectionMarkdown: String?
+    let inlineSupplements: [InlineLookupNoteItem]
+
+    init(sourceText: String, title: String, aiSectionMarkdown: String?,
+         glossarySectionMarkdown: String?,
+         inlineSupplements: [InlineLookupNoteItem] = []) {
+        self.sourceText = sourceText
+        self.title = title
+        self.aiSectionMarkdown = aiSectionMarkdown
+        self.glossarySectionMarkdown = glossarySectionMarkdown
+        self.inlineSupplements = inlineSupplements.filter(\.isValid)
+    }
 
     var isValid: Bool {
         !Self.normalizedSentence(sourceText).isEmpty &&
-            (validAISection || validGlossarySection)
+            (validAISection || validGlossarySection || !inlineSupplements.isEmpty)
     }
 
     var validAISection: Bool {
@@ -354,23 +397,29 @@ final class ObsidianNoteStore {
         if let range = Self.sentenceEntryRange(in: original,
                                                sourceText: content.sourceText) {
             let existingEntry = String(original[range])
-            if content.validAISection {
-                guard !Self.containsSentenceAISection(in: existingEntry) else {
-                    return .aiAlreadyPresent
-                }
+            var replacement = existingEntry
+            var didAddAI = false
+            if content.validAISection && !Self.containsSentenceAISection(in: existingEntry) {
                 let ai = Self.markdown(content.aiSectionMarkdown!, using: newline)
-                var replacement = Self.insertingSentenceAISection(ai,
-                                                                   into: existingEntry,
-                                                                   newline: newline)
+                replacement = Self.insertingSentenceAISection(ai,
+                                                              into: replacement,
+                                                              newline: newline)
+                didAddAI = true
+            }
+            let merged = Self.mergingInlineSupplements(content.inlineSupplements,
+                                                       into: replacement,
+                                                       newline: newline)
+            replacement = merged.content
+            if didAddAI || merged.changed {
                 if range.upperBound < original.endIndex {
                     replacement = Self.ensuringBlankLineSuffix(replacement, newline: newline)
                 }
                 var mutable = original
                 mutable.replaceSubrange(range, with: replacement)
                 updated = mutable
-                result = .aiAddedToExistingSentence
+                result = didAddAI ? .aiAddedToExistingSentence : .alreadySaved
             } else {
-                return .alreadySaved
+                return content.validAISection ? .aiAlreadyPresent : .alreadySaved
             }
         } else {
             let block = Self.sentenceMarkdownBlock(for: content, newline: newline)
@@ -384,17 +433,19 @@ final class ObsidianNoteStore {
     func save(_ content: VocabularyNoteSaveContent,
               to candidateURL: URL) throws -> VocabularyNoteSaveResult {
         guard content.isValid else { throw ObsidianNoteStoreError.invalidEntry }
-        if content.aiSection == nil, let localEntry = content.localEntry {
+        if content.aiSection == nil, content.inlineSupplements.isEmpty,
+           let localEntry = content.localEntry {
             switch try save(localEntry, to: candidateURL) {
             case .saved: return .localSaved
             case .alreadySaved: return .localAlreadySaved
             }
         }
-        guard let aiSection = content.aiSection,
-              aiSection.isValid,
-              Self.normalizedHeadword(aiSection.headword) ==
-                Self.normalizedHeadword(content.headword) else {
-            throw ObsidianNoteStoreError.invalidEntry
+        if let aiSection = content.aiSection {
+            guard aiSection.isValid,
+                  Self.normalizedHeadword(aiSection.headword) ==
+                    Self.normalizedHeadword(content.headword) else {
+                throw ObsidianNoteStoreError.invalidEntry
+            }
         }
 
         let target = try validatedTarget(candidateURL, requireWritable: true)
@@ -407,26 +458,33 @@ final class ObsidianNoteStore {
         let result: VocabularyNoteSaveResult
         if let range = Self.entryRange(in: original, headword: content.headword) {
             let existingEntry = String(original[range])
-            guard !Self.containsAISection(in: existingEntry) else {
-                return .aiAlreadyPresent
-            }
-            let aiMarkdown = Self.markdown(aiSection.markdown, using: newline)
-            var replacement = Self.appendingMarkdownBlock(aiMarkdown,
-                                                           to: existingEntry,
+            var replacement = existingEntry
+            var didAddAI = false
+            if let aiSection = content.aiSection, !Self.containsAISection(in: existingEntry) {
+                let aiMarkdown = Self.markdown(aiSection.markdown, using: newline)
+                replacement = Self.appendingMarkdownBlock(aiMarkdown,
+                                                           to: replacement,
                                                            newline: newline)
+                didAddAI = true
+            }
+            let merged = Self.mergingInlineSupplements(content.inlineSupplements,
+                                                       into: replacement,
+                                                       newline: newline)
+            replacement = merged.content
+            guard didAddAI || merged.changed else {
+                return content.aiSection != nil ? .aiAlreadyPresent : .localAlreadySaved
+            }
             if range.upperBound < original.endIndex {
                 replacement = Self.ensuringBlankLineSuffix(replacement, newline: newline)
             }
             var mutable = original
             mutable.replaceSubrange(range, with: replacement)
             updated = mutable
-            result = .aiAddedToExistingEntry
+            result = didAddAI ? .aiAddedToExistingEntry : .localSaved
         } else {
-            let entryBlock = Self.combinedMarkdownBlock(for: content,
-                                                        aiSection: aiSection,
-                                                        newline: newline)
+            let entryBlock = Self.combinedMarkdownBlock(for: content, newline: newline)
             updated = Self.appendingMarkdownBlock(entryBlock, to: original, newline: newline)
-            result = .savedWithAI
+            result = content.aiSection == nil ? .localSaved : .savedWithAI
         }
         try writeAtomically(updated, to: target)
         return result
@@ -509,17 +567,19 @@ final class ObsidianNoteStore {
     func createOrSave(_ content: VocabularyNoteSaveContent,
                       at candidateURL: URL) throws -> VocabularyNoteSaveResult {
         guard content.isValid else { throw ObsidianNoteStoreError.invalidEntry }
-        if content.aiSection == nil, let localEntry = content.localEntry {
+        if content.aiSection == nil, content.inlineSupplements.isEmpty,
+           let localEntry = content.localEntry {
             switch try createOrSave(localEntry, at: candidateURL) {
             case .saved: return .localSaved
             case .alreadySaved: return .localAlreadySaved
             }
         }
-        guard let aiSection = content.aiSection,
-              aiSection.isValid,
-              Self.normalizedHeadword(aiSection.headword) ==
-                Self.normalizedHeadword(content.headword) else {
-            throw ObsidianNoteStoreError.invalidEntry
+        if let aiSection = content.aiSection {
+            guard aiSection.isValid,
+                  Self.normalizedHeadword(aiSection.headword) ==
+                    Self.normalizedHeadword(content.headword) else {
+                throw ObsidianNoteStoreError.invalidEntry
+            }
         }
         let target = candidateURL.standardizedFileURL
         guard target.isFileURL, target.pathExtension.lowercased() == "md" else {
@@ -536,9 +596,7 @@ final class ObsidianNoteStore {
               fileManager.isWritableFile(atPath: parent.path) else {
             throw ObsidianNoteStoreError.targetNotWritable
         }
-        let block = Self.combinedMarkdownBlock(for: content,
-                                               aiSection: aiSection,
-                                               newline: "\n")
+        let block = Self.combinedMarkdownBlock(for: content, newline: "\n")
         guard let data = block.data(using: .utf8) else {
             throw ObsidianNoteStoreError.writeFailed
         }
@@ -552,7 +610,7 @@ final class ObsidianNoteStore {
         } catch {
             throw ObsidianNoteStoreError.writeFailed
         }
-        return .savedWithAI
+        return content.aiSection == nil ? .localSaved : .savedWithAI
     }
 
     func createOrSave(_ content: SentenceNoteSaveContent,
@@ -901,7 +959,6 @@ final class ObsidianNoteStore {
 
     private static func combinedMarkdownBlock(
         for content: VocabularyNoteSaveContent,
-        aiSection: AIExplanationNoteSection,
         newline: String
     ) -> String {
         let localBlock: String
@@ -910,9 +967,15 @@ final class ObsidianNoteStore {
         } else {
             localBlock = "## \(singleLine(content.headword))"
         }
-        return appendingMarkdownBlock(markdown(aiSection.markdown, using: newline),
-                                      to: localBlock,
-                                      newline: newline)
+        var output = localBlock
+        if let aiSection = content.aiSection {
+            output = appendingMarkdownBlock(markdown(aiSection.markdown, using: newline),
+                                            to: output,
+                                            newline: newline)
+        }
+        return mergingInlineSupplements(content.inlineSupplements,
+                                        into: output,
+                                        newline: newline).content
     }
 
     private static func sentenceMarkdownBlock(for content: SentenceNoteSaveContent,
@@ -935,7 +998,133 @@ final class ObsidianNoteStore {
                                             to: block,
                                             newline: newline)
         }
-        return block
+        return mergingInlineSupplements(content.inlineSupplements,
+                                        into: block,
+                                        newline: newline).content
+    }
+
+    private static func mergingInlineSupplements(
+        _ items: [InlineLookupNoteItem], into content: String, newline: String
+    ) -> (content: String, changed: Bool) {
+        let incoming = items.filter(\.isValid)
+        guard !incoming.isEmpty else { return (content, false) }
+        var lines = content.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
+        var sectionStart = lines.firstIndex { $0.trimmingCharacters(in: .whitespaces) ==
+            "### 应用内划词补充" }
+        var changed = false
+        if sectionStart == nil {
+            while lines.last?.isEmpty == true { lines.removeLast() }
+            if !lines.isEmpty { lines.append("") }
+            lines.append("### 应用内划词补充")
+            lines.append("")
+            sectionStart = lines.count - 2
+            changed = true
+        }
+        guard let start = sectionStart else { return (content, false) }
+        var sectionEnd = lines.count
+        if start + 1 < lines.count {
+            for index in (start + 1)..<lines.count {
+                let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("### ") && !trimmed.hasPrefix("#### ") {
+                    sectionEnd = index
+                    break
+                }
+            }
+        }
+
+        for item in incoming {
+            let blocks = inlineItemBlocks(in: lines, sectionStart: start, sectionEnd: sectionEnd)
+            if let block = blocks.first(where: { $0.identity == item.identity }) {
+                guard !item.expandedLines.isEmpty,
+                      !lines[block.range].contains(where: {
+                        $0.trimmingCharacters(in: .whitespaces) == "##### 了解更多"
+                      }) else { continue }
+                var insertion = ["", "##### 了解更多", ""]
+                insertion.append(contentsOf: item.expandedLines.map(safeMarkdownLine))
+                lines.insert(contentsOf: insertion, at: block.range.upperBound)
+                sectionEnd += insertion.count
+                changed = true
+                continue
+            }
+            let blockLines = inlineMarkdownLines(for: item)
+            var insertion = blockLines
+            if sectionEnd > 0, !lines[sectionEnd - 1].isEmpty { insertion.insert("", at: 0) }
+            lines.insert(contentsOf: insertion, at: sectionEnd)
+            sectionEnd += insertion.count
+            changed = true
+        }
+        let normalized = lines.joined(separator: "\n")
+        return (newline == "\n" ? normalized
+                : normalized.replacingOccurrences(of: "\n", with: newline), changed)
+    }
+
+    private struct InlineItemBlock {
+        let identity: String
+        let range: Range<Int>
+    }
+
+    private static func inlineItemBlocks(in lines: [String], sectionStart: Int,
+                                         sectionEnd: Int) -> [InlineItemBlock] {
+        guard sectionStart + 1 < sectionEnd else { return [] }
+        var starts: [Int] = []
+        for index in (sectionStart + 1)..<sectionEnd where
+            lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("#### ") &&
+            !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("##### ") {
+            starts.append(index)
+        }
+        return starts.enumerated().compactMap { offset, start -> InlineItemBlock? in
+            let end = offset + 1 < starts.count ? starts[offset + 1] : sectionEnd
+            var kind = ""
+            var selected = ""
+            for line in lines[start..<end] {
+                let clean = line.trimmingCharacters(in: .whitespaces)
+                if clean.hasPrefix("- 类型：") { kind = String(clean.dropFirst(5)) }
+                if clean.hasPrefix("- 选中内容：") { selected = String(clean.dropFirst(7)) }
+            }
+            let normalized = selected.trimmingCharacters(in: .whitespacesAndNewlines)
+                .precomposedStringWithCanonicalMapping
+                .lowercased(with: Locale(identifier: "en_US_POSIX"))
+            guard !kind.isEmpty, !normalized.isEmpty else { return nil }
+            return InlineItemBlock(identity: "\(kind.lowercased())|\(normalized)",
+                                   range: start..<end)
+        }
+    }
+
+    private static func inlineMarkdownLines(for item: InlineLookupNoteItem) -> [String] {
+        var lines = [
+            "#### \(safeInlineHeading(item.selectedText))",
+            "",
+            "- 类型：\(safeMarkdownLine(item.kind))",
+            "- 选中内容：\(safeMarkdownLine(item.normalizedText))"
+        ]
+        lines.append(contentsOf: item.quickLines.map(safeMarkdownLine))
+        if !item.source.isEmpty { lines.append("- 来源：\(safeMarkdownLine(item.source))") }
+        if let provider = item.provider, !provider.isEmpty {
+            let model = item.model?.isEmpty == false ? " · \(safeMarkdownLine(item.model!))" : ""
+            lines.append("- AI 来源：\(safeMarkdownLine(provider))\(model)")
+        }
+        if !item.expandedLines.isEmpty {
+            lines += ["", "##### 了解更多", ""]
+            lines.append(contentsOf: item.expandedLines.map(safeMarkdownLine))
+        }
+        lines.append("")
+        return lines
+    }
+
+    private static func safeInlineHeading(_ value: String) -> String {
+        let clean = safeMarkdownLine(value).replacingOccurrences(of: "#", with: "")
+        guard clean.count > 56 else { return clean }
+        return String(clean.prefix(55)) + "…"
+    }
+
+    private static func safeMarkdownLine(_ value: String) -> String {
+        value.replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func blockquoteLines(for sourceText: String) -> [String] {
