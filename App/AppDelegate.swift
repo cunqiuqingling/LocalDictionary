@@ -261,7 +261,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showDictionary() { panelController?.show() }
     @objc private func showDictionaryManager() {
         if dictionaryManagerController == nil {
-            dictionaryManagerController = DictionaryManagerWindowController(catalog: dictionaryCatalog)
+            dictionaryManagerController = DictionaryManagerWindowController(
+                catalog: dictionaryCatalog,
+                catalogStore: dictionaryCatalogStore,
+                onCatalogChanged: { [weak self] catalog in
+                    self?.dictionaryCatalog = catalog
+                }
+            )
         }
         dictionaryManagerController?.show()
     }

@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 @MainActor
 final class DictionaryManagerWindowController: NSWindowController,
@@ -16,12 +17,25 @@ final class DictionaryManagerWindowController: NSWindowController,
 
     private var catalog: DictionaryCatalog
     private var dictionaries: [DictionaryDescriptor] = []
+    private let catalogStore: DictionaryCatalogStore
+    private let importInspector: MDictImportInspector
+    private let importService: DictionaryImportService
+    private let onCatalogChanged: (DictionaryCatalog) -> Void
+    private var previewAccessory: DictionaryImportPreviewAccessory?
     private let tableView = NSTableView()
     private let scrollView = NSScrollView()
     private let emptyStateView = NSStackView()
 
-    init(catalog: DictionaryCatalog) {
+    init(catalog: DictionaryCatalog,
+         catalogStore: DictionaryCatalogStore,
+         importInspector: MDictImportInspector = MDictImportInspector(),
+         importService: DictionaryImportService? = nil,
+         onCatalogChanged: @escaping (DictionaryCatalog) -> Void = { _ in }) {
         self.catalog = catalog
+        self.catalogStore = catalogStore
+        self.importInspector = importInspector
+        self.importService = importService ?? DictionaryImportService(catalogStore: catalogStore)
+        self.onCatalogChanged = onCatalogChanged
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 430),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -60,6 +74,18 @@ final class DictionaryManagerWindowController: NSWindowController,
                    viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard row >= 0, row < dictionaries.count, let tableColumn,
               let column = Column(rawValue: tableColumn.identifier.rawValue) else { return nil }
+        if column == .enabled {
+            let dictionary = dictionaries[row]
+            let button = NSButton(checkboxWithTitle: "", target: self,
+                                  action: #selector(enabledStateChanged(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier(dictionary.dictionaryID)
+            button.state = dictionary.enabled ? .on : .off
+            button.isEnabled = dictionary.sourceKind == .managedLocal
+            button.toolTip = button.isEnabled
+                ? "启用或停用此托管 Catalog 记录；本阶段不会加入生产查询。"
+                : "旧五词典仍由 legacy 调度器管理。"
+            return button
+        }
         let identifier = NSUserInterfaceItemIdentifier("DictionaryManager.\(column.rawValue)")
         let cell: NSTableCellView
         if let reused = tableView.makeView(withIdentifier: identifier,
@@ -97,7 +123,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         heading.translatesAutoresizingMaskIntoConstraints = false
 
         let explanation = NSTextField(wrappingLabelWithString:
-            "本阶段仅展示当前目录状态。导入、开放资源和排序编辑将在后续阶段提供。")
+            "可安全托管本地 MDX/MDD；新导入词典本阶段不会建立索引或加入查询。")
         explanation.textColor = .secondaryLabelColor
         explanation.translatesAutoresizingMaskIntoConstraints = false
 
@@ -108,7 +134,7 @@ final class DictionaryManagerWindowController: NSWindowController,
 
         let actions = NSStackView(views: [
             futureButton(title: "获取开放词典"),
-            futureButton(title: "导入本地 MDX/MDD"),
+            importButton(),
             futureButton(title: "查询顺序与显示规则")
         ])
         actions.orientation = .horizontal
@@ -183,7 +209,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.alignment = .center
         let detail = NSTextField(wrappingLabelWithString:
-            "LocalDictionary 仍可启动并使用 AI 设置；本地词典导入将在后续阶段提供。")
+            "LocalDictionary 仍可启动并使用 AI 设置；可通过下方按钮托管本地 MDX。")
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         detail.maximumNumberOfLines = 3
@@ -200,6 +226,13 @@ final class DictionaryManagerWindowController: NSWindowController,
         return button
     }
 
+    private func importButton() -> NSButton {
+        let button = NSButton(title: "导入本地 MDX/MDD", target: self,
+                              action: #selector(beginImport))
+        button.bezelStyle = .rounded
+        return button
+    }
+
     @objc private func showFuturePhaseNotice(_ sender: NSButton) {
         let alert = NSAlert()
         alert.messageText = sender.title
@@ -207,6 +240,191 @@ final class DictionaryManagerWindowController: NSWindowController,
         alert.alertStyle = .informational
         alert.addButton(withTitle: "好")
         if let window { alert.beginSheetModal(for: window) }
+    }
+
+    @objc private func enabledStateChanged(_ sender: NSButton) {
+        guard let identifier = sender.identifier?.rawValue,
+              let index = catalog.dictionaries.firstIndex(where: {
+                  $0.dictionaryID == identifier && $0.sourceKind == .managedLocal
+              }) else { return }
+        let previous = catalog
+        var updated = catalog
+        updated.dictionaries[index].enabled = sender.state == .on
+        updated.dictionaries[index].updatedAt = Date()
+        updated.updatedAt = Date()
+        do {
+            try catalogStore.save(updated)
+            update(catalog: updated)
+            onCatalogChanged(updated)
+        } catch {
+            update(catalog: previous)
+            showError(title: "无法保存启用状态", error: error)
+        }
+    }
+
+    @objc private func beginImport() {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.title = "选择本地 MDict 词典"
+        panel.message = "请选择一个 .mdx 文件，或包含一个或多个 .mdx 的文件夹。"
+        panel.prompt = "检查"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        if let mdxType = UTType(filenameExtension: "mdx") {
+            panel.allowedContentTypes = [mdxType]
+        }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let selectedURL = panel.url else { return }
+            self?.inspectSelection(selectedURL)
+        }
+    }
+
+    private func inspectSelection(_ selectedURL: URL) {
+        let inspector = importInspector
+        Task { @MainActor [weak self] in
+            let outcome = await Task.detached(priority: .userInitiated) {
+                inspector.inspect(selectedURL)
+            }.value
+            guard let self else { return }
+            switch outcome {
+            case .success(let previews):
+                self.presentImportPreview(previews)
+            case .failure(let error):
+                self.showError(title: "无法检查词典", error: error)
+            }
+        }
+    }
+
+    private func presentImportPreview(_ previews: [DictionaryImportPreview]) {
+        guard let window else { return }
+        if let duplicate = previews.compactMap({ preview -> (DictionaryImportPreview, DictionaryDescriptor)? in
+            guard let descriptor = importService.duplicateDescriptor(for: preview, in: catalog)
+            else { return nil }
+            return (preview, descriptor)
+        }).first {
+            presentDuplicateNotice(existing: duplicate.1)
+            return
+        }
+
+        let accessory = DictionaryImportPreviewAccessory(previews: previews)
+        previewAccessory = accessory
+        let alert = NSAlert()
+        alert.messageText = previews.count == 1 ? "导入预览" : "导入预览（\(previews.count) 本词典）"
+        alert.informativeText = "仅检查必要元数据。确认后将复制文件并创建等待索引的 Catalog 记录。"
+        alert.alertStyle = .informational
+        alert.accessoryView = accessory.view
+        alert.addButton(withTitle: "导入")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self, accessory] response in
+            guard let self else { return }
+            self.previewAccessory = nil
+            guard response == .alertFirstButtonReturn else { return }
+            self.performImport(accessory.selections)
+        }
+    }
+
+    private func performImport(_ selections: [DictionaryImportSelection]) {
+        guard let window else { return }
+        let totalBytes = selections.reduce(UInt64(0)) {
+            $0 &+ $1.preview.mdxFileSize &+
+                $1.selectedMDDCandidates.reduce(UInt64(0)) { $0 &+ $1.fileSize }
+        }
+        let cancellationToken = DictionaryImportCancellationToken()
+        let indicator = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 360, height: 18))
+        indicator.isIndeterminate = false
+        indicator.minValue = 0
+        indicator.maxValue = Double(max(totalBytes, 1))
+        let progressPresenter = DictionaryImportProgressPresenter(indicator: indicator)
+
+        let progressAlert = NSAlert()
+        progressAlert.messageText = "正在复制词典文件…"
+        progressAlert.informativeText = "文件先写入 staging；取消或失败不会发布半成品。"
+        progressAlert.accessoryView = indicator
+        progressAlert.addButton(withTitle: "取消")
+        progressAlert.beginSheetModal(for: window) { _ in cancellationToken.cancel() }
+
+        let startingCatalog = catalog
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let updated = try await self.importService.importSelections(
+                    selections,
+                    into: startingCatalog,
+                    cancellationToken: cancellationToken,
+                    progress: { completed, _ in
+                        Task { @MainActor in
+                            progressPresenter.update(completedBytes: completed)
+                        }
+                    }
+                )
+                if progressAlert.window.sheetParent != nil {
+                    window.endSheet(progressAlert.window)
+                }
+                self.update(catalog: updated)
+                self.onCatalogChanged(updated)
+                let importedIDs = Set(updated.dictionaries.map(\.dictionaryID))
+                    .subtracting(startingCatalog.dictionaries.map(\.dictionaryID))
+                if let first = importedIDs.first { self.selectDictionary(id: first) }
+                self.showInformation(title: "导入完成",
+                                     message: "文件已安全托管，词典状态为“等待索引”。")
+            } catch let error as DictionaryImportError {
+                if progressAlert.window.sheetParent != nil {
+                    window.endSheet(progressAlert.window)
+                }
+                if case .cancelled = error { return }
+                if case .duplicate = error {
+                    self.showError(title: "该词典可能已导入", error: error)
+                } else {
+                    self.showError(title: "导入失败", error: error)
+                }
+            } catch {
+                if progressAlert.window.sheetParent != nil {
+                    window.endSheet(progressAlert.window)
+                }
+                self.showError(title: "导入失败", error: error)
+            }
+        }
+    }
+
+    private func presentDuplicateNotice(existing: DictionaryDescriptor) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "该词典可能已导入"
+        alert.informativeText = "Catalog 中已有内容摘要相同的词典“\(existing.displayName)”。本轮默认不重复复制。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "显示现有词典")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                self?.selectDictionary(id: existing.dictionaryID)
+            }
+        }
+    }
+
+    private func selectDictionary(id: String) {
+        guard let row = dictionaries.firstIndex(where: { $0.dictionaryID == id }) else { return }
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+    }
+
+    private func showError(title: String, error: Error) {
+        guard let window else { return }
+        let alert = NSAlert(error: error)
+        alert.messageText = title
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window)
+    }
+
+    private func showInformation(title: String, message: String) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "好")
+        alert.beginSheetModal(for: window)
     }
 
     private func value(for column: Column, dictionary: DictionaryDescriptor) -> String {
@@ -229,7 +447,7 @@ final class DictionaryManagerWindowController: NSWindowController,
     private func stateColor(_ state: DictionaryState) -> NSColor {
         switch state {
         case .ready: return .systemGreen
-        case .indexing, .copying, .scanning: return .systemOrange
+        case .pendingIndex, .indexing, .copying, .scanning: return .systemOrange
         case .disabled: return .secondaryLabelColor
         default: return .systemRed
         }
@@ -248,4 +466,23 @@ final class DictionaryManagerWindowController: NSWindowController,
         formatter.timeStyle = .short
         return formatter
     }()
+}
+
+@MainActor
+private final class DictionaryImportProgressPresenter {
+    private weak var indicator: NSProgressIndicator?
+
+    init(indicator: NSProgressIndicator) {
+        self.indicator = indicator
+    }
+
+    func update(completedBytes: UInt64) {
+        indicator?.doubleValue = Double(completedBytes)
+    }
+}
+
+private extension Int64 {
+    init(clamping value: UInt64) {
+        self = value > UInt64(Int64.max) ? Int64.max : Int64(value)
+    }
 }

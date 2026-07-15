@@ -51,6 +51,7 @@ enum DictionaryState: String, Codable, Sendable {
     case waitingForImport
     case copying
     case scanning
+    case pendingIndex
     case indexing
     case ready
     case disabled
@@ -66,6 +67,7 @@ enum DictionaryState: String, Codable, Sendable {
         case .waitingForImport: return "等待导入"
         case .copying: return "正在复制"
         case .scanning: return "正在扫描"
+        case .pendingIndex: return "等待索引"
         case .indexing: return "正在建立索引"
         case .ready: return "可用"
         case .disabled: return "已停用"

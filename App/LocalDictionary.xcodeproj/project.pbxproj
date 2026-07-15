@@ -59,6 +59,10 @@
 		A10000000000000000000033 /* DictionaryCatalogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000003B /* DictionaryCatalogStore.swift */; };
 		A10000000000000000000034 /* LegacyDictionaryConfigAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000003C /* LegacyDictionaryConfigAdapter.swift */; };
 		A10000000000000000000035 /* DictionaryManagerWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000003D /* DictionaryManagerWindowController.swift */; };
+		A10000000000000000000036 /* DictionaryImportModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000003E /* DictionaryImportModels.swift */; };
+		A10000000000000000000037 /* MDictImportInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000003F /* MDictImportInspector.swift */; };
+		A10000000000000000000038 /* DictionaryImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000040 /* DictionaryImportService.swift */; };
+		A10000000000000000000039 /* DictionaryImportPreviewAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000041 /* DictionaryImportPreviewAccessory.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -123,6 +127,10 @@
 		B1000000000000000000003B /* DictionaryCatalogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryCatalogStore.swift; sourceTree = "<group>"; };
 		B1000000000000000000003C /* LegacyDictionaryConfigAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyDictionaryConfigAdapter.swift; sourceTree = "<group>"; };
 		B1000000000000000000003D /* DictionaryManagerWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryManagerWindowController.swift; sourceTree = "<group>"; };
+		B1000000000000000000003E /* DictionaryImportModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryImportModels.swift; sourceTree = "<group>"; };
+		B1000000000000000000003F /* MDictImportInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDictImportInspector.swift; sourceTree = "<group>"; };
+		B10000000000000000000040 /* DictionaryImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryImportService.swift; sourceTree = "<group>"; };
+		B10000000000000000000041 /* DictionaryImportPreviewAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryImportPreviewAccessory.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -192,6 +200,10 @@
 				B1000000000000000000003B /* DictionaryCatalogStore.swift */,
 				B1000000000000000000003C /* LegacyDictionaryConfigAdapter.swift */,
 				B1000000000000000000003D /* DictionaryManagerWindowController.swift */,
+				B1000000000000000000003E /* DictionaryImportModels.swift */,
+				B1000000000000000000003F /* MDictImportInspector.swift */,
+				B10000000000000000000040 /* DictionaryImportService.swift */,
+				B10000000000000000000041 /* DictionaryImportPreviewAccessory.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -378,6 +390,10 @@
 				A10000000000000000000033 /* DictionaryCatalogStore.swift in Sources */,
 				A10000000000000000000034 /* LegacyDictionaryConfigAdapter.swift in Sources */,
 				A10000000000000000000035 /* DictionaryManagerWindowController.swift in Sources */,
+				A10000000000000000000036 /* DictionaryImportModels.swift in Sources */,
+				A10000000000000000000037 /* MDictImportInspector.swift in Sources */,
+				A10000000000000000000038 /* DictionaryImportService.swift in Sources */,
+				A10000000000000000000039 /* DictionaryImportPreviewAccessory.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,

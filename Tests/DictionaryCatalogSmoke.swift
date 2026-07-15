@@ -12,6 +12,7 @@ private enum SmokeFailure: Error, CustomStringConvertible {
 }
 
 @main
+@MainActor
 enum DictionaryCatalogSmoke {
     static func main() throws {
         let root = FileManager.default.temporaryDirectory

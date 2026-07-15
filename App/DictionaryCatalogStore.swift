@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 
+@MainActor
 final class DictionaryCatalogStore {
     static let catalogFileName = "catalog-v1.json"
     static let backupFileName = "catalog-v1.backup.json"
@@ -30,7 +31,7 @@ final class DictionaryCatalogStore {
         self.decoder = decoder
     }
 
-    static func defaultDirectoryURL(fileManager: FileManager = .default) -> URL {
+    nonisolated static func defaultDirectoryURL(fileManager: FileManager = .default) -> URL {
         let applicationSupport = fileManager.urls(for: .applicationSupportDirectory,
                                                   in: .userDomainMask).first
             ?? fileManager.homeDirectoryForCurrentUser
