@@ -42,6 +42,10 @@ NSString *string(const std::string &value) {
   self = [super init];
   if (self) {
     _storage = new DictionaryBridgeStorage();
+    if (dictionaryPath.length == 0 || indexPath.length == 0) {
+      _storage->error = "尚未安装本地词典";
+      return self;
+    }
     try {
       _storage->core = std::make_unique<localdict::SQLiteDictionaryCore>(
           utf8(dictionaryPath), utf8(indexPath),

@@ -61,7 +61,23 @@ struct AppConfig: Decodable {
         guard let url = Bundle.main.url(forResource: "local", withExtension: "json") else {
             throw ConfigError.missing
         }
-        return try JSONDecoder().decode(AppConfig.self, from: Data(contentsOf: url))
+        return try load(from: url)
+    }
+
+    static func loadIfPresent(in bundle: Bundle = .main) -> AppConfig? {
+        guard let url = bundle.url(forResource: "local", withExtension: "json") else {
+            return nil
+        }
+        return try? load(from: url)
+    }
+
+    static func loadIfPresent(at url: URL) -> AppConfig? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try? load(from: url)
+    }
+
+    static func load(from url: URL) throws -> AppConfig {
+        try JSONDecoder().decode(AppConfig.self, from: Data(contentsOf: url))
     }
 
     enum ConfigError: LocalizedError {

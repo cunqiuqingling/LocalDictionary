@@ -4,6 +4,9 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var panelController: DictionaryPanelController?
+    private var dictionaryManagerController: DictionaryManagerWindowController?
+    private var dictionaryCatalog = DictionaryCatalog.empty()
+    private let dictionaryCatalogStore = DictionaryCatalogStore()
     private var hotKey: GlobalHotKey?
     private let selectionReader = AccessibilitySelectionReader()
     private let clipboardFallback = ClipboardSelectionFallback()
@@ -185,6 +188,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let show = NSMenuItem(title: "显示词典", action: #selector(showDictionary), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
+        let manageDictionaries = NSMenuItem(title: "词典管理…",
+                                            action: #selector(showDictionaryManager),
+                                            keyEquivalent: "")
+        manageDictionaries.target = self
+        menu.addItem(manageDictionaries)
         let selectNote = NSMenuItem(title: "更改当前 Markdown 笔记…",
                                     action: #selector(selectObsidianNote),
                                     keyEquivalent: "")
@@ -204,8 +212,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureDictionary() {
-        do {
-            let config = try AppConfig.load()
+        var catalog = dictionaryCatalogStore.load()
+        if let config = AppConfig.loadIfPresent() {
+            let adapted = LegacyDictionaryConfigAdapter().adapt(config, into: catalog)
+            if adapted != catalog {
+                try? dictionaryCatalogStore.save(adapted)
+                catalog = adapted
+            }
             let core = DictionaryCoreBridge(dictionaryPath: config.primaryDictionary,
                                             indexPath: config.indexPath)
             let supplementalDictionaries = config.supplementalDictionaries.map { configuration in
@@ -229,7 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                         openAISettings: { [weak self] in
                                                             self?.showAISettings()
                                                         })
-        } catch {
+        } else {
+            catalog = LegacyDictionaryConfigAdapter()
+                .markingUnresolvableLegacyReferencesUnavailable(in: catalog)
             let core = DictionaryCoreBridge(dictionaryPath: "", indexPath: "")
             panelController = DictionaryPanelController(core: core,
                                                         noteStore: noteStore,
@@ -239,9 +254,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                             self?.showAISettings()
                                                         })
         }
+        dictionaryCatalog = catalog
+        dictionaryManagerController?.update(catalog: catalog)
     }
 
     @objc private func showDictionary() { panelController?.show() }
+    @objc private func showDictionaryManager() {
+        if dictionaryManagerController == nil {
+            dictionaryManagerController = DictionaryManagerWindowController(catalog: dictionaryCatalog)
+        }
+        dictionaryManagerController?.show()
+    }
     @objc private func selectObsidianNote() {
         guard notePicker.chooseTarget(for: noteStore) else { return }
         panelController?.targetNoteDidChange()
