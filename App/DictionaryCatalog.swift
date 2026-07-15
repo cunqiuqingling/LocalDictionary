@@ -61,6 +61,7 @@ enum DictionaryState: String, Codable, Sendable {
     case invalid
     case corrupt
     case importFailed
+    case failed
 
     var displayName: String {
         switch self {
@@ -77,6 +78,7 @@ enum DictionaryState: String, Codable, Sendable {
         case .invalid: return "无效"
         case .corrupt: return "文件损坏"
         case .importFailed: return "导入失败"
+        case .failed: return "索引失败"
         }
     }
 }

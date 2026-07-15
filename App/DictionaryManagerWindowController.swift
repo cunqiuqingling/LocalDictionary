@@ -12,7 +12,9 @@ final class DictionaryManagerWindowController: NSWindowController,
         case enabled
         case state
         case entries
+        case indexSize
         case indexedAt
+        case action
     }
 
     private var catalog: DictionaryCatalog
@@ -20,6 +22,7 @@ final class DictionaryManagerWindowController: NSWindowController,
     private let catalogStore: DictionaryCatalogStore
     private let importInspector: MDictImportInspector
     private let importService: DictionaryImportService
+    private let indexCoordinator: ManagedDictionaryIndexCoordinator
     private let onCatalogChanged: (DictionaryCatalog) -> Void
     private var previewAccessory: DictionaryImportPreviewAccessory?
     private let tableView = NSTableView()
@@ -30,14 +33,16 @@ final class DictionaryManagerWindowController: NSWindowController,
          catalogStore: DictionaryCatalogStore,
          importInspector: MDictImportInspector = MDictImportInspector(),
          importService: DictionaryImportService? = nil,
+         indexCoordinator: ManagedDictionaryIndexCoordinator,
          onCatalogChanged: @escaping (DictionaryCatalog) -> Void = { _ in }) {
         self.catalog = catalog
         self.catalogStore = catalogStore
         self.importInspector = importInspector
         self.importService = importService ?? DictionaryImportService(catalogStore: catalogStore)
+        self.indexCoordinator = indexCoordinator
         self.onCatalogChanged = onCatalogChanged
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 430),
+            contentRect: NSRect(x: 0, y: 0, width: 1060, height: 430),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -86,6 +91,7 @@ final class DictionaryManagerWindowController: NSWindowController,
                 : "旧五词典仍由 legacy 调度器管理。"
             return button
         }
+        if column == .action { return indexActionView(for: dictionaries[row]) }
         let identifier = NSUserInterfaceItemIdentifier("DictionaryManager.\(column.rawValue)")
         let cell: NSTableCellView
         if let reused = tableView.makeView(withIdentifier: identifier,
@@ -109,6 +115,13 @@ final class DictionaryManagerWindowController: NSWindowController,
         cell.textField?.stringValue = value(for: column, dictionary: dictionaries[row])
         cell.textField?.textColor = column == .state ? stateColor(dictionaries[row].state)
                                                      : .labelColor
+        if column == .state, let message = indexCoordinator.failureMessage(
+            for: dictionaries[row].dictionaryID
+        ) {
+            cell.toolTip = message
+        } else {
+            cell.toolTip = nil
+        }
         return cell
     }
 
@@ -123,7 +136,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         heading.translatesAutoresizingMaskIntoConstraints = false
 
         let explanation = NSTextField(wrappingLabelWithString:
-            "可安全托管本地 MDX/MDD；新导入词典本阶段不会建立索引或加入查询。")
+            "可安全托管本地 MDX/MDD，并手动建立独立索引；用户词典暂不加入查询。")
         explanation.textColor = .secondaryLabelColor
         explanation.translatesAutoresizingMaskIntoConstraints = false
 
@@ -186,7 +199,9 @@ final class DictionaryManagerWindowController: NSWindowController,
         addColumn(.enabled, title: "启用", width: 48)
         addColumn(.state, title: "状态", width: 72)
         addColumn(.entries, title: "词条数量", width: 85)
-        addColumn(.indexedAt, title: "最近索引", width: 145)
+        addColumn(.indexSize, title: "索引大小", width: 82)
+        addColumn(.indexedAt, title: "最近索引", width: 130)
+        addColumn(.action, title: "索引操作", width: 140, minWidth: 140)
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -195,11 +210,12 @@ final class DictionaryManagerWindowController: NSWindowController,
         scrollView.borderType = .bezelBorder
     }
 
-    private func addColumn(_ column: Column, title: String, width: CGFloat) {
+    private func addColumn(_ column: Column, title: String, width: CGFloat,
+                           minWidth: CGFloat? = nil) {
         let tableColumn = NSTableColumn(identifier: .init(column.rawValue))
         tableColumn.title = title
         tableColumn.width = width
-        tableColumn.minWidth = min(width, 48)
+        tableColumn.minWidth = minWidth ?? min(width, 48)
         tableColumn.resizingMask = .autoresizingMask
         tableView.addTableColumn(tableColumn)
     }
@@ -260,6 +276,66 @@ final class DictionaryManagerWindowController: NSWindowController,
             update(catalog: previous)
             showError(title: "无法保存启用状态", error: error)
         }
+    }
+
+    private func indexActionView(for dictionary: DictionaryDescriptor) -> NSView {
+        guard dictionary.sourceKind == .managedLocal else {
+            return NSTextField(labelWithString: "—")
+        }
+        let button: NSButton
+        switch dictionary.state {
+        case .pendingIndex:
+            button = NSButton(title: "建立索引", target: self,
+                              action: #selector(startIndexing(_:)))
+            button.toolTip = "为该托管词典建立本地索引，不删除或修改源 MDX。"
+        case .failed:
+            button = NSButton(title: "重试", target: self,
+                              action: #selector(startIndexing(_:)))
+        case .indexing:
+            button = NSButton(title: "取消索引", target: self,
+                              action: #selector(cancelIndexing(_:)))
+            button.toolTip = "请求取消当前索引任务。"
+        case .ready:
+            button = NSButton(title: "已建立", target: nil, action: nil)
+            button.isEnabled = false
+            button.toolTip = "该词典索引已完成。"
+        default:
+            button = NSButton(title: "不可用", target: nil, action: nil)
+            button.isEnabled = false
+        }
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.identifier = NSUserInterfaceItemIdentifier(dictionary.dictionaryID)
+        guard dictionary.state == .indexing else { return button }
+
+        let indicator = NSProgressIndicator()
+        indicator.style = .spinning
+        indicator.controlSize = .small
+        indicator.isIndeterminate = true
+        indicator.startAnimation(nil)
+        let stack = NSStackView(views: [indicator, button])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 5
+        return stack
+    }
+
+    @objc private func startIndexing(_ sender: NSButton) {
+        guard let dictionaryID = sender.identifier?.rawValue else { return }
+        switch indexCoordinator.start(dictionaryID: dictionaryID) {
+        case .started:
+            break
+        case .busy:
+            showInformation(title: "已有索引任务进行中",
+                            message: "为控制 CPU、内存和磁盘负载，同一时间只建立一个索引。")
+        case .unavailable(let message):
+            showInformation(title: "无法建立索引", message: message)
+        }
+    }
+
+    @objc private func cancelIndexing(_ sender: NSButton) {
+        guard let dictionaryID = sender.identifier?.rawValue else { return }
+        indexCoordinator.cancel(dictionaryID: dictionaryID)
     }
 
     @objc private func beginImport() {
@@ -438,9 +514,14 @@ final class DictionaryManagerWindowController: NSWindowController,
         case .entries:
             guard let count = dictionary.indexMetadata.entryCount else { return "—" }
             return Self.numberFormatter.string(from: NSNumber(value: count)) ?? String(count)
+        case .indexSize:
+            guard let size = dictionary.indexMetadata.indexFileSize else { return "—" }
+            return ByteCountFormatter.string(fromByteCount: Int64(clamping: size),
+                                             countStyle: .file)
         case .indexedAt:
             guard let date = dictionary.indexMetadata.indexedAt else { return "—" }
             return Self.dateFormatter.string(from: date)
+        case .action: return ""
         }
     }
 

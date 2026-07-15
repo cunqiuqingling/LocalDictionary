@@ -2,6 +2,14 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+typedef BOOL (^DictionaryIndexCancellationCheck)(void);
+
+FOUNDATION_EXPORT NSInteger LocalDictionaryIndexSchemaVersion(void);
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *LocalDictionaryBuildIndex(
+    NSString *dictionaryPath,
+    NSString *indexPath,
+    DictionaryIndexCancellationCheck cancellationCheck);
+
 #ifdef __cplusplus
 class DictionaryBridgeStorage;
 #endif

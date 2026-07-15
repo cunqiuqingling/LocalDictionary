@@ -7,6 +7,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictionaryManagerController: DictionaryManagerWindowController?
     private var dictionaryCatalog = DictionaryCatalog.empty()
     private let dictionaryCatalogStore = DictionaryCatalogStore()
+    private lazy var dictionaryIndexCoordinator = ManagedDictionaryIndexCoordinator(
+        catalogStore: dictionaryCatalogStore,
+        buildIndex: liveDictionaryIndexBuilder,
+        expectedSchemaVersion: Int(liveDictionaryIndexSchemaVersion)
+    )
     private var hotKey: GlobalHotKey?
     private let selectionReader = AccessibilitySelectionReader()
     private let clipboardFallback = ClipboardSelectionFallback()
@@ -40,6 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configureDictionary()
         hotKey = GlobalHotKey { [weak self] in self?.handleGlobalHotKey() }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        dictionaryIndexCoordinator.cancelCurrentTask()
     }
 
     private func handleGlobalHotKey() {
@@ -254,6 +263,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                             self?.showAISettings()
                                                         })
         }
+        dictionaryIndexCoordinator.onCatalogChanged = { [weak self] updated in
+            guard let self else { return }
+            self.dictionaryCatalog = updated
+            self.dictionaryManagerController?.update(catalog: updated)
+        }
+        catalog = dictionaryIndexCoordinator.recoverInterruptedTasks(in: catalog)
         dictionaryCatalog = catalog
         dictionaryManagerController?.update(catalog: catalog)
     }
@@ -264,8 +279,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dictionaryManagerController = DictionaryManagerWindowController(
                 catalog: dictionaryCatalog,
                 catalogStore: dictionaryCatalogStore,
+                indexCoordinator: dictionaryIndexCoordinator,
                 onCatalogChanged: { [weak self] catalog in
                     self?.dictionaryCatalog = catalog
+                    self?.dictionaryIndexCoordinator.synchronize(catalog: catalog)
                 }
             )
         }

@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <list>
 #include <memory>
 #include <string>
@@ -41,6 +43,15 @@ struct CacheStats {
   size_t maximum_bytes = 0;
 };
 
+struct IndexBuildResult {
+  uint64_t entry_count = 0;
+};
+
+class IndexBuildCancelled final : public std::exception {
+ public:
+  const char *what() const noexcept override { return "index build cancelled"; }
+};
+
 class SQLiteDictionaryCore {
  public:
   SQLiteDictionaryCore(std::string dictionary_path, std::string index_path,
@@ -52,10 +63,13 @@ class SQLiteDictionaryCore {
   SQLiteDictionaryCore &operator=(const SQLiteDictionaryCore &) = delete;
 
   IndexOpenResult open(bool force_rebuild = false);
+  IndexBuildResult buildIndex(
+      const std::function<bool()> &cancellation_check = {});
   LookupResult lookup(const std::string &input);
   CacheStats cacheStats() const;
 
   static std::string normalizeQuery(const std::string &input);
+  static int schemaVersion();
 
  private:
   struct IndexedRecord {
@@ -70,7 +84,6 @@ class SQLiteDictionaryCore {
   };
 
   bool indexMatchesDictionary() const;
-  void buildIndex();
   void openReadOnlyIndex();
   std::vector<IndexedRecord> findRecords(const std::string &query,
                                          bool folded) const;
@@ -90,4 +103,3 @@ class SQLiteDictionaryCore {
 };
 
 }  // namespace localdict
-

@@ -148,7 +148,12 @@ bool SQLiteDictionaryCore::indexMatchesDictionary() const {
   return matches;
 }
 
-void SQLiteDictionaryCore::buildIndex() {
+IndexBuildResult SQLiteDictionaryCore::buildIndex(
+    const std::function<bool()> &cancellation_check) {
+  const auto cancelled = [&cancellation_check]() {
+    return cancellation_check && cancellation_check();
+  };
+  if (cancelled()) throw IndexBuildCancelled();
   const std::filesystem::path index_path(index_path_);
   std::filesystem::create_directories(index_path.parent_path());
   const std::filesystem::path temporary_path = index_path.string() + ".building";
@@ -157,11 +162,13 @@ void SQLiteDictionaryCore::buildIndex() {
 
   mdict::Mdict source(dictionary_path_);
   source.init();
+  if (cancelled()) throw IndexBuildCancelled();
   if (source.engineVersion() < 2.0f || source.dictionaryEncoding() != 0) {
     throw std::runtime_error("Phase 2 requires an unencrypted UTF-8 MDict v2 file");
   }
   const auto keys = source.keyList();
   const uint64_t record_stream_size = source.recordStreamSize();
+  if (cancelled()) throw IndexBuildCancelled();
 
   sqlite3 *database = nullptr;
   checkSQLite(sqlite3_open_v2(temporary_path.c_str(), &database,
@@ -190,6 +197,7 @@ void SQLiteDictionaryCore::buildIndex() {
                     -1, &insert_entry, nullptr),
                 database, "prepare entry insert");
     for (size_t i = 0; i < keys.size(); ++i) {
+      if ((i & 0xff) == 0 && cancelled()) throw IndexBuildCancelled();
       if (!keys[i]) continue;
       const uint64_t start = keys[i]->record_start;
       uint64_t end = record_stream_size;
@@ -210,6 +218,8 @@ void SQLiteDictionaryCore::buildIndex() {
       sqlite3_clear_bindings(insert_entry);
     }
     sqlite3_finalize(insert_entry);
+
+    if (cancelled()) throw IndexBuildCancelled();
 
     const SourceMetadata metadata = sourceMetadata(dictionary_path_);
     const std::pair<std::string, std::string> values[] = {
@@ -237,6 +247,7 @@ void SQLiteDictionaryCore::buildIndex() {
       sqlite3_clear_bindings(insert_metadata);
     }
     sqlite3_finalize(insert_metadata);
+    if (cancelled()) throw IndexBuildCancelled();
     execute(database, "COMMIT");
     execute(database, "CREATE INDEX entries_headword ON entries(headword)");
     execute(database, "CREATE INDEX entries_folded ON entries(folded)");
@@ -244,14 +255,18 @@ void SQLiteDictionaryCore::buildIndex() {
     sqlite3_close(database);
     database = nullptr;
 
+    if (cancelled()) throw IndexBuildCancelled();
     std::filesystem::remove(index_path, ignored);
     std::filesystem::rename(temporary_path, index_path);
+    return IndexBuildResult{static_cast<uint64_t>(keys.size())};
   } catch (...) {
     if (database) sqlite3_close(database);
     std::filesystem::remove(temporary_path, ignored);
     throw;
   }
 }
+
+int SQLiteDictionaryCore::schemaVersion() { return kSchemaVersion; }
 
 void SQLiteDictionaryCore::openReadOnlyIndex() {
   closeDatabase();
@@ -421,4 +436,3 @@ CacheStats SQLiteDictionaryCore::cacheStats() const {
 }
 
 }  // namespace localdict
-

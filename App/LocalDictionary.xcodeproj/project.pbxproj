@@ -63,6 +63,9 @@
 		A10000000000000000000037 /* MDictImportInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000003F /* MDictImportInspector.swift */; };
 		A10000000000000000000038 /* DictionaryImportService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000040 /* DictionaryImportService.swift */; };
 		A10000000000000000000039 /* DictionaryImportPreviewAccessory.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000041 /* DictionaryImportPreviewAccessory.swift */; };
+		A1000000000000000000003A /* DictionaryIndexModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000042 /* DictionaryIndexModels.swift */; };
+		A1000000000000000000003B /* DictionaryIndexBuilderAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000043 /* DictionaryIndexBuilderAdapter.swift */; };
+		A1000000000000000000003C /* DictionaryIndexingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000044 /* DictionaryIndexingService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -131,6 +134,9 @@
 		B1000000000000000000003F /* MDictImportInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MDictImportInspector.swift; sourceTree = "<group>"; };
 		B10000000000000000000040 /* DictionaryImportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryImportService.swift; sourceTree = "<group>"; };
 		B10000000000000000000041 /* DictionaryImportPreviewAccessory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryImportPreviewAccessory.swift; sourceTree = "<group>"; };
+		B10000000000000000000042 /* DictionaryIndexModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryIndexModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000043 /* DictionaryIndexBuilderAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryIndexBuilderAdapter.swift; sourceTree = "<group>"; };
+		B10000000000000000000044 /* DictionaryIndexingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryIndexingService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -204,6 +210,9 @@
 				B1000000000000000000003F /* MDictImportInspector.swift */,
 				B10000000000000000000040 /* DictionaryImportService.swift */,
 				B10000000000000000000041 /* DictionaryImportPreviewAccessory.swift */,
+				B10000000000000000000042 /* DictionaryIndexModels.swift */,
+				B10000000000000000000043 /* DictionaryIndexBuilderAdapter.swift */,
+				B10000000000000000000044 /* DictionaryIndexingService.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -394,6 +403,9 @@
 				A10000000000000000000037 /* MDictImportInspector.swift in Sources */,
 				A10000000000000000000038 /* DictionaryImportService.swift in Sources */,
 				A10000000000000000000039 /* DictionaryImportPreviewAccessory.swift in Sources */,
+				A1000000000000000000003A /* DictionaryIndexModels.swift in Sources */,
+				A1000000000000000000003B /* DictionaryIndexBuilderAdapter.swift in Sources */,
+				A1000000000000000000003C /* DictionaryIndexingService.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,

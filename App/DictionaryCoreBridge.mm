@@ -23,7 +23,38 @@ NSString *string(const std::string &value) {
                                             encoding:NSUTF8StringEncoding];
   return result ?: @"";
 }
+
+NSString *sanitizedIndexBuildError() {
+  return @"索引核心无法处理此 MDX 文件。";
+}
 }  // namespace
+
+NSInteger LocalDictionaryIndexSchemaVersion(void) {
+  return localdict::SQLiteDictionaryCore::schemaVersion();
+}
+
+NSDictionary<NSString *, id> *LocalDictionaryBuildIndex(
+    NSString *dictionaryPath,
+    NSString *indexPath,
+    DictionaryIndexCancellationCheck cancellationCheck) {
+  if (dictionaryPath.length == 0 || indexPath.length == 0) {
+    return @{ @"success" : @NO, @"cancelled" : @NO,
+              @"error" : @"索引计划缺少必要文件。" };
+  }
+  try {
+    localdict::SQLiteDictionaryCore core(utf8(dictionaryPath), utf8(indexPath), 0, 0);
+    const auto result = core.buildIndex([cancellationCheck]() {
+      return cancellationCheck && cancellationCheck();
+    });
+    return @{ @"success" : @YES, @"cancelled" : @NO,
+              @"entryCount" : @(result.entry_count) };
+  } catch (const localdict::IndexBuildCancelled &) {
+    return @{ @"success" : @NO, @"cancelled" : @YES };
+  } catch (const std::exception &) {
+    return @{ @"success" : @NO, @"cancelled" : @NO,
+              @"error" : sanitizedIndexBuildError() };
+  }
+}
 
 @implementation DictionaryCoreBridge
 
