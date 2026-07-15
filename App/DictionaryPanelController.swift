@@ -31,6 +31,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private let noteStore: ObsidianNoteStore
     private let notePicker: ObsidianNotePicker
     private let aiService: AIExplanationService
+    private let managedDictionaryQueryService: ManagedDictionaryQueryService
     private let openAISettings: () -> Void
     private let aiEntryFormatter = AIEntryFormatter()
     private let aiSentenceFormatter = AISentenceEntryFormatter()
@@ -39,6 +40,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private let sentenceMarkdownFormatter = SentenceAnalysisMarkdownFormatter()
     private let inlineAttributedFormatter = InlineLookupAttributedFormatter()
     private let inlineMarkdownFormatter = InlineLookupMarkdownFormatter()
+    private let genericManagedPresenter = GenericManagedDictionaryPresenter()
     private lazy var inlinePageRenderer = InlinePageRenderer(formatter: inlineAttributedFormatter)
     private let searchField = NSSearchField()
     private let starButton = NSButton()
@@ -61,6 +63,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var aiAction: AIAction = .none
     private var aiTask: Task<Void, Never>?
     private var localGlossaryTask: Task<Void, Never>?
+    private var managedQueryTask: Task<Void, Never>?
     private var currentAIPresentation: AIExplanationPresentation?
     private var currentSentencePresentation: AISentenceAnalysisPresentation?
     private var currentLocalGlossary: LocalSentenceGlossary?
@@ -85,12 +88,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var didLogInlineLayoutDiagnostics = false
 #endif
 
-    private lazy var localGlossaryService = LocalSentenceGlossaryService(
-        sources: makeLocalGlossarySources()
-    )
-    private lazy var inlineLocalLookupService = InlineLocalLookupService(
-        sources: makeInlineLocalLookupSources()
-    )
+    private var localGlossaryService: LocalSentenceGlossaryService!
+    private var inlineLocalLookupService: InlineLocalLookupService!
 
     private enum AIAction: Equatable {
         case none
@@ -119,6 +118,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
          noteStore: ObsidianNoteStore,
          notePicker: ObsidianNotePicker,
          aiService: AIExplanationService,
+         managedDictionaryQueryService: ManagedDictionaryQueryService,
          openAISettings: @escaping () -> Void) {
         oxfordCore = core
         self.supplementalDictionaries = supplementalDictionaries.sorted {
@@ -127,6 +127,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         self.noteStore = noteStore
         self.notePicker = notePicker
         self.aiService = aiService
+        self.managedDictionaryQueryService = managedDictionaryQueryService
         self.openAISettings = openAISettings
         let standardScrollView = NSTextView.scrollableTextView()
         guard let standardTextView = standardScrollView.documentView as? NSTextView else {
@@ -139,6 +140,26 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                                     backing: .buffered,
                                     defer: true)
         super.init(window: panel)
+        localGlossaryService = LocalSentenceGlossaryService(
+            sources: makeLocalGlossarySources(),
+            managedFallback: { [managedDictionaryQueryService] term in
+                let batch = await managedDictionaryQueryService.lookup(term)
+                guard let hit = batch.hits.first,
+                      !hit.conciseChineseDefinitions.isEmpty else { return nil }
+                return LocalGlossaryLookupResult(
+                    partOfSpeech: "",
+                    definitions: hit.conciseChineseDefinitions,
+                    source: hit.displayName
+                )
+            }
+        )
+        inlineLocalLookupService = InlineLocalLookupService(
+            sources: makeInlineLocalLookupSources(),
+            managedFallback: { [managedDictionaryQueryService] term in
+                let batch = await managedDictionaryQueryService.lookup(term)
+                return batch.hits.map(Self.inlineHit(from:))
+            }
+        )
         configure(panel)
         installEventMonitors()
     }
@@ -148,6 +169,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     deinit {
         aiTask?.cancel()
         localGlossaryTask?.cancel()
+        managedQueryTask?.cancel()
         inlineTasks.values.forEach { $0.cancel() }
         if let localKeyMonitor { NSEvent.removeMonitor(localKeyMonitor) }
         NotificationCenter.default.removeObserver(self)
@@ -231,6 +253,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiTask = nil
         localGlossaryTask?.cancel()
         localGlossaryTask = nil
+        managedQueryTask?.cancel()
+        managedQueryTask = nil
         cancelAllInlineLookups(clear: true)
         renderInlinePage()
         hideInlineSelectionButton()
@@ -536,13 +560,12 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         reportedUnavailableDictionaryIDs.formUnion(newlyUnavailable.map { $0.id })
 
         guard !attributedSections.isEmpty else {
-            var message = "未找到词条：\(query)"
-            if !newlyUnavailable.isEmpty {
-                message += "\n部分词典暂不可用：" + newlyUnavailable.map { $0.name }.joined(separator: "、")
-            }
-            displayText(message)
-            localResultContent = textView.attributedString()
-            configureAIAction(hasLocalResult: false, hasChinese: false)
+            startManagedDictionaryLookup(
+                query: query,
+                intent: intent,
+                generation: queryGeneration.generation,
+                unavailablePreferredNames: newlyUnavailable.map(\.name)
+            )
             return false
         }
 
@@ -567,11 +590,76 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         return true
     }
 
+    private func startManagedDictionaryLookup(
+        query: String,
+        intent: QueryIntent,
+        generation: UInt64,
+        unavailablePreferredNames: [String]
+    ) {
+        displayText("正在查询已托管词典…")
+        managedQueryTask = Task { [weak self, managedDictionaryQueryService] in
+            let batch = await managedDictionaryQueryService.lookup(query)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self,
+                      self.currentQuery == query,
+                      self.currentIntent == intent,
+                      self.queryGeneration.accepts(generation) else { return }
+                self.managedQueryTask = nil
+                if batch.hits.isEmpty {
+                    var message = "未找到词条：\(query)"
+                    if !unavailablePreferredNames.isEmpty {
+                        message += "\n部分词典暂不可用：" +
+                            unavailablePreferredNames.joined(separator: "、")
+                    }
+                    if !batch.unavailableDictionaryIDs.isEmpty {
+                        message += "\n部分托管词典暂不可用"
+                    }
+                    self.displayText(message)
+                    self.localResultContent = self.textView.attributedString()
+                    self.configureAIAction(hasLocalResult: false, hasChinese: false)
+                    return
+                }
+                self.displayManagedDictionaryHits(batch.hits, query: query)
+            }
+        }
+    }
+
+    private func displayManagedDictionaryHits(_ hits: [ManagedDictionaryQueryHit],
+                                              query: String) {
+        let combined = NSMutableAttributedString(string: "")
+        var sources: [StructuredDictionarySource] = []
+        for hit in hits {
+            if combined.length > 0 { combined.append(NSAttributedString(string: "\n\n")) }
+            combined.append(genericManagedPresenter.attributedString(for: hit))
+            sources.append(StructuredDictionarySource(
+                phonetics: [],
+                partsOfSpeech: [],
+                definitions: hit.noteDefinitions,
+                examples: [],
+                source: hit.displayName,
+                dictionaryID: hit.dictionaryID
+            ))
+        }
+        guard !sources.isEmpty else { return }
+        displayAttributedText(combined)
+        let headword = hits.first?.matchedHeadword.isEmpty == false
+            ? hits[0].matchedHeadword : query
+        let entry = StructuredDictionaryEntry(headword: headword, sources: sources)
+        setCurrentEntry(entry)
+        localResultContent = combined.copy() as? NSAttributedString
+        localResultHasChinese = hits.contains { !$0.conciseChineseDefinitions.isEmpty }
+        configureAIAction(hasLocalResult: true, hasChinese: localResultHasChinese)
+        textView.scrollToBeginningOfDocument(nil)
+    }
+
     private func resetAIState(query: String, intent: QueryIntent) {
         aiTask?.cancel()
         aiTask = nil
         localGlossaryTask?.cancel()
         localGlossaryTask = nil
+        managedQueryTask?.cancel()
+        managedQueryTask = nil
         _ = queryGeneration.beginQuery()
         currentQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         currentIntent = intent
@@ -1162,6 +1250,23 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             if output.count == maximum { break }
         }
         return output
+    }
+
+    nonisolated private static func inlineHit(from hit: ManagedDictionaryQueryHit)
+        -> InlineLocalDictionaryHit {
+        let primary = hit.conciseChineseDefinitions.isEmpty
+            ? hit.noteDefinitions : hit.conciseChineseDefinitions
+        return InlineLocalDictionaryHit(
+            source: hit.displayName,
+            partOfSpeech: "",
+            chineseDefinitions: primary,
+            additionalDefinitions: Array(hit.noteDefinitions.dropFirst(3)),
+            examples: [],
+            collocations: [],
+            inflections: [],
+            roots: [],
+            isRootDictionary: false
+        )
     }
 
     private func glossarySource(id: DictionarySourceID, name: String,

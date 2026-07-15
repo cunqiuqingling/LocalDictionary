@@ -277,6 +277,48 @@ void SQLiteDictionaryCore::openReadOnlyIndex() {
   execute(database_, "PRAGMA query_only=ON");
 }
 
+IndexOpenResult SQLiteDictionaryCore::openExistingReadOnly() {
+  const auto total_start = Clock::now();
+  if (!std::filesystem::is_regular_file(dictionary_path_) ||
+      !std::filesystem::is_regular_file(index_path_)) {
+    throw std::runtime_error("Managed dictionary files are unavailable");
+  }
+  openReadOnlyIndex();
+
+  sqlite3_stmt *schema_statement = nullptr;
+  checkSQLite(sqlite3_prepare_v2(
+                  database_,
+                  "SELECT value FROM metadata WHERE key='schema_version' LIMIT 1",
+                  -1, &schema_statement, nullptr),
+              database_, "prepare schema version");
+  bool schema_matches = false;
+  if (sqlite3_step(schema_statement) == SQLITE_ROW) {
+    const auto *value = sqlite3_column_text(schema_statement, 0);
+    schema_matches = value &&
+        std::to_string(kSchemaVersion) == reinterpret_cast<const char *>(value);
+  }
+  sqlite3_finalize(schema_statement);
+  if (!schema_matches) {
+    closeDatabase();
+    throw std::runtime_error("Managed dictionary index schema mismatch");
+  }
+
+  dictionary_ = std::make_unique<mdict::Mdict>(dictionary_path_);
+  dictionary_->initMetadataOnly();
+
+  IndexOpenResult result;
+  sqlite3_stmt *statement = nullptr;
+  checkSQLite(sqlite3_prepare_v2(database_, "SELECT COUNT(*) FROM entries", -1,
+                                &statement, nullptr),
+              database_, "prepare entry count");
+  if (sqlite3_step(statement) == SQLITE_ROW) {
+    result.entry_count = static_cast<uint64_t>(sqlite3_column_int64(statement, 0));
+  }
+  sqlite3_finalize(statement);
+  result.startup_milliseconds = milliseconds(total_start, Clock::now());
+  return result;
+}
+
 IndexOpenResult SQLiteDictionaryCore::open(bool force_rebuild) {
   const auto total_start = Clock::now();
   IndexOpenResult result;
@@ -400,7 +442,8 @@ std::string SQLiteDictionaryCore::readWithCache(const IndexedRecord &record,
   return html;
 }
 
-LookupResult SQLiteDictionaryCore::lookup(const std::string &input) {
+LookupResult SQLiteDictionaryCore::lookup(const std::string &input,
+                                          size_t maximum_html_bytes) {
   const auto start = Clock::now();
   LookupResult result;
   result.query = input;
@@ -419,6 +462,15 @@ LookupResult SQLiteDictionaryCore::lookup(const std::string &input) {
     bool cache_hit = false;
     std::string html = readWithCache(record, cache_hit);
     if (!html.empty()) {
+      if (maximum_html_bytes > 0 && html.size() > maximum_html_bytes) {
+        size_t boundary = maximum_html_bytes;
+        while (boundary > 0 && boundary < html.size() &&
+               (static_cast<unsigned char>(html[boundary]) & 0xc0) == 0x80) {
+          --boundary;
+        }
+        html.resize(boundary);
+        result.html_truncated = true;
+      }
       result.found = true;
       result.cache_hit = cache_hit;
       result.matched_headword = record.headword;

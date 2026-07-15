@@ -71,6 +71,7 @@ struct StructuredDictionarySource: Codable, Equatable {
     let definitions: [String]
     let examples: [String]
     let source: String
+    let dictionaryID: String?
     let partOfSpeechSections: [StructuredPartOfSpeechSection]?
     let semanticEntry: StructuredSemanticEntry?
 
@@ -79,6 +80,7 @@ struct StructuredDictionarySource: Codable, Equatable {
          definitions: [String],
          examples: [String],
          source: String,
+         dictionaryID: String? = nil,
          partOfSpeechSections: [StructuredPartOfSpeechSection]? = nil,
          semanticEntry: StructuredSemanticEntry? = nil) {
         self.phonetics = phonetics
@@ -86,6 +88,7 @@ struct StructuredDictionarySource: Codable, Equatable {
         self.definitions = definitions
         self.examples = examples
         self.source = source
+        self.dictionaryID = dictionaryID
         self.partOfSpeechSections = partOfSpeechSections
         self.semanticEntry = semanticEntry
     }
@@ -98,6 +101,7 @@ struct StructuredDictionaryEntry: Codable, Equatable {
     let definitions: [String]
     let examples: [String]
     let source: String
+    let dictionaryID: String?
     let partOfSpeechSections: [StructuredPartOfSpeechSection]?
     let semanticEntry: StructuredSemanticEntry?
     let additionalSources: [StructuredDictionarySource]?
@@ -108,6 +112,7 @@ struct StructuredDictionaryEntry: Codable, Equatable {
          definitions: [String],
          examples: [String],
          source: String,
+         dictionaryID: String? = nil,
          partOfSpeechSections: [StructuredPartOfSpeechSection]? = nil,
          semanticEntry: StructuredSemanticEntry? = nil,
          additionalSources: [StructuredDictionarySource]? = nil) {
@@ -117,6 +122,7 @@ struct StructuredDictionaryEntry: Codable, Equatable {
         self.definitions = definitions
         self.examples = examples
         self.source = source
+        self.dictionaryID = dictionaryID
         self.partOfSpeechSections = partOfSpeechSections
         self.semanticEntry = semanticEntry
         self.additionalSources = additionalSources
@@ -136,6 +142,7 @@ struct StructuredDictionaryEntry: Codable, Equatable {
                   definitions: first.definitions,
                   examples: first.examples,
                   source: first.source,
+                  dictionaryID: first.dictionaryID,
                   partOfSpeechSections: first.partOfSpeechSections,
                   semanticEntry: first.semanticEntry,
                   additionalSources: sources.count > 1 ? Array(sources.dropFirst()) : nil)
@@ -150,6 +157,7 @@ struct StructuredDictionaryEntry: Codable, Equatable {
                 definitions: definitions,
                 examples: examples,
                 source: source,
+                dictionaryID: dictionaryID,
                 partOfSpeechSections: partOfSpeechSections,
                 semanticEntry: semanticEntry
             ))
@@ -705,6 +713,12 @@ final class ObsidianNoteStore {
 
             lines.append("### \(source)")
             lines.append("")
+            if let dictionaryID = sourceEntry.dictionaryID {
+                let identifier = singleLine(dictionaryID)
+                if !identifier.isEmpty {
+                    lines.append("- 词典标识：\(identifier)")
+                }
+            }
             if !phonetics.isEmpty {
                 lines.append("- 音标：\(phonetics.joined(separator: "；"))")
             }

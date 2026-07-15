@@ -121,6 +121,8 @@ struct InlineLocalLookupSource {
     let lookup: (String) -> InlineLocalDictionaryHit?
 }
 
+typealias ManagedInlineLookup = @Sendable (String) async -> [InlineLocalDictionaryHit]
+
 struct InlineLocalLookupResult: Equatable, Sendable {
     let quick: InlineWordQuickResult?
     let hits: [InlineLocalDictionaryHit]
@@ -459,12 +461,14 @@ enum InlineBaseBlockBuilder {
 
 actor InlineLocalLookupService {
     private let sources: [InlineLocalLookupSource]
+    private let managedFallback: ManagedInlineLookup?
 
-    init(sources: [InlineLocalLookupSource]) {
+    init(sources: [InlineLocalLookupSource], managedFallback: ManagedInlineLookup?) {
         self.sources = sources.sorted { $0.priority < $1.priority }
+        self.managedFallback = managedFallback
     }
 
-    func lookup(_ query: String) -> InlineLocalLookupResult {
+    func lookup(_ query: String) async -> InlineLocalLookupResult {
         let normalized = SentenceTextNormalizer.normalize(query)
         guard !normalized.isEmpty else { return InlineLocalLookupResult(quick: nil, hits: []) }
         var hits: [InlineLocalDictionaryHit] = []
@@ -482,6 +486,24 @@ actor InlineLocalLookupService {
                     model: nil,
                     fromCache: false
                 )
+            }
+        }
+        if hits.isEmpty, let managedFallback, !Task.isCancelled {
+            let managedHits = await managedFallback(normalized)
+            hits.append(contentsOf: managedHits)
+            if quick == nil, let hit = managedHits.first {
+                let definitions = hit.chineseDefinitions.isEmpty
+                    ? hit.additionalDefinitions : hit.chineseDefinitions
+                if !definitions.isEmpty {
+                    quick = InlineWordQuickResult(
+                        partOfSpeech: hit.partOfSpeech,
+                        definitions: Array(definitions.prefix(3)),
+                        source: hit.source,
+                        providerDisplayName: nil,
+                        model: nil,
+                        fromCache: false
+                    )
+                }
             }
         }
         return InlineLocalLookupResult(quick: quick, hits: hits)

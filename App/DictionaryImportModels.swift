@@ -31,7 +31,7 @@ struct DictionaryMDDCandidate: Identifiable, Equatable, Sendable {
 }
 
 struct DictionaryImportPreview: Equatable, Sendable {
-    static let defaultFormatterIdentifier = "generic-mdict.v1"
+    static let defaultFormatterIdentifier = DictionaryFormatterIdentifier.genericMDictV1
 
     var sourceMDXURL: URL
     var displayName: String

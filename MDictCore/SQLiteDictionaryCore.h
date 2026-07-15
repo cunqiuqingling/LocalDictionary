@@ -33,6 +33,7 @@ struct LookupResult {
   std::string normalized_query;
   std::string matched_headword;
   std::string html;
+  bool html_truncated = false;
   double milliseconds = 0;
 };
 
@@ -63,9 +64,11 @@ class SQLiteDictionaryCore {
   SQLiteDictionaryCore &operator=(const SQLiteDictionaryCore &) = delete;
 
   IndexOpenResult open(bool force_rebuild = false);
+  IndexOpenResult openExistingReadOnly();
   IndexBuildResult buildIndex(
       const std::function<bool()> &cancellation_check = {});
-  LookupResult lookup(const std::string &input);
+  LookupResult lookup(const std::string &input,
+                      size_t maximum_html_bytes = 0);
   CacheStats cacheStats() const;
 
   static std::string normalizeQuery(const std::string &input);

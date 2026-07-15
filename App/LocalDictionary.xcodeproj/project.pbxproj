@@ -66,6 +66,10 @@
 		A1000000000000000000003A /* DictionaryIndexModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000042 /* DictionaryIndexModels.swift */; };
 		A1000000000000000000003B /* DictionaryIndexBuilderAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000043 /* DictionaryIndexBuilderAdapter.swift */; };
 		A1000000000000000000003C /* DictionaryIndexingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000044 /* DictionaryIndexingService.swift */; };
+		A1000000000000000000003D /* GenericMDictEntryFormatter.mm in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000046 /* GenericMDictEntryFormatter.mm */; };
+		A1000000000000000000003E /* ManagedDictionaryQueryModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000047 /* ManagedDictionaryQueryModels.swift */; };
+		A1000000000000000000003F /* ManagedDictionaryQueryRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000048 /* ManagedDictionaryQueryRuntime.swift */; };
+		A10000000000000000000040 /* GenericManagedDictionaryPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000049 /* GenericManagedDictionaryPresenter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -137,6 +141,11 @@
 		B10000000000000000000042 /* DictionaryIndexModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryIndexModels.swift; sourceTree = "<group>"; };
 		B10000000000000000000043 /* DictionaryIndexBuilderAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryIndexBuilderAdapter.swift; sourceTree = "<group>"; };
 		B10000000000000000000044 /* DictionaryIndexingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryIndexingService.swift; sourceTree = "<group>"; };
+		B10000000000000000000045 /* GenericMDictEntryFormatter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = GenericMDictEntryFormatter.h; sourceTree = "<group>"; };
+		B10000000000000000000046 /* GenericMDictEntryFormatter.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = GenericMDictEntryFormatter.mm; sourceTree = "<group>"; };
+		B10000000000000000000047 /* ManagedDictionaryQueryModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedDictionaryQueryModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000048 /* ManagedDictionaryQueryRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedDictionaryQueryRuntime.swift; sourceTree = "<group>"; };
+		B10000000000000000000049 /* GenericManagedDictionaryPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenericManagedDictionaryPresenter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -213,6 +222,11 @@
 				B10000000000000000000042 /* DictionaryIndexModels.swift */,
 				B10000000000000000000043 /* DictionaryIndexBuilderAdapter.swift */,
 				B10000000000000000000044 /* DictionaryIndexingService.swift */,
+				B10000000000000000000045 /* GenericMDictEntryFormatter.h */,
+				B10000000000000000000046 /* GenericMDictEntryFormatter.mm */,
+				B10000000000000000000047 /* ManagedDictionaryQueryModels.swift */,
+				B10000000000000000000048 /* ManagedDictionaryQueryRuntime.swift */,
+				B10000000000000000000049 /* GenericManagedDictionaryPresenter.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -406,6 +420,10 @@
 				A1000000000000000000003A /* DictionaryIndexModels.swift in Sources */,
 				A1000000000000000000003B /* DictionaryIndexBuilderAdapter.swift in Sources */,
 				A1000000000000000000003C /* DictionaryIndexingService.swift in Sources */,
+				A1000000000000000000003D /* GenericMDictEntryFormatter.mm in Sources */,
+				A1000000000000000000003E /* ManagedDictionaryQueryModels.swift in Sources */,
+				A1000000000000000000003F /* ManagedDictionaryQueryRuntime.swift in Sources */,
+				A10000000000000000000040 /* GenericManagedDictionaryPresenter.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,

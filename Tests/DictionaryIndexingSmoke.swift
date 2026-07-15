@@ -99,12 +99,17 @@ private struct Fixture {
     let descriptor: DictionaryDescriptor
 
     init(name: String, state: DictionaryState = .pendingIndex,
-         digestOverride: String? = nil) throws {
+         digestOverride: String? = nil,
+         sourceAtManagedRoot: Bool = false,
+         formatterIdentifier: String = DictionaryFormatterIdentifier.genericMDictV1) throws {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalDictionary-B2-\(name)-\(UUID().uuidString)",
                                     isDirectory: true)
         dictionaryID = UUID().uuidString.lowercased()
-        sourceURL = root.appendingPathComponent("Dictionaries/\(dictionaryID)/source/test.mdx")
+        let sourceRelativePath = sourceAtManagedRoot
+            ? "Dictionaries/\(dictionaryID)/test.mdx"
+            : "Dictionaries/\(dictionaryID)/source/test.mdx"
+        sourceURL = root.appendingPathComponent(sourceRelativePath)
         try FileManager.default.createDirectory(at: sourceURL.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         let data = Data("generated-b2-fixture-\(name)".utf8)
@@ -127,10 +132,10 @@ private struct Fixture {
                 sourceSHA256: digestOverride ?? sha256(data),
                 indexedAt: nil
             ),
-            formatterIdentifier: "generic-mdict-v1",
+            formatterIdentifier: formatterIdentifier,
             capabilities: .unknown,
             relativePaths: DictionaryRelativePaths(
-                dictionary: "Dictionaries/\(dictionaryID)/source/test.mdx",
+                dictionary: sourceRelativePath,
                 resources: [], index: nil
             ),
             createdAt: now,
@@ -348,6 +353,81 @@ private func testInterruptedRecovery() throws {
                "unfinished candidate must not be treated as ready")
 }
 
+@MainActor
+private func testB1B2B3Compatibility() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("LocalDictionary-B1-B2-B3-\(UUID().uuidString)",
+                                isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = root.appendingPathComponent("fixture/imported.mdx")
+    try FileManager.default.createDirectory(at: source.deletingLastPathComponent(),
+                                            withIntermediateDirectories: true)
+    let bytes = Data("generated-b1-import-fixture".utf8)
+    try bytes.write(to: source)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let preview = DictionaryImportPreview(
+        sourceMDXURL: source,
+        displayName: "B1 Imported Fixture",
+        originalFileName: source.lastPathComponent,
+        mdxFileSize: UInt64(bytes.count),
+        sourceModifiedAt: now,
+        header: MDictHeaderSummary(title: "B1 Imported Fixture",
+                                   engineVersion: "2.0", encoding: "UTF-8",
+                                   compression: .compressed, isEncrypted: false),
+        mdxSHA256: sha256(bytes),
+        mddCandidates: [],
+        automaticallySelectedMDDIDs: []
+    )
+    let store = DictionaryCatalogStore(directoryURL:
+        root.appendingPathComponent("Catalog", isDirectory: true))
+    let fixedID = UUID(uuidString: "00000000-0000-0000-0000-0000000000b1")!
+    let importService = DictionaryImportService(
+        dictionariesRootURL: root.appendingPathComponent("Dictionaries", isDirectory: true),
+        catalogStore: store,
+        hooks: DictionaryImportServiceHooks(
+            availableCapacity: { _ in UInt64.max },
+            beforeCopy: { _ in },
+            beforePublish: {}
+        ),
+        identifierProvider: { fixedID }
+    )
+    var imported = try await importService.importSelections(
+        [DictionaryImportSelection(preview: preview, selectedMDDIDs: [])],
+        into: .empty(now: now),
+        now: now
+    )
+    try expect(imported.dictionaries[0].relativePaths.dictionary ==
+               "Dictionaries/\(fixedID.uuidString.lowercased())/imported.mdx",
+               "B1 must publish the managed MDX at the UUID root")
+    imported.dictionaries[0].formatterIdentifier =
+        DictionaryFormatterIdentifier.legacyGenericMDictV1
+    try store.save(imported)
+
+    let coordinator = ManagedDictionaryIndexCoordinator(
+        catalog: imported,
+        catalogStore: store,
+        applicationSupportRootURL: root,
+        buildIndex: validBuilder(entries: 2),
+        expectedSchemaVersion: 1,
+        hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max },
+                                       beforePublish: {})
+    )
+    try expect(coordinator.start(dictionaryID: fixedID.uuidString.lowercased()) == .started,
+               "persisted B1 descriptor should enter B2 indexing")
+    try await waitUntilIdle(coordinator)
+    let ready = coordinator.catalog.dictionaries[0]
+    try expect(ready.state == .ready, "B1 descriptor should become B2 ready")
+    let plan = try ManagedDictionaryRuntimeValidator(
+        applicationSupportRootURL: root,
+        expectedSchemaVersion: 1
+    ).validate(ready)
+    try expect(plan.dictionaryID == fixedID.uuidString.lowercased(),
+               "B1 root layout and legacy formatter should pass B3 validation")
+    try expect(plan.sourceURL.standardizedFileURL ==
+               root.appendingPathComponent(ready.relativePaths.dictionary!).standardizedFileURL,
+               "B3 validation must preserve the imported B1 managed MDX location")
+}
+
 @main
 @MainActor
 struct DictionaryIndexingSmoke {
@@ -358,6 +438,7 @@ struct DictionaryIndexingSmoke {
         try await testValidationFailures()
         try await testFailurePreservesExistingIndex()
         try testInterruptedRecovery()
+        try await testB1B2B3Compatibility()
         print("Dictionary indexing smoke: PASS")
     }
 }

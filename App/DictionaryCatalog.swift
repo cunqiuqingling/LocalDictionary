@@ -1,5 +1,14 @@
 import Foundation
 
+enum DictionaryFormatterIdentifier: Sendable {
+    static let genericMDictV1 = "generic-mdict-v1"
+    static let legacyGenericMDictV1 = "generic-mdict.v1"
+
+    static func supportsGenericMDictV1(_ identifier: String) -> Bool {
+        identifier == genericMDictV1 || identifier == legacyGenericMDictV1
+    }
+}
+
 enum DictionaryQueryLevel: String, Codable, CaseIterable, Sendable {
     case preferred
     case normal

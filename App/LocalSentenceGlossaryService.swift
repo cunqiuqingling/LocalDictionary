@@ -1,7 +1,7 @@
 import Foundation
 import NaturalLanguage
 
-struct LocalGlossaryLookupResult: Equatable {
+struct LocalGlossaryLookupResult: Equatable, Sendable {
     let partOfSpeech: String
     let definitions: [String]
     let source: String
@@ -12,6 +12,8 @@ struct LocalGlossaryDictionarySource {
     let priority: Int
     let lookup: (String) -> LocalGlossaryLookupResult?
 }
+
+typealias ManagedGlossaryLookup = @Sendable (String) async -> LocalGlossaryLookupResult?
 
 struct LocalSentenceGlossaryEntry: Equatable {
     let surface: String
@@ -54,9 +56,12 @@ actor LocalSentenceGlossaryService {
     }
 
     private let sources: [LocalGlossaryDictionarySource]
+    private let managedFallback: ManagedGlossaryLookup?
 
-    init(sources: [LocalGlossaryDictionarySource]) {
+    init(sources: [LocalGlossaryDictionarySource],
+         managedFallback: ManagedGlossaryLookup?) {
         self.sources = sources.sorted { $0.priority < $1.priority }
+        self.managedFallback = managedFallback
     }
 
     func analyze(sentence: String) async -> LocalSentenceGlossary {
@@ -77,9 +82,9 @@ actor LocalSentenceGlossaryService {
                   queryCount < Self.maximumCandidateQueries,
                   entries.count < Self.maximumEntries else { break }
             guard candidate.tokenIndices.isDisjoint(with: coveredTokenIndices),
-                  let hit = lookup(candidate.lookup,
-                                   queryCount: &queryCount,
-                                   maximumSources: 2),
+                  let hit = await lookup(candidate.lookup,
+                                         queryCount: &queryCount,
+                                         maximumSources: 2),
                   let entry = Self.entry(surface: candidate.surface,
                                          lookupTerm: candidate.lookup,
                                          hit: hit,
@@ -96,7 +101,7 @@ actor LocalSentenceGlossaryService {
                   entries.count < Self.maximumEntries else { break }
             let normalized = token.normalized.lowercased()
             guard seenTerms.insert(normalized).inserted else { continue }
-            if let hit = lookup(normalized, queryCount: &queryCount),
+            if let hit = await lookup(normalized, queryCount: &queryCount),
                let entry = Self.entry(surface: token.surface,
                                       lookupTerm: normalized,
                                       hit: hit,
@@ -107,7 +112,7 @@ actor LocalSentenceGlossaryService {
             guard queryCount < Self.maximumCandidateQueries,
                   let lemma = Self.safeLemma(for: normalized),
                   lemma != normalized else { continue }
-            guard let lemmaHit = lookup(lemma, queryCount: &queryCount),
+            guard let lemmaHit = await lookup(lemma, queryCount: &queryCount),
                   let entry = Self.entry(surface: token.surface,
                                          lookupTerm: lemma,
                                          hit: lemmaHit,
@@ -121,7 +126,7 @@ actor LocalSentenceGlossaryService {
     }
 
     private func lookup(_ term: String, queryCount: inout Int,
-                        maximumSources: Int? = nil) -> LocalGlossaryLookupResult? {
+                        maximumSources: Int? = nil) async -> LocalGlossaryLookupResult? {
         let candidates = maximumSources.map { Array(sources.prefix($0)) } ?? sources
         for source in candidates {
             guard !Task.isCancelled,
@@ -131,6 +136,24 @@ actor LocalSentenceGlossaryService {
                !Self.uniqueChinese(hit.definitions, maximum: 1).isEmpty {
                 return hit
             }
+        }
+        if let maximumSources, maximumSources < sources.count {
+            for source in sources.dropFirst(maximumSources) {
+                guard !Task.isCancelled,
+                      queryCount < Self.maximumCandidateQueries else { return nil }
+                queryCount += 1
+                if let hit = source.lookup(term),
+                   !Self.uniqueChinese(hit.definitions, maximum: 1).isEmpty {
+                    return hit
+                }
+            }
+        }
+        guard let managedFallback, !Task.isCancelled,
+              queryCount < Self.maximumCandidateQueries else { return nil }
+        queryCount += 1
+        if let hit = await managedFallback(term),
+           !Self.uniqueChinese(hit.definitions, maximum: 1).isEmpty {
+            return hit
         }
         return nil
     }

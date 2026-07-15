@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/dictionary-indexing-smoke"
+BUILD="$ROOT/.build/managed-dictionary-query-smoke"
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then
     export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
@@ -20,14 +20,10 @@ xcrun --sdk macosx swiftc \
   -warnings-as-errors \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/DictionaryCatalog.swift" \
-  "$ROOT/App/DictionaryCatalogStore.swift" \
-  "$ROOT/App/DictionaryImportModels.swift" \
-  "$ROOT/App/DictionaryImportService.swift" \
-  "$ROOT/App/DictionaryIndexModels.swift" \
-  "$ROOT/App/DictionaryIndexingService.swift" \
   "$ROOT/App/ManagedDictionaryQueryModels.swift" \
-  "$ROOT/Tests/DictionaryIndexingSmoke.swift" \
+  "$ROOT/App/ObsidianNoteStore.swift" \
+  "$ROOT/Tests/ManagedDictionaryQuerySmoke.swift" \
   -lsqlite3 \
-  -o "$BUILD/DictionaryIndexingSmoke"
+  -o "$BUILD/ManagedDictionaryQuerySmoke"
 
-"$BUILD/DictionaryIndexingSmoke"
+"$BUILD/ManagedDictionaryQuerySmoke"

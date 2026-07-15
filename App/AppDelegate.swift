@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictionaryManagerController: DictionaryManagerWindowController?
     private var dictionaryCatalog = DictionaryCatalog.empty()
     private let dictionaryCatalogStore = DictionaryCatalogStore()
+    private var managedDictionaryQueryService: ManagedDictionaryQueryService?
     private lazy var dictionaryIndexCoordinator = ManagedDictionaryIndexCoordinator(
         catalogStore: dictionaryCatalogStore,
         buildIndex: liveDictionaryIndexBuilder,
@@ -222,12 +223,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureDictionary() {
         var catalog = dictionaryCatalogStore.load()
-        if let config = AppConfig.loadIfPresent() {
+        let config = AppConfig.loadIfPresent()
+        if let config {
             let adapted = LegacyDictionaryConfigAdapter().adapt(config, into: catalog)
             if adapted != catalog {
                 try? dictionaryCatalogStore.save(adapted)
                 catalog = adapted
             }
+        } else {
+            catalog = LegacyDictionaryConfigAdapter()
+                .markingUnresolvableLegacyReferencesUnavailable(in: catalog)
+        }
+        catalog = dictionaryIndexCoordinator.recoverInterruptedTasks(in: catalog)
+        dictionaryCatalog = catalog
+
+        let managedService = ManagedDictionaryQueryService(
+            catalog: catalog,
+            runtime: LiveManagedDictionaryQueryRuntime()
+        )
+        managedDictionaryQueryService = managedService
+
+        if let config {
             let core = DictionaryCoreBridge(dictionaryPath: config.primaryDictionary,
                                             indexPath: config.indexPath)
             let supplementalDictionaries = config.supplementalDictionaries.map { configuration in
@@ -248,17 +264,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                         noteStore: noteStore,
                                                         notePicker: notePicker,
                                                         aiService: aiService,
+                                                        managedDictionaryQueryService: managedService,
                                                         openAISettings: { [weak self] in
                                                             self?.showAISettings()
                                                         })
         } else {
-            catalog = LegacyDictionaryConfigAdapter()
-                .markingUnresolvableLegacyReferencesUnavailable(in: catalog)
             let core = DictionaryCoreBridge(dictionaryPath: "", indexPath: "")
             panelController = DictionaryPanelController(core: core,
                                                         noteStore: noteStore,
                                                         notePicker: notePicker,
                                                         aiService: aiService,
+                                                        managedDictionaryQueryService: managedService,
                                                         openAISettings: { [weak self] in
                                                             self?.showAISettings()
                                                         })
@@ -267,9 +283,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.dictionaryCatalog = updated
             self.dictionaryManagerController?.update(catalog: updated)
+            Task { await managedService.replaceCatalog(updated) }
         }
-        catalog = dictionaryIndexCoordinator.recoverInterruptedTasks(in: catalog)
-        dictionaryCatalog = catalog
         dictionaryManagerController?.update(catalog: catalog)
     }
 
@@ -283,6 +298,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onCatalogChanged: { [weak self] catalog in
                     self?.dictionaryCatalog = catalog
                     self?.dictionaryIndexCoordinator.synchronize(catalog: catalog)
+                    if let service = self?.managedDictionaryQueryService {
+                        Task { await service.replaceCatalog(catalog) }
+                    }
                 }
             )
         }

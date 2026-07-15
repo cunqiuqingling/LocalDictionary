@@ -91,6 +91,31 @@ NSDictionary<NSString *, id> *LocalDictionaryBuildIndex(
   return self;
 }
 
+- (instancetype)initReadOnlyWithDictionaryPath:(NSString *)dictionaryPath
+                                      indexPath:(NSString *)indexPath
+                             cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
+                           cacheMaximumEntries:(NSUInteger)cacheMaximumEntries {
+  self = [super init];
+  if (self) {
+    _storage = new DictionaryBridgeStorage();
+    if (dictionaryPath.length == 0 || indexPath.length == 0) {
+      _storage->error = "Managed dictionary files are unavailable";
+      return self;
+    }
+    try {
+      _storage->core = std::make_unique<localdict::SQLiteDictionaryCore>(
+          utf8(dictionaryPath), utf8(indexPath),
+          static_cast<size_t>(cacheMaximumBytes),
+          static_cast<size_t>(cacheMaximumEntries));
+      _storage->core->openExistingReadOnly();
+    } catch (const std::exception &exception) {
+      _storage->error = exception.what();
+      _storage->core.reset();
+    }
+  }
+  return self;
+}
+
 - (void)dealloc {
   delete _storage;
 }
@@ -102,15 +127,22 @@ NSDictionary<NSString *, id> *LocalDictionaryBuildIndex(
 }
 
 - (NSDictionary<NSString *, id> *)lookup:(NSString *)query {
+  return [self lookup:query maximumHTMLBytes:0];
+}
+
+- (NSDictionary<NSString *, id> *)lookup:(NSString *)query
+                         maximumHTMLBytes:(NSUInteger)maximumHTMLBytes {
   if (![self isReady]) {
     return @{ @"found" : @NO, @"error" : self.lastError };
   }
   try {
-    const auto result = _storage->core->lookup(utf8(query));
+    const auto result = _storage->core->lookup(
+        utf8(query), static_cast<size_t>(maximumHTMLBytes));
     return @{
       @"found" : @(result.found),
       @"matchedHeadword" : string(result.matched_headword),
       @"html" : string(result.html),
+      @"htmlTruncated" : @(result.html_truncated),
       @"caseFallback" : @(result.used_case_fallback),
       @"milliseconds" : @(result.milliseconds)
     };

@@ -206,6 +206,9 @@ enum DictionaryImportSmoke {
         try expect(descriptor.sourceKind == .managedLocal &&
                    descriptor.state == .pendingIndex && descriptor.enabled,
                    "managed descriptor defaults are incorrect")
+        try expect(descriptor.formatterIdentifier ==
+                   DictionaryFormatterIdentifier.genericMDictV1,
+                   "new imports must use the canonical generic formatter identifier")
         try expect(descriptor.relativePaths.index == nil &&
                    descriptor.indexMetadata.indexedAt == nil,
                    "import unexpectedly created index metadata")

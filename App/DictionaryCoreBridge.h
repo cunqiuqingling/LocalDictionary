@@ -32,7 +32,13 @@ class DictionaryBridgeStorage;
                               indexPath:(NSString *)indexPath
                      cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
                    cacheMaximumEntries:(NSUInteger)cacheMaximumEntries;
+- (instancetype)initReadOnlyWithDictionaryPath:(NSString *)dictionaryPath
+                                      indexPath:(NSString *)indexPath
+                             cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
+                           cacheMaximumEntries:(NSUInteger)cacheMaximumEntries;
 - (NSDictionary<NSString *, id> *)lookup:(NSString *)query;
+- (NSDictionary<NSString *, id> *)lookup:(NSString *)query
+                         maximumHTMLBytes:(NSUInteger)maximumHTMLBytes;
 
 @end
 

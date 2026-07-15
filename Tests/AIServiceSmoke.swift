@@ -1029,13 +1029,49 @@ private struct AIServiceSmoke {
                     collocations: [], inflections: [], roots: ["bio-：生命"],
                     isRootDictionary: true)
             }
-        ])
+        ], managedFallback: nil)
         let local = await service.lookup("cardiology")
         try expect(local.quick?.source == "英中医学辞海" &&
                    local.quick?.definitions.count == 3,
                    "local quick chooses first real Chinese definitions and caps at three")
         try expect(local.quick?.source != "词根词缀" && local.expansion?.roots == ["bio-：生命"],
                    "root source is expansion, not ordinary definition")
+        let managedOnly = InlineLocalLookupService(
+            sources: [],
+            managedFallback: { query in
+                guard query == "managed-term" else { return [] }
+                return [InlineLocalDictionaryHit(
+                    source: "用户词典", partOfSpeech: "",
+                    chineseDefinitions: ["托管词典释义"], additionalDefinitions: [],
+                    examples: [], collocations: [], inflections: [], roots: [],
+                    isRootDictionary: false
+                )]
+            }
+        )
+        let managed = await managedOnly.lookup("managed-term")
+        try expect(managed.quick?.source == "用户词典" &&
+                   managed.quick?.isAI == false,
+                   "managed local hit is used before inline AI fallback")
+        let preferredFirst = InlineLocalLookupService(
+            sources: [InlineLocalLookupSource(name: "首选", priority: 1) { _ in
+                InlineLocalDictionaryHit(
+                    source: "首选", partOfSpeech: "noun",
+                    chineseDefinitions: ["首选释义"], additionalDefinitions: [],
+                    examples: [], collocations: [], inflections: [], roots: [],
+                    isRootDictionary: false
+                )
+            }],
+            managedFallback: { _ in [InlineLocalDictionaryHit(
+                source: "不应查询", partOfSpeech: "",
+                chineseDefinitions: ["错误后备释义"],
+                additionalDefinitions: ["不应出现"], examples: [], collocations: [],
+                inflections: [], roots: [], isRootDictionary: false
+            )] }
+        )
+        let preferred = await preferredFirst.lookup("preferred-term")
+        try expect(preferred.quick?.source == "首选" && preferred.hits.count == 1 &&
+                   preferred.expansion == nil,
+                   "preferred inline hit must not query managed dictionaries")
         try expect(localQueryCount == 3, "local inline lookup is bounded to configured sources")
 
         let id = UUID()
@@ -1254,7 +1290,7 @@ private struct AIServiceSmoke {
                     roots: [], isRootDictionary: false
                 )
             }
-        ])
+        ], managedFallback: nil)
         let local = await localService.lookup(snapshot!.selectedText)
         try expect(queried == ["assemble"] && local.quick?.partOfSpeech == "v." &&
                    local.quick?.definitions == ["组装；装配；集合"],
@@ -1756,7 +1792,7 @@ private struct AIServiceSmoke {
             .init(name: "21世纪大英汉词典", priority: 1) { century21[$0] },
             .init(name: "英中医学辞海", priority: 2) { medical[$0] },
             .init(name: "牛津高阶 8", priority: 3) { oxford[$0] }
-        ])
+        ], managedFallback: nil)
         let sentences = [
             sampleSentenceText,
             "The drug, which was initially developed to treat diabetes, was later found to reduce cardiovascular risk.",
