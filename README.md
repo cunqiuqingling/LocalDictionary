@@ -22,14 +22,17 @@ The script installs it under the current user's `Library/Application Support/Loc
 
 `MDictCore/ValidationCLI` is a temporary native C++17 probe for checking real MDX/MDD files, entry HTML, resources, and baseline memory/timing behavior. It has no network access and no background process.
 
-The reviewed phase-1 checkout is intentionally ignored because upstream bundles GPL components that are not part of this project. To reproduce it:
+The app and both validation CLIs build from the reviewed, fixed-source subset in
+`ThirdParty/vendor`; no download or ignored checkout is required:
 
 ```sh
-git clone --depth 1 https://github.com/dictlab/mdict-cpp.git ThirdParty/mdict-cpp
-git -C ThirdParty/mdict-cpp apply ../../MDictCore/ValidationCLI/mdict-cpp-phase1.patch
-git -C ThirdParty/mdict-cpp apply ../../MDictCore/DictionaryCoreCLI/mdict-cpp-phase2.patch
 MDictCore/ValidationCLI/build.sh
 ```
+
+The optional full checkout at `ThirdParty/mdict-cpp` remains ignored and is
+used only when auditing upstream updates and replaying the recorded patches.
+Exact sources, versions, licenses, hashes, exclusions, and update steps are in
+`ThirdParty/README.md`.
 
 See `docs/mdict-validation.md` for observed compatibility and `docs/architecture.md` for the planned native architecture.
 

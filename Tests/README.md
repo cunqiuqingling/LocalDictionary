@@ -22,6 +22,10 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-dictionary-manager-ui-state-smoke.sh` covers the C1 dictionary-manager presentation model and a lightweight in-process AppKit layout pass. It verifies user-facing source/query/status wording, cooperative cancellation and removal states, index-action titles and disabled reasons, table-width assumptions, empty/populated manager layouts, import-preview layout, and the absence of internal path/SQLite/Catalog details in manager error messages. It does not launch the product, access a dictionary, or use the network.
 
+`run-ripemd128-miniz-smoke.sh` compiles the project RIPEMD-128 adapter with the fixed LibTomCrypt source and exercises the official standard vectors, segmented and multi-block updates, independent contexts, idempotent finalization, and sanitizer checks. It also validates the fixed miniz subset with synthetic round-trip and truncated-input decompression, plus the mdict-cpp encrypted key-info boundary against an independent synthetic reference; no dictionary or network is used.
+
+`run-third-party-vendor-smoke.sh` verifies the exact reviewed vendor file set, recorded SHA-256 values, license files, Git visibility, forbidden dependency exclusions, and the absence of build/test references to the ignored research checkout, old RIPEMD sample, miniz ZIP code, or turbobase64.
+
 ## C1 manual acceptance checklist
 
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.

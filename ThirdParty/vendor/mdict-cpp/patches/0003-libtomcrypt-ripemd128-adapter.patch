@@ -1,0 +1,40 @@
+diff --git a/src/include/mdict.h b/src/include/mdict.h
+--- a/src/include/mdict.h
++++ b/src/include/mdict.h
+@@ -17,7 +17,6 @@
+ #include <vector>
+ 
+ #include "mdict_extern.h"
+-#include "ripemd128.h"
+ 
+ /**
+  * mdx struct analysis
+diff --git a/src/mdict.cc b/src/mdict.cc
+--- a/src/mdict.cc
++++ b/src/mdict.cc
+@@ -7,6 +7,8 @@
+  */
+ 
+ #include "include/mdict.h"
++
++#include "RIPEMD128Adapter.h"
+ 
+ #include <encode/api.h>
+ #include <encode/base64.h>
+@@ -540,10 +542,14 @@ byte *mdx_decrypt(byte *comp_block, const int comp_block_len) {
+   key_buffer[4] = 0x95; // comp_block[4:8] + [0x95,0x36,0x00,0x00]
+   key_buffer[5] = 0x36;
+ 
+-  byte *key = ripemd128bytes(key_buffer, 8);
++  byte key[LD_RIPEMD128_DIGEST_LENGTH];
++  if (ld_ripemd128_digest(key_buffer, 8, key) != LD_RIPEMD128_OK) {
++    std::free(key_buffer);
++    throw std::runtime_error("RIPEMD-128 key derivation failed");
++  }
+ 
+   fast_decrypt(comp_block + 8 * sizeof(byte), key, comp_block_len - 8,
+-               16 /* key length*/);
++               LD_RIPEMD128_DIGEST_LENGTH);
+ 
+   // finally
+   std::free(key_buffer);

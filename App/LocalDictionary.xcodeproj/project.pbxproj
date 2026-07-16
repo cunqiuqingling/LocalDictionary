@@ -18,11 +18,11 @@
 		A10000000000000000000009 /* mdict.cc in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* mdict.cc */; };
 		A1000000000000000000000A /* binutils.cc in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* binutils.cc */; };
 		A1000000000000000000000B /* adler32.cc in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000B /* adler32.cc */; };
-		A1000000000000000000000C /* ripemd128.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000C /* ripemd128.c */; };
+		A1000000000000000000000C /* rmd128.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000C /* rmd128.c */; };
 		A1000000000000000000000D /* miniz.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* miniz.c */; };
 		A1000000000000000000000E /* miniz_tinfl.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* miniz_tinfl.c */; };
 		A1000000000000000000000F /* miniz_tdef.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* miniz_tdef.c */; };
-		A10000000000000000000010 /* miniz_zip.c in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000010 /* miniz_zip.c */; };
+		A10000000000000000000046 /* RIPEMD128Adapter.c in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000050 /* RIPEMD128Adapter.c */; };
 		A10000000000000000000012 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012 /* Cocoa.framework */; };
 		A10000000000000000000013 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* Carbon.framework */; };
 		A10000000000000000000014 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* libsqlite3.tbd */; };
@@ -90,14 +90,15 @@
 		B10000000000000000000017 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B10000000000000000000008 /* SQLiteDictionaryCore.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = SQLiteDictionaryCore.cpp; path = ../MDictCore/SQLiteDictionaryCore.cpp; sourceTree = "<group>"; };
 		B10000000000000000000018 /* SQLiteDictionaryCore.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = SQLiteDictionaryCore.h; path = ../MDictCore/SQLiteDictionaryCore.h; sourceTree = "<group>"; };
-		B10000000000000000000009 /* mdict.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = mdict.cc; path = ../ThirdParty/mdict-cpp/src/mdict.cc; sourceTree = "<group>"; };
-		B1000000000000000000000A /* binutils.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = binutils.cc; path = ../ThirdParty/mdict-cpp/src/binutils.cc; sourceTree = "<group>"; };
-		B1000000000000000000000B /* adler32.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = adler32.cc; path = ../ThirdParty/mdict-cpp/src/adler32.cc; sourceTree = "<group>"; };
-		B1000000000000000000000C /* ripemd128.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = ripemd128.c; path = ../ThirdParty/mdict-cpp/src/ripemd128.c; sourceTree = "<group>"; };
-		B1000000000000000000000D /* miniz.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz.c; path = ../ThirdParty/mdict-cpp/deps/miniz/miniz.c; sourceTree = "<group>"; };
-		B1000000000000000000000E /* miniz_tinfl.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tinfl.c; path = ../ThirdParty/mdict-cpp/deps/miniz/miniz_tinfl.c; sourceTree = "<group>"; };
-		B1000000000000000000000F /* miniz_tdef.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tdef.c; path = ../ThirdParty/mdict-cpp/deps/miniz/miniz_tdef.c; sourceTree = "<group>"; };
-		B10000000000000000000010 /* miniz_zip.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_zip.c; path = ../ThirdParty/mdict-cpp/deps/miniz/miniz_zip.c; sourceTree = "<group>"; };
+		B10000000000000000000009 /* mdict.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = mdict.cc; path = ../ThirdParty/vendor/mdict-cpp/src/mdict.cc; sourceTree = "<group>"; };
+		B1000000000000000000000A /* binutils.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = binutils.cc; path = ../ThirdParty/vendor/mdict-cpp/src/binutils.cc; sourceTree = "<group>"; };
+		B1000000000000000000000B /* adler32.cc */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = adler32.cc; path = ../ThirdParty/vendor/mdict-cpp/src/adler32.cc; sourceTree = "<group>"; };
+		B1000000000000000000000C /* rmd128.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = rmd128.c; path = ../ThirdParty/vendor/libtomcrypt-ripemd128/src/rmd128.c; sourceTree = "<group>"; };
+		B1000000000000000000000D /* miniz.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz.c; path = ../ThirdParty/vendor/miniz/miniz.c; sourceTree = "<group>"; };
+		B1000000000000000000000E /* miniz_tinfl.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tinfl.c; path = ../ThirdParty/vendor/miniz/miniz_tinfl.c; sourceTree = "<group>"; };
+		B1000000000000000000000F /* miniz_tdef.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tdef.c; path = ../ThirdParty/vendor/miniz/miniz_tdef.c; sourceTree = "<group>"; };
+		B10000000000000000000050 /* RIPEMD128Adapter.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = RIPEMD128Adapter.c; path = ../MDictCore/RIPEMD128Adapter.c; sourceTree = "<group>"; };
+		B10000000000000000000051 /* RIPEMD128Adapter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = RIPEMD128Adapter.h; path = ../MDictCore/RIPEMD128Adapter.h; sourceTree = "<group>"; };
 		B10000000000000000000012 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
 		B10000000000000000000013 /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = SDKROOT; };
 		B10000000000000000000014 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.text-based-dylib-definition; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
@@ -260,6 +261,8 @@
 			children = (
 				B10000000000000000000008 /* SQLiteDictionaryCore.cpp */,
 				B10000000000000000000018 /* SQLiteDictionaryCore.h */,
+				B10000000000000000000050 /* RIPEMD128Adapter.c */,
+				B10000000000000000000051 /* RIPEMD128Adapter.h */,
 			);
 			name = MDictCore;
 			sourceTree = "<group>";
@@ -270,11 +273,10 @@
 				B10000000000000000000009 /* mdict.cc */,
 				B1000000000000000000000A /* binutils.cc */,
 				B1000000000000000000000B /* adler32.cc */,
-				B1000000000000000000000C /* ripemd128.c */,
+				B1000000000000000000000C /* rmd128.c */,
 				B1000000000000000000000D /* miniz.c */,
 				B1000000000000000000000E /* miniz_tinfl.c */,
 				B1000000000000000000000F /* miniz_tdef.c */,
-				B10000000000000000000010 /* miniz_zip.c */,
 			);
 			name = "Parser Sources";
 			sourceTree = "<group>";
@@ -448,11 +450,11 @@
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,
 				A1000000000000000000000B /* adler32.cc in Sources */,
-				A1000000000000000000000C /* ripemd128.c in Sources */,
+				A1000000000000000000000C /* rmd128.c in Sources */,
+				A10000000000000000000046 /* RIPEMD128Adapter.c in Sources */,
 				A1000000000000000000000D /* miniz.c in Sources */,
 				A1000000000000000000000E /* miniz_tinfl.c in Sources */,
 				A1000000000000000000000F /* miniz_tdef.c in Sources */,
-				A10000000000000000000010 /* miniz_zip.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -516,9 +518,10 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/../MDictCore",
-					"$(SRCROOT)/../ThirdParty/mdict-cpp/src",
-					"$(SRCROOT)/../ThirdParty/mdict-cpp/src/include",
-					"$(SRCROOT)/../ThirdParty/mdict-cpp/deps",
+					"$(SRCROOT)/../ThirdParty/vendor/mdict-cpp/src",
+					"$(SRCROOT)/../ThirdParty/vendor/mdict-cpp/src/include",
+					"$(SRCROOT)/../ThirdParty/vendor",
+					"$(SRCROOT)/../ThirdParty/vendor/libtomcrypt-ripemd128/include",
 					"$(SDKROOT)/usr/include/libxml2",
 				);
 				INFOPLIST_FILE = Info.plist;
@@ -546,9 +549,10 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/../MDictCore",
-					"$(SRCROOT)/../ThirdParty/mdict-cpp/src",
-					"$(SRCROOT)/../ThirdParty/mdict-cpp/src/include",
-					"$(SRCROOT)/../ThirdParty/mdict-cpp/deps",
+					"$(SRCROOT)/../ThirdParty/vendor/mdict-cpp/src",
+					"$(SRCROOT)/../ThirdParty/vendor/mdict-cpp/src/include",
+					"$(SRCROOT)/../ThirdParty/vendor",
+					"$(SRCROOT)/../ThirdParty/vendor/libtomcrypt-ripemd128/include",
 					"$(SDKROOT)/usr/include/libxml2",
 				);
 				INFOPLIST_FILE = Info.plist;

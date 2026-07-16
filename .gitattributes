@@ -1,0 +1,3 @@
+# Preserve audited upstream bytes exactly. Some official license/source files
+# and unified patch context carry upstream whitespace that must not be rewritten.
+ThirdParty/vendor/** -whitespace

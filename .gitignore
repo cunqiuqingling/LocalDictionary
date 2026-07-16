@@ -21,6 +21,6 @@ config/local.json
 Benchmarks/results/
 ThirdParty/mdict-cpp/build/
 
-# Phase-1 research checkout. Production will vendor only the reviewed,
-# permissively licensed parser subset.
+# Phase-1 research checkout. Reviewed production dependencies live in the
+# tracked ThirdParty/vendor subtree; the full research checkout stays local.
 ThirdParty/mdict-cpp/
