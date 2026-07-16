@@ -98,7 +98,6 @@
 		B1000000000000000000000E /* miniz_tinfl.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tinfl.c; path = ../ThirdParty/mdict-cpp/deps/miniz/miniz_tinfl.c; sourceTree = "<group>"; };
 		B1000000000000000000000F /* miniz_tdef.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tdef.c; path = ../ThirdParty/mdict-cpp/deps/miniz/miniz_tdef.c; sourceTree = "<group>"; };
 		B10000000000000000000010 /* miniz_zip.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_zip.c; path = ../ThirdParty/mdict-cpp/deps/miniz/miniz_zip.c; sourceTree = "<group>"; };
-		B10000000000000000000011 /* local.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = local.json; path = ../config/local.json; sourceTree = "<group>"; };
 		B10000000000000000000012 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
 		B10000000000000000000013 /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = SDKROOT; };
 		B10000000000000000000014 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.text-based-dylib-definition; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
@@ -251,7 +250,6 @@
 				B10000000000000000000021 /* ObsidianNotePicker.swift */,
 				B10000000000000000000016 /* LocalDictionary-Bridging-Header.h */,
 				B10000000000000000000017 /* Info.plist */,
-				B10000000000000000000011 /* local.json */,
 			);
 			name = Application;
 			path = .;
@@ -312,7 +310,7 @@
 				C10000000000000000000002 /* Sources */,
 				C10000000000000000000001 /* Frameworks */,
 				C10000000000000000000003 /* Resources */,
-				C10000000000000000000004 /* Copy optional local configuration */,
+				C10000000000000000000004 /* Audit Release App Bundle */,
 			);
 			buildRules = (
 			);
@@ -368,7 +366,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		C10000000000000000000004 /* Copy optional local configuration */ = {
+		C10000000000000000000004 /* Audit Release App Bundle */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -378,14 +376,14 @@
 			);
 			inputPaths = (
 			);
-			name = "Copy optional local configuration";
+			name = "Audit Release App Bundle";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "SOURCE_CONFIG=\"$SRCROOT/../config/local.json\"\nif [ -f \"$SOURCE_CONFIG\" ]; then\n  /bin/mkdir -p \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH\"\n  /usr/bin/ditto \"$SOURCE_CONFIG\" \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/local.json\"\nfi\n";
+			shellScript = "if [ \"$CONFIGURATION\" = \"Release\" ]; then\n  /bin/zsh \"$SRCROOT/../scripts/audit-app-bundle.sh\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

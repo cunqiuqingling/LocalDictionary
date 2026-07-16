@@ -11,6 +11,7 @@ INSTALL_APP="$INSTALL_DIRECTORY/LocalDictionary.app"
 TEMP_APP="$INSTALL_DIRECTORY/.LocalDictionary.app.new.$$"
 BACKUP_APP="$INSTALL_DIRECTORY/.LocalDictionary.app.backup.$$"
 EXPECTED_BUNDLE_IDENTIFIER="com.localdict.LocalDictionary"
+AUDIT_SCRIPT="$PROJECT_ROOT/scripts/audit-app-bundle.sh"
 
 if [[ -n "${DEVELOPER_DIR:-}" && -x "$DEVELOPER_DIR/usr/bin/xcodebuild" ]]; then
     :
@@ -43,12 +44,15 @@ trap cleanup EXIT
 
 [[ -d "$SOURCE_APP" ]] || { print -u2 "Release App 不存在：$SOURCE_APP"; exit 1; }
 [[ -x "$SOURCE_APP/Contents/MacOS/LocalDictionary" ]] || { print -u2 "Release App 缺少可执行文件。"; exit 1; }
+[[ -x "$AUDIT_SCRIPT" ]] || { print -u2 "缺少 App Bundle 审计脚本。"; exit 1; }
 
 SOURCE_BUNDLE_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE_APP/Contents/Info.plist")"
 [[ "$SOURCE_BUNDLE_IDENTIFIER" == "$EXPECTED_BUNDLE_IDENTIFIER" ]] || {
     print -u2 "Bundle identifier 不匹配：$SOURCE_BUNDLE_IDENTIFIER"
     exit 1
 }
+
+"$AUDIT_SCRIPT" "$SOURCE_APP"
 
 /bin/mkdir -p "$INSTALL_DIRECTORY"
 /usr/bin/ditto "$SOURCE_APP" "$TEMP_APP"
@@ -60,6 +64,7 @@ TEMP_BUNDLE_IDENTIFIER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier'
     print -u2 "临时 App 的 Bundle identifier 不匹配。"
     exit 1
 }
+"$AUDIT_SCRIPT" "$TEMP_APP"
 
 /usr/bin/pkill -x LocalDictionary 2>/dev/null || true
 

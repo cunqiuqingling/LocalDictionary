@@ -57,23 +57,37 @@ struct AppConfig: Decodable {
         return configurations.sorted { $0.priority < $1.priority }
     }
 
-    static func load() throws -> AppConfig {
-        guard let url = Bundle.main.url(forResource: "local", withExtension: "json") else {
+    static func load(fileManager: FileManager = .default) throws -> AppConfig {
+        let url = productionConfigurationURL(fileManager: fileManager)
+        guard fileManager.fileExists(atPath: url.path) else {
             throw ConfigError.missing
         }
         return try load(from: url)
     }
 
-    static func loadIfPresent(in bundle: Bundle = .main) -> AppConfig? {
-        guard let url = bundle.url(forResource: "local", withExtension: "json") else {
-            return nil
-        }
+    static func loadIfPresent(fileManager: FileManager = .default) -> AppConfig? {
+        loadIfPresent(at: productionConfigurationURL(fileManager: fileManager),
+                      fileManager: fileManager)
+    }
+
+    static func loadIfPresent(at url: URL,
+                              fileManager: FileManager = .default) -> AppConfig? {
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
         return try? load(from: url)
     }
 
-    static func loadIfPresent(at url: URL) -> AppConfig? {
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try? load(from: url)
+    static func productionConfigurationURL(
+        fileManager: FileManager = .default
+    ) -> URL {
+        let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return applicationSupport
+            .appendingPathComponent("LocalDictionary", isDirectory: true)
+            .appendingPathComponent("LegacyConfig", isDirectory: true)
+            .appendingPathComponent("local.json", isDirectory: false)
     }
 
     static func load(from url: URL) throws -> AppConfig {

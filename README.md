@@ -10,7 +10,13 @@ The dictionary panel remains visible when it loses focus. AI provider changes in
 
 ## Local configuration
 
-Copy `config/local.example.json` to `config/local.json` and set the five MDX paths plus one independent SQLite index path for each dictionary. The existing Oxford keys remain `primaryDictionary` and `indexPath`; the four supplemental dictionaries use their named path/index pairs. The real config is ignored by Git. Dictionary and Obsidian files remain in place and are never copied or modified.
+`config/local.json` is a developer-only, Git-ignored file for the five legacy dictionaries. Copy `config/local.example.json` to that location, set the MDX and independent SQLite index paths, then explicitly install the private configuration:
+
+```sh
+./scripts/install-private-local-config.sh
+```
+
+The script installs it under the current user's `Library/Application Support/LocalDictionary/LegacyConfig` directory. Debug and Release App Bundles never contain this file. A clean clone and ordinary users do not need it to build or start the app; without it, managed dictionaries, AI settings, the menu bar, and manual input remain available. Dictionary and Obsidian files remain in place and are never copied or modified by this compatibility configuration.
 
 ## Validation CLI
 
@@ -37,7 +43,7 @@ Run the update script after code changes:
 ./scripts/install-local-app.sh
 ```
 
-The Release directory is a temporary build product. `~/Applications/LocalDictionary.app` is the fixed copy intended for daily use and manual testing; rerunning the script replaces it with the latest successful Release build.
+The Release directory is a temporary build product. `~/Applications/LocalDictionary.app` is the fixed copy intended for daily use and manual testing; rerunning the script replaces it with the latest successful Release build. Release builds and this installation flow run `scripts/audit-app-bundle.sh` and stop if private configuration, dictionary/index data, runtime catalogs, user notes, or recognizable secret material is found in the App Bundle.
 
 ## 已知限制
 

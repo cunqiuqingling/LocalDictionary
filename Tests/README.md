@@ -6,7 +6,9 @@ Phase 2 was exercised against the selected real Oxford MDX with the documented 2
 
 `run-dictionary-catalog-smoke.sh` tests the versioned catalog model, atomic primary/backup persistence, corruption recovery, relative-path validation, optional legacy configuration loading, stable priority sorting, and idempotent five-dictionary legacy adaptation. It uses only temporary placeholder files and a minimal temporary SQLite metadata table; it never opens a real MDX or invokes the production index builder.
 
-Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's user Application Support `LocalDictionary/Catalog` directory. The app now starts with an empty catalog when bundled `local.json` is absent; when it is present, the existing five dictionaries remain on the unchanged legacy query dispatcher and are represented only by path-free `legacyReference` catalog records. Dictionary management is read-only in this stage: importing, downloading, editing query order, and deleting dictionaries are not yet supported.
+Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's user Application Support `LocalDictionary/Catalog` directory. The app starts with an empty catalog when the developer-only external `LegacyConfig/local.json` is absent; when it is present, the existing five dictionaries remain on the unchanged legacy query dispatcher and are represented only by path-free `legacyReference` catalog records. The private file is never copied into Debug or Release App Bundles.
+
+`run-local-configuration-isolation-smoke.sh` uses an isolated HOME to verify the single production lookup location, safe missing/corrupt behavior, explicit test-only URL injection, five path-free legacy descriptors, idempotent adaptation, and the absence of legacy index writes. `run-app-bundle-audit-smoke.sh` verifies that clean bundles pass while private configuration, MDX/MDD, SQLite/Catalog/PendingDeletion data, user paths, bearer headers, and synthetic secret fields fail without disclosing matched values or modifying the bundle. It also exercises the developer-only private-config installer in an isolated HOME.
 
 `run-dictionary-import-smoke.sh` exercises the macOS-only B1 managed import boundary with generated header-only MDX fixtures and small placeholder MDD files. It covers strict MDD basename pairing, preview metadata, cancellation, disk-space rejection, disappearing sources, SHA-256 duplicate detection, staging rollback, relative Catalog paths, and the absence of index artifacts. B1 only copies files and creates `pendingIndex` records; imported dictionaries are not connected to production queries.
 
@@ -22,7 +24,7 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 ## C1 manual acceptance checklist
 
-- Start once with the ignored machine-local `local.json`, then with an isolated HOME and no `local.json`; confirm five-dictionary and friendly empty states respectively.
+- Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.
 - Build an index, request cooperative cancellation, exercise a controlled failure and retry, and confirm pending/indexing/cancelling/ready/failed wording.
 - Query a preferred hit, a managedLocal-only hit, and an AI fallback; confirm the existing priority and formatter behavior is unchanged.
