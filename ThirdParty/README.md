@@ -6,7 +6,9 @@ build dependency. `SHA256SUMS` records every vendored file after the documented
 local patches have been applied.
 
 This document records third-party provenance. It does not change the license
-of any third-party component.
+of any third-party component. LocalDictionary's GPL-3.0-only license applies
+to original project code and does not replace the complete licenses preserved
+under `vendor`.
 
 ## mdict-cpp
 

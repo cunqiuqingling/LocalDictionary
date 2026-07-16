@@ -15,7 +15,7 @@ Status: phase 2 complete. This document records observed files and measured resu
 
 ## Dictionary inventory (direct inspection)
 
-The inventory and lookup results are filled from direct inspection of the machine-local dictionary directory configured in ignored `config/local.json`. Original files are opened read-only and are not copied, moved, modified, or repackaged.
+The inventory and lookup results record a historical, machine-local read-only inspection. Private dictionary paths and compatibility configuration are not part of the source distribution. Original files were not copied, moved, modified, or repackaged by the validation probe.
 
 Totals: 8 MDX, 3 MDD, 9 CSS, 5 JavaScript, 12 loose images, 0 loose audio files, 0 loose font files, and 1 Eudic file.
 
@@ -105,4 +105,4 @@ Phase-2 exclusions remain deliberate: `.eudic`, v1/LZO, encrypted blocks, mismat
 
 ## Reproduction
 
-Build with `MDictCore/ValidationCLI/build.sh`, then run `.build/mdict-validate <mdx-or-mdd> <key> ...`. The tool is an arm64 native executable and has no network or background component. Machine-local paths stay in ignored `config/local.json`.
+Build with `MDictCore/ValidationCLI/build.sh`, then run `.build/mdict-validate <mdx-or-mdd> <key> ...`. The tool is an arm64 native executable and has no network or background component. Paths are supplied explicitly for a local run and must not be committed; the production App's optional legacy configuration is read from the current user's Application Support `LocalDictionary/LegacyConfig` directory and is never bundled.

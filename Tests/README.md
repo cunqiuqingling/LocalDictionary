@@ -26,6 +26,10 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-third-party-vendor-smoke.sh` verifies the exact reviewed vendor file set, recorded SHA-256 values, license files, Git visibility, forbidden dependency exclusions, and the absence of build/test references to the ignored research checkout, old RIPEMD sample, miniz ZIP code, or turbobase64.
 
+`run-open-source-compliance-smoke.sh` performs an offline source-release check. It verifies the exact official GPLv3 root license text, GPL-3.0-only scope statements, third-party notices and fixed provenance, vendored licenses and hashes, privacy/security documentation, D1 policy placeholders, absence of private paths and obvious secret values in public documentation, and consistency between clean-build, AI-network, and private `local.json` statements. It does not access the network, user Application Support, Keychain, dictionaries, or build products.
+
+The repository is currently source-only and targets macOS 15.0+ on arm64. A clean clone builds from tracked `ThirdParty/vendor` files without a submodule, a separate mdict-cpp clone, Homebrew dependencies, or private `local.json`. The only runtime permission required for selection lookup is Accessibility; the App does not request screen recording, microphone, or system audio recording permission.
+
 ## C1 manual acceptance checklist
 
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
