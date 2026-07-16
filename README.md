@@ -10,6 +10,10 @@ Copyright (C) 2026 liuzhentie (刘震铁, aka "cunqiu")
 
 首次公开阶段只提供源码，暂不提供官方签名或公证的 `.app`。请使用 Xcode 自行构建。正式二进制发布将在签名、公证、Hardened Runtime 和发布流程完善后另行考虑；不建议从非官方第三方来源下载声称属于本项目的预编译 App。
 
+Debug 构建可能包含本机编译路径和开发调试信息，不应对外分发。需要自行分享构建产物时，应使用经过敏感内容审计的 Release 构建；但本项目当前仍不提供官方签名或公证的二进制 App。
+
+Debug builds may contain local build paths and development metadata and must not be redistributed.
+
 ## 主要功能
 
 - 菜单栏与轻量原生 AppKit 查询面板。
