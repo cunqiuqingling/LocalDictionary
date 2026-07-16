@@ -8,6 +8,13 @@ struct SupplementalDictionaryRuntime {
     let core: DictionaryCoreBridge
 }
 
+private struct PreferredDictionaryPresentation {
+    let dictionaryID: String
+    let attributedString: NSAttributedString
+    let structuredSource: StructuredDictionarySource
+    let headword: String
+}
+
 final class DictionaryPanel: NSPanel {
     var escapeHandler: (() -> Void)?
 
@@ -64,6 +71,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var aiTask: Task<Void, Never>?
     private var localGlossaryTask: Task<Void, Never>?
     private var managedQueryTask: Task<Void, Never>?
+    private var managedCatalogGeneration: UInt64 = 0
+    private var preferredCatalogDescriptors: [String: DictionaryDescriptor] = [:]
     private var currentAIPresentation: AIExplanationPresentation?
     private var currentSentencePresentation: AISentenceAnalysisPresentation?
     private var currentLocalGlossary: LocalSentenceGlossary?
@@ -119,6 +128,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
          notePicker: ObsidianNotePicker,
          aiService: AIExplanationService,
          managedDictionaryQueryService: ManagedDictionaryQueryService,
+         dictionaryCatalog: DictionaryCatalog = .empty(),
          openAISettings: @escaping () -> Void) {
         oxfordCore = core
         self.supplementalDictionaries = supplementalDictionaries.sorted {
@@ -129,6 +139,11 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         self.aiService = aiService
         self.managedDictionaryQueryService = managedDictionaryQueryService
         self.openAISettings = openAISettings
+        preferredCatalogDescriptors = Dictionary(uniqueKeysWithValues:
+            dictionaryCatalog.dictionaries.filter {
+                $0.sourceKind == .legacyReference
+            }.map { ($0.dictionaryID, $0) }
+        )
         let standardScrollView = NSTextView.scrollableTextView()
         guard let standardTextView = standardScrollView.documentView as? NSTextView else {
             fatalError("AppKit did not create an NSTextView document view")
@@ -176,6 +191,27 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     var isVisible: Bool { window?.isVisible == true }
+
+    func updateDictionaryCatalog(_ catalog: DictionaryCatalog) {
+        managedCatalogGeneration &+= 1
+        managedQueryTask?.cancel()
+        managedQueryTask = nil
+        preferredCatalogDescriptors = Dictionary(uniqueKeysWithValues:
+            catalog.dictionaries.filter {
+                $0.sourceKind == .legacyReference
+            }.map { ($0.dictionaryID, $0) }
+        )
+    }
+
+    func managedDictionaryWillBeRemoved(dictionaryID: String) {
+        managedCatalogGeneration &+= 1
+        managedQueryTask?.cancel()
+        managedQueryTask = nil
+        localGlossaryTask?.cancel()
+        localGlossaryTask = nil
+        inlineTasks.values.forEach { $0.cancel() }
+        inlineTasks.removeAll()
+    }
 
     func toggle() {
         isVisible ? hide() : show()
@@ -495,33 +531,39 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private func lookup(_ query: String, intent: QueryIntent) -> Bool {
         resetAIState(query: query, intent: intent)
         setCurrentEntry(nil)
-        var attributedSections: [NSAttributedString] = []
-        var structuredSources: [StructuredDictionarySource] = []
-        var headword = ""
+        var preferredResults: [PreferredDictionaryPresentation] = []
         var failures: [(id: String, name: String)] = []
 
-        let oxfordResult = synchronizedLookup(core: oxfordCore, query: query)
-        if let error = oxfordResult["error"] as? String, !error.isEmpty {
-            failures.append((DictionarySourceID.oxfordOALD8.rawValue, "牛津高阶 8"))
-        } else if oxfordResult["found"] as? Bool == true,
-                  let html = oxfordResult["html"] as? String {
-            let formatted = entryFormatter.formatHTML(html)
-            if formatted.attributedString.length > 0 {
-                attributedSections.append(formatted.attributedString)
+        let oxfordID = DictionarySourceID.oxfordOALD8.rawValue
+        if isPreferredDictionaryEnabled(oxfordID) {
+            let oxfordResult = synchronizedLookup(core: oxfordCore, query: query)
+            if let error = oxfordResult["error"] as? String, !error.isEmpty {
+                failures.append((oxfordID, "牛津高阶 8"))
+            } else if oxfordResult["found"] as? Bool == true,
+                      let html = oxfordResult["html"] as? String {
+                let formatted = entryFormatter.formatHTML(html)
                 let parsed = formatted.structuredEntry
-                if headword.isEmpty { headword = parsed.headword }
-                structuredSources.append(StructuredDictionarySource(
+                let source = StructuredDictionarySource(
                     phonetics: parsed.phonetics,
                     partsOfSpeech: parsed.partsOfSpeech,
                     definitions: parsed.definitions,
                     examples: parsed.examples,
                     source: "牛津高阶 8",
                     semanticEntry: structuredSemanticEntry(from: parsed.semanticEntry)
-                ))
+                )
+                if formatted.attributedString.length > 0 {
+                    preferredResults.append(PreferredDictionaryPresentation(
+                        dictionaryID: oxfordID,
+                        attributedString: formatted.attributedString,
+                        structuredSource: source,
+                        headword: parsed.headword
+                    ))
+                }
             }
         }
 
-        for dictionary in supplementalDictionaries {
+        for dictionary in supplementalDictionaries
+        where isPreferredDictionaryEnabled(dictionary.id.rawValue) {
             let lookupResult = synchronizedLookup(core: dictionary.core, query: query)
             if let error = lookupResult["error"] as? String, !error.isEmpty {
                 failures.append((dictionary.id.rawValue, dictionary.displayName))
@@ -534,12 +576,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                                                    matchedHeadword: matchedHeadword,
                                                    sourceID: dictionary.id)
             guard formatted.attributedString.length > 0 else { continue }
-            attributedSections.append(formatted.attributedString)
             let parsed = formatted.structuredEntry
-            if headword.isEmpty {
-                headword = parsed.headword.isEmpty ? matchedHeadword : parsed.headword
-            }
-            structuredSources.append(StructuredDictionarySource(
+            let source = StructuredDictionarySource(
                 phonetics: parsed.phonetics,
                 partsOfSpeech: parsed.partsOfSpeech,
                 definitions: parsed.definitions,
@@ -551,8 +589,32 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                 semanticEntry: dictionary.id == .newOxford
                     ? structuredSemanticEntry(from: parsed.semanticEntry)
                     : nil
+            )
+            preferredResults.append(PreferredDictionaryPresentation(
+                dictionaryID: dictionary.id.rawValue,
+                attributedString: formatted.attributedString,
+                structuredSource: source,
+                headword: parsed.headword.isEmpty ? matchedHeadword : parsed.headword
             ))
         }
+
+        preferredResults.sort {
+            let left = preferredSortKey($0.dictionaryID)
+            let right = preferredSortKey($1.dictionaryID)
+            return left.position == right.position
+                ? left.dictionaryID < right.dictionaryID
+                : left.position < right.position
+        }
+        failures.sort {
+            let left = preferredSortKey($0.id)
+            let right = preferredSortKey($1.id)
+            return left.position == right.position
+                ? left.dictionaryID < right.dictionaryID
+                : left.position < right.position
+        }
+        let attributedSections = preferredResults.map(\.attributedString)
+        let structuredSources = preferredResults.map(\.structuredSource)
+        let headword = preferredResults.lazy.map(\.headword).first { !$0.isEmpty } ?? ""
 
         let newlyUnavailable = failures.filter {
             !reportedUnavailableDictionaryIDs.contains($0.id)
@@ -590,6 +652,21 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         return true
     }
 
+    private func isPreferredDictionaryEnabled(_ dictionaryID: String) -> Bool {
+        guard let descriptor = preferredCatalogDescriptors[dictionaryID] else { return true }
+        return descriptor.enabled && descriptor.queryLevel == .preferred
+    }
+
+    private func preferredSortKey(_ dictionaryID: String)
+        -> (position: Int64, dictionaryID: String) {
+        if let descriptor = preferredCatalogDescriptors[dictionaryID] {
+            return (descriptor.sortPosition, dictionaryID)
+        }
+        let defaultIndex = DictionaryCatalogOrdering.legacyDefaultOrder
+            .firstIndex(of: dictionaryID)
+        return (Int64((defaultIndex ?? Int.max - 1) + 1), dictionaryID)
+    }
+
     private func startManagedDictionaryLookup(
         query: String,
         intent: QueryIntent,
@@ -597,6 +674,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         unavailablePreferredNames: [String]
     ) {
         displayText("正在查询已托管词典…")
+        let catalogGeneration = managedCatalogGeneration
         managedQueryTask = Task { [weak self, managedDictionaryQueryService] in
             let batch = await managedDictionaryQueryService.lookup(query)
             guard !Task.isCancelled else { return }
@@ -604,6 +682,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                 guard let self,
                       self.currentQuery == query,
                       self.currentIntent == intent,
+                      self.managedCatalogGeneration == catalogGeneration,
                       self.queryGeneration.accepts(generation) else { return }
                 self.managedQueryTask = nil
                 if batch.hits.isEmpty {
@@ -1156,6 +1235,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     private func lookupOxfordInline(_ term: String) -> InlineLocalDictionaryHit? {
+        guard isPreferredDictionaryEnabled(DictionarySourceID.oxfordOALD8.rawValue) else {
+            return nil
+        }
         let result = synchronizedLookup(core: oxfordCore, query: term)
         guard result["found"] as? Bool == true,
               let html = result["html"] as? String else { return nil }
@@ -1188,6 +1270,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     private func lookupSupplementalInline(_ term: String, sourceID: DictionarySourceID,
                                           sourceName: String) -> InlineLocalDictionaryHit? {
+        guard isPreferredDictionaryEnabled(sourceID.rawValue) else { return nil }
         guard let dictionary = supplementalDictionaries.first(where: { $0.id == sourceID }) else {
             return nil
         }
@@ -1277,6 +1360,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     private func lookupOxfordGlossary(_ term: String) -> LocalGlossaryLookupResult? {
+        guard isPreferredDictionaryEnabled(DictionarySourceID.oxfordOALD8.rawValue) else {
+            return nil
+        }
         let result = synchronizedLookup(core: oxfordCore, query: term)
         guard result["found"] as? Bool == true,
               let html = result["html"] as? String else { return nil }
@@ -1292,6 +1378,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private func lookupSupplementalGlossary(_ term: String,
                                             sourceID: DictionarySourceID,
                                             sourceName: String) -> LocalGlossaryLookupResult? {
+        guard isPreferredDictionaryEnabled(sourceID.rawValue) else { return nil }
         guard let dictionary = supplementalDictionaries.first(where: { $0.id == sourceID }) else {
             return nil
         }

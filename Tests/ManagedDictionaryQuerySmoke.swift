@@ -11,6 +11,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 private actor MockManagedRuntime: ManagedDictionaryQueryRuntime {
     var outcomes: [String: ManagedDictionaryRuntimeOutcome]
     private var queriedIDs: [String] = []
+    private var removedIDs: [String] = []
     private var resetCount = 0
 
     init(outcomes: [String: ManagedDictionaryRuntimeOutcome]) {
@@ -24,6 +25,10 @@ private actor MockManagedRuntime: ManagedDictionaryQueryRuntime {
     }
 
     func reset() { resetCount += 1 }
+
+    func remove(dictionaryID: String) {
+        removedIDs.append(dictionaryID)
+    }
 
     func snapshot() -> ([String], Int) { (queriedIDs, resetCount) }
 }

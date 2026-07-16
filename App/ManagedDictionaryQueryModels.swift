@@ -87,6 +87,7 @@ enum ManagedDictionaryRuntimeOutcome: Sendable {
 protocol ManagedDictionaryQueryRuntime: Sendable {
     func lookup(descriptor: DictionaryDescriptor,
                 query: String) async -> ManagedDictionaryRuntimeOutcome
+    func remove(dictionaryID: String) async
     func reset() async
 }
 
@@ -95,6 +96,7 @@ actor ManagedDictionaryQueryService {
     static let genericFormatterIdentifier = DictionaryFormatterIdentifier.genericMDictV1
 
     private var catalog: DictionaryCatalog
+    private var suspendedDictionaryIDs: Set<String> = []
     private let runtime: any ManagedDictionaryQueryRuntime
 
     init(catalog: DictionaryCatalog = .empty(),
@@ -105,7 +107,25 @@ actor ManagedDictionaryQueryService {
 
     func replaceCatalog(_ catalog: DictionaryCatalog) async {
         self.catalog = catalog
+        let remainingIDs = Set(catalog.dictionaries.map(\.dictionaryID))
+        suspendedDictionaryIDs.formIntersection(remainingIDs)
         await runtime.reset()
+    }
+
+    func suspend(dictionaryID: String) async {
+        suspendedDictionaryIDs.insert(dictionaryID)
+        await runtime.remove(dictionaryID: dictionaryID)
+    }
+
+    func resume(dictionaryID: String) {
+        suspendedDictionaryIDs.remove(dictionaryID)
+    }
+
+    /// Commits a removal after the target runtime has already been suspended
+    /// and released. Other managed dictionary runtimes remain warm.
+    func commitRemoval(dictionaryID: String, updatedCatalog: DictionaryCatalog) {
+        catalog = updatedCatalog
+        suspendedDictionaryIDs.remove(dictionaryID)
     }
 
     func lookup(_ query: String,
@@ -120,6 +140,7 @@ actor ManagedDictionaryQueryService {
         let eligible = catalog.sortedDictionaries.filter {
             $0.sourceKind == .managedLocal && $0.queryLevel == .normal &&
                 $0.enabled && $0.state == .ready &&
+                !suspendedDictionaryIDs.contains($0.dictionaryID) &&
                 DictionaryFormatterIdentifier.supportsGenericMDictV1(
                     $0.formatterIdentifier
                 )
@@ -128,7 +149,9 @@ actor ManagedDictionaryQueryService {
         var unavailable: [String] = []
         for descriptor in eligible {
             guard !Task.isCancelled else { break }
-            switch await runtime.lookup(descriptor: descriptor, query: clean) {
+            let outcome = await runtime.lookup(descriptor: descriptor, query: clean)
+            guard isStillEligible(dictionaryID: descriptor.dictionaryID) else { continue }
+            switch outcome {
             case .hit(let hit): hits.append(hit)
             case .miss: break
             case .unavailable: unavailable.append(descriptor.dictionaryID)
@@ -139,6 +162,19 @@ actor ManagedDictionaryQueryService {
             unavailableDictionaryIDs: unavailable,
             skippedBecausePreferredMatched: false
         )
+    }
+
+    private func isStillEligible(dictionaryID: String) -> Bool {
+        guard !suspendedDictionaryIDs.contains(dictionaryID),
+              let descriptor = catalog.dictionaries.first(where: {
+                  $0.dictionaryID == dictionaryID
+              }) else { return false }
+        return descriptor.sourceKind == .managedLocal &&
+            descriptor.queryLevel == .normal && descriptor.enabled &&
+            descriptor.state == .ready &&
+            DictionaryFormatterIdentifier.supportsGenericMDictV1(
+                descriptor.formatterIdentifier
+            )
     }
 }
 

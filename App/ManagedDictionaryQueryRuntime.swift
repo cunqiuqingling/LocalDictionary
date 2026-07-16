@@ -37,6 +37,10 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
 
     func reset() { runtimes.removeAll() }
 
+    func remove(dictionaryID: String) {
+        runtimes[dictionaryID] = nil
+    }
+
     func lookup(descriptor: DictionaryDescriptor,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         guard !Task.isCancelled else { return .miss }

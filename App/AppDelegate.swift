@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictionaryCatalog = DictionaryCatalog.empty()
     private let dictionaryCatalogStore = DictionaryCatalogStore()
     private var managedDictionaryQueryService: ManagedDictionaryQueryService?
+    private var dictionaryRemovalCoordinator: ManagedDictionaryRemovalCoordinator?
     private lazy var dictionaryIndexCoordinator = ManagedDictionaryIndexCoordinator(
         catalogStore: dictionaryCatalogStore,
         buildIndex: liveDictionaryIndexBuilder,
@@ -265,6 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                         notePicker: notePicker,
                                                         aiService: aiService,
                                                         managedDictionaryQueryService: managedService,
+                                                        dictionaryCatalog: catalog,
                                                         openAISettings: { [weak self] in
                                                             self?.showAISettings()
                                                         })
@@ -275,32 +277,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                         notePicker: notePicker,
                                                         aiService: aiService,
                                                         managedDictionaryQueryService: managedService,
+                                                        dictionaryCatalog: catalog,
                                                         openAISettings: { [weak self] in
                                                             self?.showAISettings()
                                                         })
         }
+        let removalCoordinator = ManagedDictionaryRemovalCoordinator(
+            catalog: catalog,
+            catalogStore: dictionaryCatalogStore,
+            queryService: managedService,
+            isIndexing: { [dictionaryIndexCoordinator] dictionaryID in
+                dictionaryIndexCoordinator.activity?.dictionaryID == dictionaryID
+            }
+        )
+        removalCoordinator.beforeRemoval = { [weak self] dictionaryID in
+            self?.panelController?.managedDictionaryWillBeRemoved(dictionaryID: dictionaryID)
+        }
+        removalCoordinator.onCatalogChanged = { [weak self] updated in
+            self?.applyCatalogChange(updated, replaceManagedCatalog: false)
+        }
+        dictionaryRemovalCoordinator = removalCoordinator
+        Task { [removalCoordinator] in
+            let report = await removalCoordinator.recoverPendingDeletions()
+            #if DEBUG
+            if !report.deferredDictionaryIDs.isEmpty {
+                NSLog("LocalDictionary pending deletion cleanup deferred=%ld",
+                      report.deferredDictionaryIDs.count)
+            }
+            #endif
+        }
+
         dictionaryIndexCoordinator.onCatalogChanged = { [weak self] updated in
-            guard let self else { return }
-            self.dictionaryCatalog = updated
-            self.dictionaryManagerController?.update(catalog: updated)
-            Task { await managedService.replaceCatalog(updated) }
+            self?.applyCatalogChange(updated)
         }
         dictionaryManagerController?.update(catalog: catalog)
     }
 
+    private func applyCatalogChange(_ catalog: DictionaryCatalog,
+                                    replaceManagedCatalog: Bool = true) {
+        dictionaryCatalog = catalog
+        dictionaryIndexCoordinator.synchronize(catalog: catalog)
+        dictionaryRemovalCoordinator?.synchronize(catalog: catalog)
+        dictionaryManagerController?.update(catalog: catalog)
+        panelController?.updateDictionaryCatalog(catalog)
+        if replaceManagedCatalog, let service = managedDictionaryQueryService {
+            Task { await service.replaceCatalog(catalog) }
+        }
+    }
+
     @objc private func showDictionary() { panelController?.show() }
     @objc private func showDictionaryManager() {
+        guard let dictionaryRemovalCoordinator else { return }
         if dictionaryManagerController == nil {
             dictionaryManagerController = DictionaryManagerWindowController(
                 catalog: dictionaryCatalog,
                 catalogStore: dictionaryCatalogStore,
                 indexCoordinator: dictionaryIndexCoordinator,
+                removalCoordinator: dictionaryRemovalCoordinator,
                 onCatalogChanged: { [weak self] catalog in
-                    self?.dictionaryCatalog = catalog
-                    self?.dictionaryIndexCoordinator.synchronize(catalog: catalog)
-                    if let service = self?.managedDictionaryQueryService {
-                        Task { await service.replaceCatalog(catalog) }
-                    }
+                    self?.applyCatalogChange(catalog)
                 }
             )
         }
