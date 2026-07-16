@@ -26,6 +26,15 @@ final class DictionaryPanel: NSPanel {
     }
 }
 
+private final class DictionaryAppearanceView: NSVisualEffectView {
+    var appearanceDidChange: (() -> Void)?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        appearanceDidChange?()
+    }
+}
+
 final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate,
                                        NSTextViewDelegate {
     private let oxfordCore: DictionaryCoreBridge
@@ -69,6 +78,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var localResultHasChinese = false
     private var aiAction: AIAction = .none
     private var aiTask: Task<Void, Never>?
+    private var aiRequestLifecycle = AIRequestLifecycle()
     private var localGlossaryTask: Task<Void, Never>?
     private var managedQueryTask: Task<Void, Never>?
     private var managedCatalogGeneration: UInt64 = 0
@@ -238,6 +248,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     func aiConfigurationDidChange() {
         aiTask?.cancel()
         aiTask = nil
+        aiRequestLifecycle.invalidate()
         _ = queryGeneration.beginQuery()
         currentAIPresentation = nil
         currentSentencePresentation = nil
@@ -287,6 +298,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         guard let panel = window as? DictionaryPanel, panel.isVisible, !animating else { return }
         aiTask?.cancel()
         aiTask = nil
+        aiRequestLifecycle.invalidate()
         localGlossaryTask?.cancel()
         localGlossaryTask = nil
         managedQueryTask?.cancel()
@@ -325,7 +337,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         panel.delegate = self
         panel.escapeHandler = { [weak self] in self?.hide() }
 
-        let material = NSVisualEffectView()
+        let material = DictionaryAppearanceView()
         material.material = .popover
         material.blendingMode = .behindWindow
         material.state = .active
@@ -333,6 +345,13 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         material.layer?.cornerRadius = 14
         material.layer?.masksToBounds = true
         panel.contentView = material
+        material.appearanceDidChange = { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.renderInlinePage()
+                self.textView.needsDisplay = true
+            }
+        }
 
         searchField.placeholderString = "输入英文单词"
         searchField.sendsWholeSearchString = true
@@ -673,7 +692,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         generation: UInt64,
         unavailablePreferredNames: [String]
     ) {
-        displayText("正在查询已托管词典…")
+        displayText("正在查询本地导入词典…")
         let catalogGeneration = managedCatalogGeneration
         managedQueryTask = Task { [weak self, managedDictionaryQueryService] in
             let batch = await managedDictionaryQueryService.lookup(query)
@@ -692,7 +711,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                             unavailablePreferredNames.joined(separator: "、")
                     }
                     if !batch.unavailableDictionaryIDs.isEmpty {
-                        message += "\n部分托管词典暂不可用"
+                        message += "\n部分本地导入词典暂不可用"
                     }
                     self.displayText(message)
                     self.localResultContent = self.textView.attributedString()
@@ -735,6 +754,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private func resetAIState(query: String, intent: QueryIntent) {
         aiTask?.cancel()
         aiTask = nil
+        aiRequestLifecycle.invalidate()
         localGlossaryTask?.cancel()
         localGlossaryTask = nil
         managedQueryTask?.cancel()
@@ -851,7 +871,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     guard self.currentQuery == query, self.currentIntent == intent,
                           self.queryGeneration.accepts(generation) else { return }
                     self.aiClearCacheButton.isEnabled = true
-                    self.aiStatusLabel.stringValue = "无法清除本条缓存：\(error.localizedDescription)"
+                    self.aiStatusLabel.stringValue = "无法清除本条缓存，请稍后重试。"
                     self.updateAIFooter(visible: true)
                 }
             }
@@ -879,13 +899,6 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
     }
 
-    private func aiFailureMessage(_ error: Error) -> String {
-        if let failure = error as? AIProviderRequestFailure {
-            return failure.localizedDescription
-        }
-        return error.localizedDescription
-    }
-
     private func requestAIExplanation(domain: String, bypassCache: Bool = false) {
         guard !currentQuery.isEmpty else { return }
         let query = currentQuery
@@ -896,17 +909,19 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiStatusLabel.stringValue = "正在请求所配置的第三方 AI 服务"
         updateAIFooter(visible: true)
         aiTask?.cancel()
+        let requestToken = aiRequestLifecycle.begin()
         aiTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let presentation = try await aiService.explain(query: query, domain: domain,
                                                                 bypassCache: bypassCache)
-                guard !Task.isCancelled else { return }
                 let formatted = aiEntryFormatter.format(presentation)
                 await MainActor.run {
                     guard self.currentQuery == query,
                           self.currentIntent != .sentence,
-                          self.queryGeneration.accepts(generation) else { return }
+                          self.queryGeneration.accepts(generation),
+                          self.aiRequestLifecycle.finish(requestToken) else { return }
+                    self.aiTask = nil
                     let output = NSMutableAttributedString()
                     if let local = self.localResultContent,
                        self.currentEntry?.isValid == true {
@@ -931,13 +946,14 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     self.updateAIFooter(visible: true, compact: true)
                 }
             } catch {
-                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     guard self.currentQuery == query,
                           self.currentIntent != .sentence,
-                          self.queryGeneration.accepts(generation) else { return }
+                          self.queryGeneration.accepts(generation),
+                          self.aiRequestLifecycle.finish(requestToken) else { return }
+                    self.aiTask = nil
                     self.aiAction = .explain(domain: domain, bypassCache: true)
-                    self.aiStatusLabel.stringValue = self.aiFailureMessage(error)
+                    self.aiStatusLabel.stringValue = AIRequestUserMessage.message(for: error)
                     self.aiActionButton.title = "重新查询"
                     self.aiActionButton.isHidden = false
                     self.aiActionButton.isEnabled = true
@@ -1045,6 +1061,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         let generation = expectedGeneration ?? queryGeneration.generation
         guard queryGeneration.accepts(generation) else { return }
         aiTask?.cancel()
+        let requestToken = aiRequestLifecycle.begin()
         aiAction = .cancelSentence
         currentSentenceStatus = "正在分析句子…"
         aiStatusLabel.stringValue = "正在分析句子…"
@@ -1060,12 +1077,13 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                 let presentation = try await aiService.analyzeSentence(
                     sentence, bypassCache: bypassCache
                 )
-                guard !Task.isCancelled else { return }
                 let formatted = aiSentenceFormatter.format(presentation)
                 await MainActor.run {
                     guard self.currentIntent == .sentence,
                           self.currentQuery == sentence,
-                          self.queryGeneration.accepts(generation) else { return }
+                          self.queryGeneration.accepts(generation),
+                          self.aiRequestLifecycle.finish(requestToken) else { return }
+                    self.aiTask = nil
                     self.currentSentencePresentation = presentation
                     self.currentLocalGlossary = nil
                     self.currentSentenceStatus = nil
@@ -1085,16 +1103,18 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     self.updateAIFooter(visible: true, compact: true)
                 }
             } catch {
-                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     guard self.currentIntent == .sentence,
                           self.currentQuery == sentence,
-                          self.queryGeneration.accepts(generation) else { return }
+                          self.queryGeneration.accepts(generation),
+                          self.aiRequestLifecycle.finish(requestToken) else { return }
+                    self.aiTask = nil
                     self.currentSentencePresentation = nil
-                    self.currentSentenceStatus = error.localizedDescription
+                    let message = AIRequestUserMessage.message(for: error)
+                    self.currentSentenceStatus = message
                     self.renderSentenceContent()
                     self.aiAction = .analyzeSentence(bypassCache: true)
-                    self.aiStatusLabel.stringValue = self.aiFailureMessage(error)
+                    self.aiStatusLabel.stringValue = message
                     self.aiActionButton.title = "重新查询"
                     self.aiActionButton.isHidden = false
                     self.aiActionButton.isEnabled = true
@@ -1112,6 +1132,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         guard currentIntent == .sentence else { return }
         aiTask?.cancel()
         aiTask = nil
+        aiRequestLifecycle.invalidate()
         _ = queryGeneration.beginQuery()
         currentSentencePresentation = nil
         currentSentenceStatus = "句子分析已取消"
@@ -1599,7 +1620,11 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         let output = inlinePageRenderer.render(baseBlocks: inlineBaseBlocks,
                                                supplements: inlineSupplements,
                                                layout: layoutMetrics)
-        textView.textStorage?.setAttributedString(output)
+        let appearance = window?.contentView?.effectiveAppearance ?? NSApp.effectiveAppearance
+        let adapted = DictionaryAppearanceTextAdapter.attributedString(
+            byAdapting: output, for: appearance
+        )
+        textView.textStorage?.setAttributedString(adapted)
         textView.needsLayout = true
         textView.needsDisplay = true
         textView.layoutManager?.ensureLayout(for: textView.textContainer!)

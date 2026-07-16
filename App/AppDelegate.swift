@@ -47,6 +47,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configureDictionary()
         hotKey = GlobalHotKey { [weak self] in self?.handleGlobalHotKey() }
+        if hotKey?.isRegistered != true {
+            DispatchQueue.main.async { [weak self] in
+                self?.showHotKeyRegistrationFailure()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -220,6 +225,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
         item.menu = menu
         statusItem = item
+    }
+
+    private func showHotKeyRegistrationFailure() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "无法启用 Option + Space"
+        alert.informativeText = "全局快捷键可能已被其他应用占用。词典、设置和本地文件均不受影响；仍可通过菜单栏的“显示词典”打开面板。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
     }
 
     private func configureDictionary() {

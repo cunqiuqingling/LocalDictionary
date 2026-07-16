@@ -17,3 +17,19 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 `run-generic-mdict-formatter-security-smoke.sh` validates the B3 libxml2 safety boundary with synthetic HTML. It verifies basic headings, paragraphs, lists, emphasis and code while discarding scripts, embedded content, hidden nodes and URL-bearing attributes, and enforcing raw-byte and DOM-depth limits.
 
 `run-dictionary-ordering-removal-smoke.sh` exercises the B4 same-level ordering and managed removal boundaries. It covers persistent preferred/normal/fallback ordering, cross-level rejection, save rollback, stable default restoration, legacy adapter order preservation, managed-only two-phase removal, Catalog rollback, interrupted-removal recovery, deferred cleanup, runtime release, and absolute/traversal/other-UUID/symlink path rejection. It uses generated placeholder files in a temporary directory and never opens a commercial dictionary, accesses the network, or modifies an Obsidian note.
+
+`run-dictionary-manager-ui-state-smoke.sh` covers the C1 dictionary-manager presentation model and a lightweight in-process AppKit layout pass. It verifies user-facing source/query/status wording, cooperative cancellation and removal states, index-action titles and disabled reasons, table-width assumptions, empty/populated manager layouts, import-preview layout, and the absence of internal path/SQLite/Catalog details in manager error messages. It does not launch the product, access a dictionary, or use the network.
+
+## C1 manual acceptance checklist
+
+- Start once with the ignored machine-local `local.json`, then with an isolated HOME and no `local.json`; confirm five-dictionary and friendly empty states respectively.
+- Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.
+- Build an index, request cooperative cancellation, exercise a controlled failure and retry, and confirm pending/indexing/cancelling/ready/failed wording.
+- Query a preferred hit, a managedLocal-only hit, and an AI fallback; confirm the existing priority and formatter behavior is unchanged.
+- Reorder within preferred and normal groups, restart, then restore defaults; confirm enabled state and index metadata are unchanged.
+- Remove a managedLocal dictionary and confirm its original import source, saved snapshots, and existing Obsidian Markdown remain intact.
+- Check global Option-Space, Accessibility permission guidance, in-app selection, “了解更多”, manual input, and standard editing shortcuts.
+- Resize the dictionary manager at common window sizes in light and dark appearances; confirm columns, buttons, dates, tooltips, focus order, and indeterminate progress remain readable.
+- Switch the query panel between light and dark appearances while an Oxford and managedLocal result is visible; confirm pronunciation, definitions, examples, translations, and source emphasis remain readable without re-querying.
+- With a non-secret test Provider, compare “测试连接” with one formal word request; confirm success, timeout, cancellation, HTTP failure, and malformed JSON all leave the loading state and expose only actionable, sanitized errors.
+- With networking unavailable, confirm all local dictionaries and sentence glossary continue working and no repeated permission or credential prompt appears.

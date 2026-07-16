@@ -2,3 +2,4 @@
 #import "OxfordEntryFormatter.h"
 #import "SupplementalEntryFormatters.h"
 #import "GenericMDictEntryFormatter.h"
+#import "DictionaryAppearanceTextAdapter.h"

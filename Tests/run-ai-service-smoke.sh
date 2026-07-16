@@ -28,6 +28,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/AIProviderClient.swift" \
   "$ROOT/App/AIExplanationCache.swift" \
   "$ROOT/App/AIExplanationService.swift" \
+  "$ROOT/App/AIRequestLifecycle.swift" \
   "$ROOT/App/AIEntryFormatter.swift" \
   "$ROOT/App/AISentenceEntryFormatter.swift" \
   "$ROOT/App/LocalSentenceGlossaryService.swift" \

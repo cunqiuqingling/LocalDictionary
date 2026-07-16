@@ -251,7 +251,12 @@ NSFont *italicFont(CGFloat size) {
 }
 
 NSColor *mutedLabelColor(CGFloat alpha) {
-  return [NSColor.labelColor colorWithAlphaComponent:alpha];
+  // Adding alpha to a dynamic system color resolves it immediately in the
+  // current appearance. The resulting fixed black stayed black after a switch
+  // to Dark Aqua. Keep the existing visual hierarchy with semantic dynamic
+  // colors instead.
+  return alpha < 0.65 ? NSColor.tertiaryLabelColor
+                      : NSColor.secondaryLabelColor;
 }
 
 NSMutableParagraphStyle *paragraph(CGFloat spacingBefore, CGFloat spacingAfter,

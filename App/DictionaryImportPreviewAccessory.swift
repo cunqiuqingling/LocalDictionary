@@ -70,18 +70,40 @@ final class DictionaryImportPreviewAccessory: NSObject {
 
         let title = NSTextField(labelWithString: preview.displayName)
         title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.lineBreakMode = .byTruncatingTail
+        title.toolTip = preview.displayName
+        title.setAccessibilityLabel("词典名称：\(preview.displayName)")
         content.addArrangedSubview(title)
         content.addArrangedSubview(field("原始文件名", preview.originalFileName))
         content.addArrangedSubview(field("MDX 文件大小", byteString(preview.mdxFileSize)))
-        content.addArrangedSubview(field("MDict 版本", preview.header.engineVersion))
-        content.addArrangedSubview(field("编码", preview.header.encoding))
-        content.addArrangedSubview(field("压缩", preview.header.compression.displayName))
-        content.addArrangedSubview(field("加密", preview.header.isEncrypted ? "是" : "否"))
-        content.addArrangedSubview(field("文件摘要", String(preview.mdxSHA256.prefix(16)) + "…"))
-        content.addArrangedSubview(field("查询级别", preview.queryLevel.displayName))
+        content.addArrangedSubview(field(
+            "MDict 版本",
+            preview.header.engineVersion,
+            help: "词典文件声明的 MDict 格式版本。"
+        ))
+        content.addArrangedSubview(field(
+            "编码",
+            preview.header.encoding,
+            help: "词典正文使用的文字编码。"
+        ))
+        content.addArrangedSubview(field(
+            "压缩",
+            preview.header.compression.displayName,
+            help: "是否检测到 MDict 压缩记录。"
+        ))
+        content.addArrangedSubview(field(
+            "加密",
+            preview.header.isEncrypted ? "是" : "否",
+            help: "加密词典可能无法建立索引；导入不会修改原始文件。"
+        ))
+        content.addArrangedSubview(field(
+            "查询级别",
+            DictionaryManagerPresentation.queryLevelText(preview.queryLevel)
+        ))
         content.addArrangedSubview(field("默认启用", preview.enabled ? "是" : "否"))
-        content.addArrangedSubview(field("Formatter", preview.formatterIdentifier))
-        content.addArrangedSubview(field("导入后状态", preview.state.displayName))
+        content.addArrangedSubview(field("显示方式", "基础格式显示"))
+        content.addArrangedSubview(field("导入后状态", "等待建立索引"))
+        content.addArrangedSubview(field("重复状态", "未发现相同内容的已导入词典"))
 
         let estimated = field("预计所需磁盘空间", "")
         content.addArrangedSubview(estimated)
@@ -90,6 +112,7 @@ final class DictionaryImportPreviewAccessory: NSObject {
 
         let mddTitle = NSTextField(labelWithString: "候选 MDD 文件")
         mddTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        mddTitle.toolTip = "MDD 可包含图片、音频或字体。本阶段仅托管所选文件，不读取其中资源。"
         content.addArrangedSubview(mddTitle)
         if preview.mddCandidates.isEmpty {
             content.addArrangedSubview(secondaryLabel("未发现规范基名匹配的 MDD；可仅导入 MDX。"))
@@ -106,6 +129,8 @@ final class DictionaryImportPreviewAccessory: NSObject {
                 button.controlSize = .small
                 button.identifier = NSUserInterfaceItemIdentifier(candidate.id)
                 button.state = preview.automaticallySelectedMDDIDs.contains(candidate.id) ? .on : .off
+                button.toolTip = "选择后会与 MDX 一起复制；本阶段不会读取 MDD 内容。"
+                button.setAccessibilityLabel("候选 MDD：\(candidate.fileName)")
                 row.candidateButtons[candidate.id] = button
                 content.addArrangedSubview(button)
             }
@@ -131,10 +156,14 @@ final class DictionaryImportPreviewAccessory: NSObject {
         )
     }
 
-    private func field(_ name: String, _ value: String) -> NSTextField {
+    private func field(_ name: String, _ value: String,
+                       help: String? = nil) -> NSTextField {
         let label = NSTextField(labelWithString: "\(name)：\(value)")
         label.maximumNumberOfLines = 2
         label.lineBreakMode = .byTruncatingMiddle
+        label.toolTip = help ?? value
+        label.setAccessibilityLabel("\(name)：\(value)")
+        if let help { label.setAccessibilityHelp(help) }
         return label
     }
 

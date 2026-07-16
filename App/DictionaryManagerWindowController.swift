@@ -35,7 +35,9 @@ final class DictionaryManagerWindowController: NSWindowController,
     private let removeButton = NSButton()
     private let reorderHelpLabel = NSTextField(labelWithString:
         "仅可在相同查询级别内排序；跨组拖动会被拒绝。")
+    private var shouldCenterOnFirstShow: Bool
     private var removingDictionaryID: String?
+    private var cancellingDictionaryID: String?
     private static let dictionaryPasteboardType = NSPasteboard.PasteboardType(
         "com.localdict.dictionary-catalog-id"
     )
@@ -58,13 +60,25 @@ final class DictionaryManagerWindowController: NSWindowController,
         self.removalCoordinator = removalCoordinator
         self.onCatalogChanged = onCatalogChanged
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1060, height: 430),
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: DictionaryManagerPresentation.defaultWindowWidth,
+                height: DictionaryManagerPresentation.defaultWindowHeight
+            ),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "词典管理"
-        window.minSize = NSSize(width: 760, height: 360)
+        window.minSize = NSSize(
+            width: DictionaryManagerPresentation.minimumWindowWidth,
+            height: DictionaryManagerPresentation.minimumWindowHeight
+        )
+        shouldCenterOnFirstShow = !window.setFrameUsingName(
+            "LocalDictionary.DictionaryManager"
+        )
+        window.setFrameAutosaveName("LocalDictionary.DictionaryManager")
         window.isReleasedWhenClosed = false
         super.init(window: window)
         configureContent()
@@ -77,7 +91,10 @@ final class DictionaryManagerWindowController: NSWindowController,
     func show() {
         guard let window else { return }
         NSApp.activate(ignoringOtherApps: true)
-        if !window.isVisible { window.center() }
+        if shouldCenterOnFirstShow {
+            window.center()
+            shouldCenterOnFirstShow = false
+        }
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -86,6 +103,12 @@ final class DictionaryManagerWindowController: NSWindowController,
         self.catalog = catalog
         orderCoordinator.synchronize(catalog: catalog)
         dictionaries = catalog.sortedDictionaries
+        if let cancellingDictionaryID,
+           !dictionaries.contains(where: {
+               $0.dictionaryID == cancellingDictionaryID && $0.state == .indexing
+           }) {
+            self.cancellingDictionaryID = nil
+        }
         tableView.reloadData()
         scrollView.isHidden = dictionaries.isEmpty
         emptyStateView.isHidden = !dictionaries.isEmpty
@@ -114,6 +137,8 @@ final class DictionaryManagerWindowController: NSWindowController,
             button.toolTip = dictionary.sourceKind == .legacyReference
                 ? "启用或停用此旧配置词典；不会删除或修改其原始文件。"
                 : "启用或停用此托管词典；不会删除其索引。"
+            button.setAccessibilityLabel("启用或停用“\(dictionary.displayName)”")
+            button.setAccessibilityValue(dictionary.enabled ? "已启用" : "已停用")
             return button
         }
         if column == .action { return indexActionView(for: dictionaries[row]) }
@@ -137,13 +162,26 @@ final class DictionaryManagerWindowController: NSWindowController,
                 label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
             ])
         }
-        cell.textField?.stringValue = value(for: column, dictionary: dictionaries[row])
-        cell.textField?.textColor = column == .state ? stateColor(dictionaries[row].state)
+        let dictionary = dictionaries[row]
+        let value = value(for: column, dictionary: dictionary)
+        cell.textField?.stringValue = value
+        cell.textField?.textColor = column == .state ? stateColor(for: dictionary)
                                                      : .labelColor
-        if column == .state, let message = indexCoordinator.failureMessage(
-            for: dictionaries[row].dictionaryID
-        ) {
-            cell.toolTip = message
+        cell.textField?.setAccessibilityLabel("\(tableColumn.title)：\(value)")
+        if column == .name {
+            cell.toolTip = dictionary.displayName
+        } else if column == .state {
+            var detail = DictionaryManagerPresentation.statusDetail(
+                for: dictionary,
+                activity: presentationActivity(for: dictionary)
+            )
+            if dictionary.state == .failed,
+               let failure = DictionaryManagerPresentation.safeIndexFailureMessage(
+                   indexCoordinator.failureMessage(for: dictionary.dictionaryID)
+               ) {
+                detail += "\n" + failure
+            }
+            cell.toolTip = detail
         } else {
             cell.toolTip = nil
         }
@@ -181,6 +219,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         orderingActions.orientation = .horizontal
         orderingActions.spacing = 8
         orderingActions.alignment = .centerY
+        orderingActions.distribution = .fill
 
         let resourceActions = NSStackView(views: [
             futureButton(title: "获取开放词典"),
@@ -189,14 +228,17 @@ final class DictionaryManagerWindowController: NSWindowController,
         resourceActions.orientation = .horizontal
         resourceActions.spacing = 10
         resourceActions.alignment = .centerY
+        resourceActions.distribution = .fill
 
         reorderHelpLabel.textColor = .secondaryLabelColor
         reorderHelpLabel.font = .systemFont(ofSize: 11)
+        reorderHelpLabel.setAccessibilityLabel("排序说明")
 
         let actions = NSStackView(views: [orderingActions, resourceActions, reorderHelpLabel])
         actions.orientation = .vertical
         actions.spacing = 7
         actions.alignment = .leading
+        actions.distribution = .fill
         actions.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(heading)
@@ -227,6 +269,7 @@ final class DictionaryManagerWindowController: NSWindowController,
                                                constant: -24),
             actions.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -20)
         ])
+        window.initialFirstResponder = tableView
     }
 
     private func configureTable() {
@@ -239,17 +282,19 @@ final class DictionaryManagerWindowController: NSWindowController,
         tableView.allowsEmptySelection = true
         tableView.registerForDraggedTypes([Self.dictionaryPasteboardType])
         tableView.setDraggingSourceOperationMask(.move, forLocal: true)
+        tableView.setAccessibilityLabel("词典列表")
+        tableView.setAccessibilityHelp("使用方向键选择词典；上移和下移只在同一查询级别内生效。")
 
-        addColumn(.name, title: "词典名称", width: 205)
-        addColumn(.source, title: "来源类型", width: 92)
-        addColumn(.level, title: "查询级别", width: 70)
-        addColumn(.position, title: "排序", width: 48)
-        addColumn(.enabled, title: "启用", width: 48)
-        addColumn(.state, title: "状态", width: 72)
-        addColumn(.entries, title: "词条数量", width: 85)
-        addColumn(.indexSize, title: "索引大小", width: 82)
-        addColumn(.indexedAt, title: "最近索引", width: 130)
-        addColumn(.action, title: "索引操作", width: 140, minWidth: 140)
+        addColumn(.name, title: "词典名称")
+        addColumn(.source, title: "来源类型")
+        addColumn(.level, title: "查询级别")
+        addColumn(.position, title: "排序")
+        addColumn(.enabled, title: "启用")
+        addColumn(.state, title: "状态")
+        addColumn(.entries, title: "词条数量")
+        addColumn(.indexSize, title: "索引大小")
+        addColumn(.indexedAt, title: "最近索引时间")
+        addColumn(.action, title: "索引操作")
 
         scrollView.documentView = tableView
         scrollView.hasVerticalScroller = true
@@ -258,42 +303,56 @@ final class DictionaryManagerWindowController: NSWindowController,
         scrollView.borderType = .bezelBorder
     }
 
-    private func addColumn(_ column: Column, title: String, width: CGFloat,
-                           minWidth: CGFloat? = nil) {
+    private func addColumn(_ column: Column, title: String) {
         let tableColumn = NSTableColumn(identifier: .init(column.rawValue))
         tableColumn.title = title
+        let width = DictionaryManagerPresentation.columnWidths[column.rawValue] ?? 80
         tableColumn.width = width
-        tableColumn.minWidth = minWidth ?? min(width, 48)
-        tableColumn.resizingMask = .autoresizingMask
+        tableColumn.minWidth = width
+        tableColumn.resizingMask = .userResizingMask
         tableView.addTableColumn(tableColumn)
     }
 
     private func configureEmptyState() {
-        let title = NSTextField(labelWithString: "尚未安装本地词典")
+        let title = NSTextField(labelWithString: "当前没有可用的本地词典")
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.alignment = .center
         let detail = NSTextField(wrappingLabelWithString:
-            "LocalDictionary 仍可启动并使用 AI 设置；可通过下方按钮托管本地 MDX。")
+            "可以导入本地 MDX/MDD。开放词库将在后续版本提供；AI 功能仍可独立使用。")
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         detail.maximumNumberOfLines = 3
         emptyStateView.orientation = .vertical
         emptyStateView.alignment = .centerX
         emptyStateView.spacing = 8
+        emptyStateView.distribution = .fill
         emptyStateView.addArrangedSubview(title)
         emptyStateView.addArrangedSubview(detail)
+        let importButton = importButton()
+        importButton.setAccessibilityLabel("导入本地 MDX 或 MDD")
+        emptyStateView.addArrangedSubview(importButton)
+        let future = NSTextField(labelWithString: "获取开放词典 · 查询顺序与显示规则（后续提供）")
+        future.textColor = .tertiaryLabelColor
+        future.font = .systemFont(ofSize: 11)
+        future.alignment = .center
+        emptyStateView.addArrangedSubview(future)
     }
 
     private func futureButton(title: String) -> NSButton {
-        let button = NSButton(title: title, target: self, action: #selector(showFuturePhaseNotice(_:)))
+        let button = NSButton(title: title + "（后续提供）", target: self,
+                              action: #selector(showFuturePhaseNotice(_:)))
         button.bezelStyle = .rounded
+        button.toolTip = "该功能将在后续阶段提供。"
+        button.setAccessibilityLabel(title + "，后续提供")
         return button
     }
 
     private func importButton() -> NSButton {
-        let button = NSButton(title: "导入本地 MDX/MDD", target: self,
+        let button = NSButton(title: "导入本地 MDX/MDD…", target: self,
                               action: #selector(beginImport))
         button.bezelStyle = .rounded
+        button.toolTip = "选择一个 MDX 文件或包含 MDX 的文件夹，检查后安全复制到 App 托管目录。"
+        button.setAccessibilityLabel("导入本地 MDX 或 MDD")
         return button
     }
 
@@ -306,14 +365,16 @@ final class DictionaryManagerWindowController: NSWindowController,
         button.toolTip = title == "上移"
             ? "在当前查询级别内将所选词典上移。"
             : "在当前查询级别内将所选词典下移。"
+        button.setAccessibilityLabel(title + "所选词典")
         return button
     }
 
     private func restoreDefaultsButton() -> NSButton {
-        let button = NSButton(title: "恢复默认顺序", target: self,
+        let button = NSButton(title: "恢复默认顺序…", target: self,
                               action: #selector(confirmRestoreDefaultOrder))
         button.bezelStyle = .rounded
         button.toolTip = "只恢复各查询级别内的默认顺序，不改变启用、状态或索引。"
+        button.setAccessibilityLabel("恢复默认顺序")
         return button
     }
 
@@ -322,6 +383,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         removeButton.target = self
         removeButton.action = #selector(confirmRemoveSelectedDictionary)
         removeButton.bezelStyle = .rounded
+        removeButton.setAccessibilityLabel("移除所选词典")
         return removeButton
     }
 
@@ -339,6 +401,8 @@ final class DictionaryManagerWindowController: NSWindowController,
         guard let selectedDictionary else {
             moveUpButton.isEnabled = false
             moveDownButton.isEnabled = false
+            moveUpButton.toolTip = "请先在词典列表中选择一本词典。"
+            moveDownButton.toolTip = "请先在词典列表中选择一本词典。"
             removeButton.isEnabled = false
             removeButton.toolTip = "选择一个托管词典后可以移除。"
             return
@@ -349,6 +413,12 @@ final class DictionaryManagerWindowController: NSWindowController,
         moveDownButton.isEnabled = DictionaryCatalogOrdering.canMove(
             selectedDictionary.dictionaryID, direction: .down, in: catalog
         )
+        moveUpButton.toolTip = moveUpButton.isEnabled
+            ? "在当前查询级别内将所选词典上移。"
+            : "所选词典已经位于当前查询级别的最前面。"
+        moveDownButton.toolTip = moveDownButton.isEnabled
+            ? "在当前查询级别内将所选词典下移。"
+            : "所选词典已经位于当前查询级别的最后面。"
         let isRemoving = removingDictionaryID == selectedDictionary.dictionaryID ||
             removalCoordinator.isRemoving(selectedDictionary.dictionaryID)
         removeButton.isEnabled = selectedDictionary.sourceKind == .managedLocal && !isRemoving
@@ -418,7 +488,7 @@ final class DictionaryManagerWindowController: NSWindowController,
                             message: "本阶段只允许在相同查询级别内调整顺序。")
             return false
         } catch {
-            showError(title: "无法调整词典顺序", error: error)
+            showError(title: "无法调整词典顺序", operation: .saveOrdering, error: error)
             return false
         }
     }
@@ -453,7 +523,7 @@ final class DictionaryManagerWindowController: NSWindowController,
                                      selectedID: selectedDictionary.dictionaryID,
                                      failureTitle: "无法保存词典顺序")
         } catch {
-            showError(title: "无法调整词典顺序", error: error)
+            showError(title: "无法调整词典顺序", operation: .saveOrdering, error: error)
         }
     }
 
@@ -468,7 +538,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         alert.messageText = "恢复默认顺序？"
         alert.informativeText = "只恢复各查询级别内的顺序，不改变启用状态、索引或词典内容。"
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "恢复")
+        alert.addButton(withTitle: "恢复默认顺序")
         alert.addButton(withTitle: "取消")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
@@ -517,11 +587,12 @@ final class DictionaryManagerWindowController: NSWindowController,
                 self.showInformation(
                     title: "词典已移除",
                     message: cleanupDeferred
-                        ? "Catalog 已更新；托管目录将在下次启动时继续安全清理。"
+                        ? "词典已从列表移除；托管文件将在下次启动时继续安全清理。原始导入文件未修改。"
                         : "App 托管的词典副本和索引已移除；原始导入文件未修改。"
                 )
             case .failed(let error):
-                self.showError(title: "无法移除词典", error: error)
+                self.showError(title: "无法移除词典", operation: .removeDictionary,
+                               error: error)
             }
             self.updateSelectionActions()
         }
@@ -542,7 +613,9 @@ final class DictionaryManagerWindowController: NSWindowController,
         } catch {
             update(catalog: previous)
             if let selectedID { selectDictionary(id: selectedID) }
-            showError(title: failureTitle, error: error)
+            let operation: DictionaryManagerPresentation.ErrorOperation =
+                failureTitle == "无法恢复默认顺序" ? .restoreOrdering : .saveOrdering
+            showError(title: failureTitle, operation: operation, error: error)
             return false
         }
     }
@@ -574,45 +647,32 @@ final class DictionaryManagerWindowController: NSWindowController,
             onCatalogChanged(updated)
         } catch {
             update(catalog: previous)
-            showError(title: "无法保存启用状态", error: error)
+            showError(title: "无法保存启用状态", operation: .saveEnabledState,
+                      error: error)
         }
     }
 
     private func indexActionView(for dictionary: DictionaryDescriptor) -> NSView {
-        guard dictionary.sourceKind == .managedLocal else {
+        guard let presentation = DictionaryManagerPresentation.indexAction(
+            for: dictionary,
+            activity: presentationActivity(for: dictionary)
+        ) else {
             return NSTextField(labelWithString: "—")
         }
-        let button: NSButton
-        switch dictionary.state {
-        case .pendingIndex:
-            button = NSButton(title: "建立索引", target: self,
-                              action: #selector(startIndexing(_:)))
-            button.toolTip = "为该托管词典建立本地索引，不删除或修改源 MDX。"
-        case .failed:
-            button = NSButton(title: "重试", target: self,
-                              action: #selector(startIndexing(_:)))
-            button.toolTip = "重新为该托管词典建立本地索引。"
-        case .indexing:
-            button = NSButton(title: "取消索引", target: self,
-                              action: #selector(cancelIndexing(_:)))
-            button.toolTip = "请求取消当前索引任务。"
-        case .ready:
-            button = NSButton(title: "已建立", target: nil, action: nil)
-            button.isEnabled = false
-            button.toolTip = "该词典索引已完成。"
-        default:
-            button = NSButton(title: "不可用", target: nil, action: nil)
-            button.isEnabled = false
-            button.toolTip = "当前词典状态不允许建立索引。"
+        let selector: Selector?
+        switch presentation.action {
+        case .start, .retry: selector = #selector(startIndexing(_:))
+        case .cancel: selector = #selector(cancelIndexing(_:))
+        case .none: selector = nil
         }
+        let button = NSButton(title: presentation.title, target: self, action: selector)
+        button.isEnabled = presentation.isEnabled
+        button.toolTip = presentation.toolTip
         button.bezelStyle = .rounded
         button.controlSize = .small
         button.identifier = NSUserInterfaceItemIdentifier(dictionary.dictionaryID)
-        if removingDictionaryID == dictionary.dictionaryID ||
-            removalCoordinator.isRemoving(dictionary.dictionaryID) {
-            button.isEnabled = false
-            button.toolTip = "该词典正在安全移除。"
-        }
+        button.setAccessibilityLabel("\(presentation.title)：“\(dictionary.displayName)”")
+        button.setAccessibilityHelp(presentation.toolTip)
         guard dictionary.state == .indexing else { return button }
 
         let indicator = NSProgressIndicator()
@@ -641,14 +701,21 @@ final class DictionaryManagerWindowController: NSWindowController,
         case .busy:
             showInformation(title: "已有索引任务进行中",
                             message: "为控制 CPU、内存和磁盘负载，同一时间只建立一个索引。")
-        case .unavailable(let message):
-            showInformation(title: "无法建立索引", message: message)
+        case .unavailable:
+            showInformation(
+                title: "无法建立索引",
+                message: "无法开始建立索引。托管副本和用户原始导入文件均未修改；请检查词典状态、文件可用性和磁盘空间后重试。"
+            )
         }
     }
 
     @objc private func cancelIndexing(_ sender: NSButton) {
         guard let dictionaryID = sender.identifier?.rawValue else { return }
+        guard indexCoordinator.activity?.dictionaryID == dictionaryID else { return }
+        cancellingDictionaryID = dictionaryID
         indexCoordinator.cancel(dictionaryID: dictionaryID)
+        tableView.reloadData()
+        updateSelectionActions()
     }
 
     @objc private func beginImport() {
@@ -681,7 +748,7 @@ final class DictionaryManagerWindowController: NSWindowController,
             case .success(let previews):
                 self.presentImportPreview(previews)
             case .failure(let error):
-                self.showError(title: "无法检查词典", error: error)
+                self.showError(title: "无法检查词典", operation: .inspect, error: error)
             }
         }
     }
@@ -701,7 +768,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         previewAccessory = accessory
         let alert = NSAlert()
         alert.messageText = previews.count == 1 ? "导入预览" : "导入预览（\(previews.count) 本词典）"
-        alert.informativeText = "仅检查必要元数据。确认后将复制文件并创建等待索引的 Catalog 记录。"
+        alert.informativeText = "仅检查必要元数据。确认后将安全复制文件，并显示为“等待建立索引”。"
         alert.alertStyle = .informational
         alert.accessoryView = accessory.view
         alert.addButton(withTitle: "导入")
@@ -729,7 +796,7 @@ final class DictionaryManagerWindowController: NSWindowController,
 
         let progressAlert = NSAlert()
         progressAlert.messageText = "正在复制词典文件…"
-        progressAlert.informativeText = "文件先写入 staging；取消或失败不会发布半成品。"
+        progressAlert.informativeText = "文件会先复制到安全临时位置；取消或失败不会留下半成品词典记录。"
         progressAlert.accessoryView = indicator
         progressAlert.addButton(withTitle: "取消")
         progressAlert.beginSheetModal(for: window) { _ in cancellationToken.cancel() }
@@ -757,22 +824,24 @@ final class DictionaryManagerWindowController: NSWindowController,
                     .subtracting(startingCatalog.dictionaries.map(\.dictionaryID))
                 if let first = importedIDs.first { self.selectDictionary(id: first) }
                 self.showInformation(title: "导入完成",
-                                     message: "文件已安全托管，词典状态为“等待索引”。")
+                                     message: "文件已安全托管。词典已导入，需要建立索引后才能查询。")
             } catch let error as DictionaryImportError {
                 if progressAlert.window.sheetParent != nil {
                     window.endSheet(progressAlert.window)
                 }
                 if case .cancelled = error { return }
                 if case .duplicate = error {
-                    self.showError(title: "该词典可能已导入", error: error)
+                    self.showInformation(title: "该词典可能已导入",
+                                         message: "已安装列表中存在内容相同的词典，本次没有重复复制。")
                 } else {
-                    self.showError(title: "导入失败", error: error)
+                    self.showError(title: "导入失败", operation: .importDictionary,
+                                   error: error)
                 }
             } catch {
                 if progressAlert.window.sheetParent != nil {
                     window.endSheet(progressAlert.window)
                 }
-                self.showError(title: "导入失败", error: error)
+                self.showError(title: "导入失败", operation: .importDictionary, error: error)
             }
         }
     }
@@ -781,7 +850,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         guard let window else { return }
         let alert = NSAlert()
         alert.messageText = "该词典可能已导入"
-        alert.informativeText = "Catalog 中已有内容摘要相同的词典“\(existing.displayName)”。本轮默认不重复复制。"
+        alert.informativeText = "已安装列表中已有内容相同的词典“\(existing.displayName)”。本次不会重复复制。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "显示现有词典")
         alert.addButton(withTitle: "取消")
@@ -798,11 +867,19 @@ final class DictionaryManagerWindowController: NSWindowController,
         tableView.scrollRowToVisible(row)
     }
 
-    private func showError(title: String, error: Error) {
+    private func showError(title: String,
+                           operation: DictionaryManagerPresentation.ErrorOperation,
+                           error: Error) {
         guard let window else { return }
-        let alert = NSAlert(error: error)
+        #if DEBUG
+        NSLog("LocalDictionary manager operation failed type=%@",
+              String(reflecting: type(of: error)))
+        #endif
+        let alert = NSAlert()
         alert.messageText = title
+        alert.informativeText = DictionaryManagerPresentation.errorMessage(for: operation)
         alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
         alert.beginSheetModal(for: window)
     }
 
@@ -819,11 +896,15 @@ final class DictionaryManagerWindowController: NSWindowController,
     private func value(for column: Column, dictionary: DictionaryDescriptor) -> String {
         switch column {
         case .name: return dictionary.displayName
-        case .source: return dictionary.sourceKind.displayName
-        case .level: return dictionary.queryLevel.displayName
+        case .source: return DictionaryManagerPresentation.sourceText(dictionary.sourceKind)
+        case .level: return DictionaryManagerPresentation.queryLevelText(dictionary.queryLevel)
         case .position: return String(dictionary.sortPosition)
         case .enabled: return dictionary.enabled ? "是" : "否"
-        case .state: return dictionary.state.displayName
+        case .state:
+            return DictionaryManagerPresentation.statusText(
+                for: dictionary,
+                activity: presentationActivity(for: dictionary)
+            )
         case .entries:
             guard let count = dictionary.indexMetadata.entryCount else { return "—" }
             return Self.numberFormatter.string(from: NSNumber(value: count)) ?? String(count)
@@ -838,13 +919,29 @@ final class DictionaryManagerWindowController: NSWindowController,
         }
     }
 
-    private func stateColor(_ state: DictionaryState) -> NSColor {
-        switch state {
+    private func stateColor(for dictionary: DictionaryDescriptor) -> NSColor {
+        let activity = presentationActivity(for: dictionary)
+        if activity == .removing || activity == .cancellingIndex { return .systemOrange }
+        if !dictionary.enabled { return .secondaryLabelColor }
+        switch dictionary.state {
         case .ready: return .systemGreen
         case .pendingIndex, .indexing, .copying, .scanning: return .systemOrange
         case .disabled: return .secondaryLabelColor
         default: return .systemRed
         }
+    }
+
+    private func presentationActivity(
+        for dictionary: DictionaryDescriptor
+    ) -> DictionaryManagerPresentation.Activity {
+        if removingDictionaryID == dictionary.dictionaryID ||
+            removalCoordinator.isRemoving(dictionary.dictionaryID) {
+            return .removing
+        }
+        if cancellingDictionaryID == dictionary.dictionaryID {
+            return .cancellingIndex
+        }
+        return .idle
     }
 
     private static let numberFormatter: NumberFormatter = {
@@ -855,9 +952,9 @@ final class DictionaryManagerWindowController: NSWindowController,
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.setLocalizedDateFormatFromTemplate("yyyy-MM-dd HH:mm")
         return formatter
     }()
 }

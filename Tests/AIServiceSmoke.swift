@@ -276,6 +276,7 @@ private struct AIServiceSmoke {
             try await testKeychain()
         }
         try await testClientAndErrors()
+        try await testConnectionAndProductionRequestShareTransportConfiguration()
         try await testInlineLookupRequestsAndCache()
         try await testInlineLocalLookupAndFormatting()
         try await testInlineSelectionSnapshotsAndAnchors()
@@ -286,6 +287,7 @@ private struct AIServiceSmoke {
         try testTolerantWordExplanationSchema()
         try testFormatter()
         try testSentenceFormatterAndGenerationGate()
+        try testRequestLifecycleAndUserMessages()
         try await testLocalSentenceGlossary()
         try testAINoteExport()
         try testSentenceNoteExport()
@@ -883,6 +885,59 @@ private struct AIServiceSmoke {
         } catch let error as AIClientError {
             try expect(error == .responseTooLarge, "response size limit")
         }
+    }
+
+    private static func testConnectionAndProductionRequestShareTransportConfiguration()
+        async throws {
+        let client = OpenAICompatibleClient(session: session())
+        let profile = AIProviderConfiguration(
+            providerID: UUID(), enabled: true, providerType: .openAICompatible,
+            providerDisplayName: "DeepSeek",
+            baseURL: "https://api.deepseek.com/v1/chat/completions",
+            model: "deepseek-chat", priority: 1
+        )
+        let testKey = "unit-test-placeholder"
+        var requests: [URLRequest] = []
+        MockURLProtocol.handler = { request in
+            requests.append(request)
+            if requests.count == 1 {
+                return (200, try JSONSerialization.data(withJSONObject: [
+                    "choices": [["message": ["content": "{\"status\":\"ok\"}"]]]
+                ]))
+            }
+            return (200, try envelope(sample))
+        }
+        try await client.testConnection(configuration: profile, apiKey: testKey)
+        _ = try await client.explain(query: "fallback", domain: "general",
+                                     configuration: profile, apiKey: testKey)
+        try expect(requests.count == 2, "connection and production query each send one request")
+        let connection = requests[0]
+        let production = requests[1]
+        try expect(connection.url == production.url &&
+                   connection.url?.absoluteString ==
+                    "https://api.deepseek.com/v1/chat/completions",
+                   "connection and production query share normalized endpoint")
+        try expect(connection.value(forHTTPHeaderField: "Authorization") ==
+                    production.value(forHTTPHeaderField: "Authorization") &&
+                   connection.value(forHTTPHeaderField: "Authorization") ==
+                    ["Bearer", testKey].joined(separator: " "),
+                   "connection and production query share credential/header construction")
+        let connectionBody = try JSONSerialization.jsonObject(
+            with: requestBody(connection)
+        ) as! [String: Any]
+        let productionBody = try JSONSerialization.jsonObject(
+            with: requestBody(production)
+        ) as! [String: Any]
+        try expect(connectionBody["model"] as? String == "deepseek-chat" &&
+                   productionBody["model"] as? String == "deepseek-chat",
+                   "connection and production query use the same persisted model")
+        try expect(connectionBody["stream"] == nil && productionBody["stream"] == nil,
+                   "both request paths are non-streaming")
+        try expect((connectionBody["response_format"] as? [String: String])?["type"] ==
+                    "json_object" &&
+                   (productionBody["response_format"] as? [String: String])?["type"] ==
+                    "json_object",
+                   "both request paths share strict JSON response policy")
     }
 
     private static func testInlineLookupRequestsAndCache() async throws {
@@ -1751,6 +1806,37 @@ private struct AIServiceSmoke {
                    "old sentence response cannot overwrite new query")
         _ = gate.beginQuery()
         try expect(!gate.accepts(sentenceB), "cancellation invalidates response generation")
+    }
+
+    private static func testRequestLifecycleAndUserMessages() throws {
+        var lifecycle = AIRequestLifecycle()
+        let success = lifecycle.begin()
+        try expect(lifecycle.isLoading && lifecycle.finish(success) && !lifecycle.isLoading,
+                   "successful production request exits loading")
+
+        for error in [AIClientError.timeout, .invalidJSON, .cancelled] {
+            let token = lifecycle.begin()
+            try expect(lifecycle.isLoading, "failed production request enters loading")
+            _ = AIRequestUserMessage.message(for: error)
+            try expect(lifecycle.finish(token) && !lifecycle.isLoading,
+                       "timeout, parse failure, and cancellation exit loading")
+        }
+
+        let old = lifecycle.begin()
+        let retry = lifecycle.begin()
+        try expect(!lifecycle.finish(old) && lifecycle.isLoading,
+                   "late old response cannot end the active retry")
+        try expect(lifecycle.finish(retry) && !lifecycle.isLoading,
+                   "active retry owns its terminal state")
+
+        let timeout = AIRequestUserMessage.message(for: AIClientError.timeout)
+        let offline = AIRequestUserMessage.message(for: AIClientError.offline)
+        let schema = AIRequestUserMessage.message(for: AIClientError.schemaInvalid(field: "x"))
+        try expect(timeout.contains("超时") && timeout.contains("网络") &&
+                   offline.contains("网络") && schema.contains("格式") && schema.contains("更换"),
+                   "AI failures expose safe actionable guidance")
+        try expect(!schema.contains("x") && !schema.contains("{") && !schema.contains("/Users/"),
+                   "user-visible format errors hide internal fields and paths")
     }
 
     private static func testLocalSentenceGlossary() async throws {

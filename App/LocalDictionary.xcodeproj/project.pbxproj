@@ -72,6 +72,9 @@
 		A10000000000000000000040 /* GenericManagedDictionaryPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000049 /* GenericManagedDictionaryPresenter.swift */; };
 		A10000000000000000000041 /* DictionaryCatalogOrdering.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004A /* DictionaryCatalogOrdering.swift */; };
 		A10000000000000000000042 /* ManagedDictionaryRemoval.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004B /* ManagedDictionaryRemoval.swift */; };
+		A10000000000000000000043 /* DictionaryManagerPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004C /* DictionaryManagerPresentation.swift */; };
+		A10000000000000000000044 /* DictionaryAppearanceTextAdapter.mm in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */; };
+		A10000000000000000000045 /* AIRequestLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004F /* AIRequestLifecycle.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -150,6 +153,10 @@
 		B10000000000000000000049 /* GenericManagedDictionaryPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenericManagedDictionaryPresenter.swift; sourceTree = "<group>"; };
 		B1000000000000000000004A /* DictionaryCatalogOrdering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryCatalogOrdering.swift; sourceTree = "<group>"; };
 		B1000000000000000000004B /* ManagedDictionaryRemoval.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedDictionaryRemoval.swift; sourceTree = "<group>"; };
+		B1000000000000000000004C /* DictionaryManagerPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryManagerPresentation.swift; sourceTree = "<group>"; };
+		B1000000000000000000004D /* DictionaryAppearanceTextAdapter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DictionaryAppearanceTextAdapter.h; sourceTree = "<group>"; };
+		B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DictionaryAppearanceTextAdapter.mm; sourceTree = "<group>"; };
+		B1000000000000000000004F /* AIRequestLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIRequestLifecycle.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -233,6 +240,10 @@
 				B10000000000000000000049 /* GenericManagedDictionaryPresenter.swift */,
 				B1000000000000000000004A /* DictionaryCatalogOrdering.swift */,
 				B1000000000000000000004B /* ManagedDictionaryRemoval.swift */,
+				B1000000000000000000004C /* DictionaryManagerPresentation.swift */,
+				B1000000000000000000004D /* DictionaryAppearanceTextAdapter.h */,
+				B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */,
+				B1000000000000000000004F /* AIRequestLifecycle.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -432,6 +443,9 @@
 				A10000000000000000000040 /* GenericManagedDictionaryPresenter.swift in Sources */,
 				A10000000000000000000041 /* DictionaryCatalogOrdering.swift in Sources */,
 				A10000000000000000000042 /* ManagedDictionaryRemoval.swift in Sources */,
+				A10000000000000000000043 /* DictionaryManagerPresentation.swift in Sources */,
+				A10000000000000000000044 /* DictionaryAppearanceTextAdapter.mm in Sources */,
+				A10000000000000000000045 /* AIRequestLifecycle.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,
