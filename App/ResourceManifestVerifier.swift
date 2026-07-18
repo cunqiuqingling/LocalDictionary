@@ -20,9 +20,16 @@ struct ResourceManifestVerifier: Sendable {
                              manifestBytes: Data,
                              priorState: VerifiedManifestState?) throws
         -> PreparedManifestVerification {
+        let maximumSignatureBytes = min(policy.maximumSignatureBytes, 4_096)
+        guard signatureBytes.count <= maximumSignatureBytes else {
+            throw ManifestVerificationError.signatureEnvelopeTooLarge
+        }
+        guard manifestBytes.count <= policy.maximumManifestBytes else {
+            throw ManifestVerificationError.manifestTooLarge
+        }
         let envelope = try ResourceManifestSignatureEnvelope.parse(
             signatureBytes,
-            maximumBytes: min(policy.maximumSignatureBytes, 4_096)
+            maximumBytes: maximumSignatureBytes
         )
         guard let trustedKey = trustStore.key(for: envelope.keyID) else {
             throw ManifestVerificationError.unknownKeyID
@@ -39,9 +46,6 @@ struct ResourceManifestVerifier: Sendable {
             throw ManifestVerificationError.invalidSignature
         }
 
-        guard manifestBytes.count <= policy.maximumManifestBytes else {
-            throw ManifestVerificationError.manifestTooLarge
-        }
         let decoded = try StrictResourceManifestDecoder().decode(
             manifestBytes,
             limits: policy.jsonLimits

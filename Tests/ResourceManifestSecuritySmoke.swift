@@ -368,6 +368,19 @@ private struct ResourceManifestSecuritySmoke {
         try harness.expectManifestError("manifest size limit", matching: {
             $0 == .manifestTooLarge
         }) { _ = try prepare(validData, privateKey: privateKey, verifier: tinyVerifier) }
+        let unknownKeyEnvelope = try ResourceManifestSignatureEnvelope(
+            keyID: "TEST-ONLY-unknown-key",
+            signature: Data(repeating: 0, count: 64)
+        ).serialized()
+        try harness.expectManifestError("manifest size precedes unknown key", matching: {
+            $0 == .manifestTooLarge
+        }) {
+            _ = try tinyVerifier.prepareVerification(
+                signatureBytes: unknownKeyEnvelope,
+                manifestBytes: validData,
+                priorState: nil
+            )
+        }
         let verifier2 = try makeVerifier(privateKey: privateKey)
         let firstCandidate = try prepare(validData, privateKey: privateKey,
                                          verifier: verifier2).stateCandidate
@@ -533,6 +546,28 @@ private struct ResourceManifestSecuritySmoke {
         let store = VerifiedManifestStateStore(directoryURL: root)
         let version1 = try prepare(manifest(version: 1), privateKey: privateKey,
                                    verifier: verifier)
+        let invalidTemporalState = VerifiedManifestState(
+            highestManifestVersion: version1.stateCandidate.highestManifestVersion,
+            manifestSHA256: version1.stateCandidate.manifestSHA256,
+            verifiedKeyID: version1.stateCandidate.verifiedKeyID,
+            issuedAt: version1.stateCandidate.issuedAt,
+            verifiedAt: version1.stateCandidate.issuedAt.addingTimeInterval(-1)
+        )
+        try await harness.expectStoreError("verified time precedes issued time", matching: {
+            $0 == .corruptState
+        }) { _ = try invalidTemporalState.validated() }
+        let invalidPrepared = PreparedManifestVerification(
+            verifiedManifest: version1.verifiedManifest,
+            stateCandidate: invalidTemporalState
+        )
+        try await harness.expectStoreError("store rejects invalid temporal state", matching: {
+            $0 == .corruptState
+        }) { _ = try await store.commitVerifiedState(invalidPrepared) }
+        try harness.check(
+            "invalid temporal state is not written",
+            !FileManager.default.fileExists(atPath: store.stateURL.path) &&
+                !FileManager.default.fileExists(atPath: store.backupURL.path)
+        )
         try harness.check("prepare does not write state",
                           !FileManager.default.fileExists(atPath: store.stateURL.path))
         let saved1 = try await store.commitVerifiedState(version1)

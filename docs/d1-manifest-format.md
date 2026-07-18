@@ -109,8 +109,8 @@ fields remain part of the closed schema but must be absent for `officialPageOnly
 | `reviewEvidence` | non-empty array of strict evidence objects |
 
 `notice` contains only `kind` (`inline`) and bounded `text`.
-`expectedEntryCount` contains only positive `minimum` and `maximum`, with minimum
-not greater than maximum. Each `reviewEvidence` item contains only bounded `kind`,
+`expectedEntryCount` contains only positive `minimum` and `maximum`, with maximum
+greater than or equal to minimum. Each `reviewEvidence` item contains only bounded `kind`,
 an HTTPS `url`, and a lowercase SHA-256 digest.
 
 Each revocation contains only `resourceID`, positive `minimumRevision`,

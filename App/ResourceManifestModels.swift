@@ -183,7 +183,8 @@ struct VerifiedManifestState: Codable, Equatable, Sendable {
         guard schemaVersion == Self.currentSchemaVersion,
               highestManifestVersion > 0,
               ResourceManifestValidation.isLowercaseSHA256(manifestSHA256),
-              ResourceManifestSignatureEnvelope.isValidKeyID(verifiedKeyID) else {
+              ResourceManifestSignatureEnvelope.isValidKeyID(verifiedKeyID),
+              verifiedAt >= issuedAt else {
             throw VerifiedManifestStateStoreError.corruptState
         }
         return self
