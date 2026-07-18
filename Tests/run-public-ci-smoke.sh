@@ -16,6 +16,7 @@ if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   fi
 fi
 
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 export HOME="$WORK/home"
 export CFFIXED_USER_HOME="$HOME"
 export LOCALDICTIONARY_SKIP_KEYCHAIN_SMOKE=1

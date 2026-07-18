@@ -35,9 +35,14 @@ require_literal() {
 
 reject_pattern() {
   local pattern="$1"
+  local scan_exit
   shift
-  rg -n -i -- "$pattern" "$@" >/dev/null && fail "forbidden text matched: $pattern"
-  return 0
+  if /usr/bin/grep -REni -- "$pattern" "$@" >/dev/null; then
+    fail "forbidden text matched: $pattern"
+  else
+    scan_exit=$?
+    (( scan_exit == 1 )) || fail "portable content scan failed: $pattern"
+  fi
 }
 
 for file in "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/SECURITY.md" \
@@ -87,10 +92,18 @@ require_literal "$ROOT/docs/privacy.md" "当前缓存上限为 256 条"
 
 expected_security_contact="cunqiuqingling""@""gmail.com"
 require_literal "$ROOT/SECURITY.md" "$expected_security_contact"
-security_contact_files=("${(@f)$(rg -l -F "$expected_security_contact" "$ROOT" \
-  --glob '!ThirdParty/'mdict-cpp'/**' --glob '!.git/**' || true)}")
+security_contact_output=""
+if security_contact_output="$(git -C "$ROOT" grep --untracked -l -F \
+  "$expected_security_contact" -- . \
+  ':(exclude)ThirdParty/vendor/mdict-cpp/**')"; then
+  :
+else
+  scan_exit=$?
+  (( scan_exit == 1 )) || fail "security contact scan failed"
+fi
+security_contact_files=("${(@f)security_contact_output}")
 [[ "${#security_contact_files[@]}" -eq 1 && \
-   "$security_contact_files[1]" == "$ROOT/SECURITY.md" ]] || \
+   "$security_contact_files[1]" == "SECURITY.md" ]] || \
   fail "security contact appears outside SECURITY.md"
 
 require_literal "$ROOT/docs/provenance.md" \
