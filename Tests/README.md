@@ -32,6 +32,8 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-resource-manifest-security-smoke.sh` covers the offline D1b-1 trust foundation with runtime-generated TEST-ONLY Ed25519 keys and synthetic JSON. It verifies the binary detached-signature envelope, raw-byte signatures, strict duplicate-key/unknown-field JSON parsing, closed Manifest v1 semantics, URL and filename limits, rollback protection, atomic state persistence and permissions, empty production trust, and the Catalog/external-reference boundary. It uses only a temporary rollback directory and does not access the network, Keychain, real Application Support, or dictionary data.
 
+`run-resource-manifest-network-smoke.sh` covers the offline D1b-2A HTTPS transport with an injected `URLProtocol`. It verifies exact-host URL and redirect policy, bounded chunked signature/Manifest delivery, status/content rules, cancellation, one-refresh-at-a-time behavior, cookie/cache isolation, raw-byte verifier handoff, and disabled production endpoint/trust defaults. It uses only synthetic `example.test` URLs and runtime-generated TEST-ONLY Ed25519 keys; it performs no DNS or network access and writes no resource, Catalog, or rollback state.
+
 The repository is currently source-only and targets macOS 15.0+ on arm64. A clean clone builds from tracked `ThirdParty/vendor` files without a submodule, a separate mdict-cpp clone, Homebrew dependencies, or private `local.json`. The only runtime permission required for selection lookup is Accessibility; the App does not request screen recording, microphone, or system audio recording permission.
 
 ## C1 manual acceptance checklist
