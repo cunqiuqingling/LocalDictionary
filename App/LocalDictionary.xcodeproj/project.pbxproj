@@ -86,6 +86,10 @@
 		A10000000000000000000068 /* ResourceNetworkURLPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000068 /* ResourceNetworkURLPolicy.swift */; };
 		A10000000000000000000069 /* BoundedHTTPSDataFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000069 /* BoundedHTTPSDataFetcher.swift */; };
 		A1000000000000000000006A /* ResourceManifestRemoteLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006A /* ResourceManifestRemoteLoader.swift */; };
+		A1000000000000000000006B /* ResourcePayloadDownloadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006B /* ResourcePayloadDownloadModels.swift */; };
+		A1000000000000000000006C /* ResourcePayloadStagingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006C /* ResourcePayloadStagingStore.swift */; };
+		A1000000000000000000006D /* ResourcePayloadFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */; };
+		A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -179,6 +183,10 @@
 		B10000000000000000000068 /* ResourceNetworkURLPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceNetworkURLPolicy.swift; sourceTree = "<group>"; };
 		B10000000000000000000069 /* BoundedHTTPSDataFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoundedHTTPSDataFetcher.swift; sourceTree = "<group>"; };
 		B1000000000000000000006A /* ResourceManifestRemoteLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestRemoteLoader.swift; sourceTree = "<group>"; };
+		B1000000000000000000006B /* ResourcePayloadDownloadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadDownloadModels.swift; sourceTree = "<group>"; };
+		B1000000000000000000006C /* ResourcePayloadStagingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadStagingStore.swift; sourceTree = "<group>"; };
+		B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadFileDownloader.swift; sourceTree = "<group>"; };
+		B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadDownloadCoordinator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -277,6 +285,10 @@
 				B10000000000000000000068 /* ResourceNetworkURLPolicy.swift */,
 				B10000000000000000000069 /* BoundedHTTPSDataFetcher.swift */,
 				B1000000000000000000006A /* ResourceManifestRemoteLoader.swift */,
+				B1000000000000000000006B /* ResourcePayloadDownloadModels.swift */,
+				B1000000000000000000006C /* ResourcePayloadStagingStore.swift */,
+				B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */,
+				B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -490,6 +502,10 @@
 				A10000000000000000000068 /* ResourceNetworkURLPolicy.swift in Sources */,
 				A10000000000000000000069 /* BoundedHTTPSDataFetcher.swift in Sources */,
 				A1000000000000000000006A /* ResourceManifestRemoteLoader.swift in Sources */,
+				A1000000000000000000006B /* ResourcePayloadDownloadModels.swift in Sources */,
+				A1000000000000000000006C /* ResourcePayloadStagingStore.swift in Sources */,
+				A1000000000000000000006D /* ResourcePayloadFileDownloader.swift in Sources */,
+				A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,
