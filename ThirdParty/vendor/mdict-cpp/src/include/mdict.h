@@ -319,6 +319,27 @@ class Mdict {
   int dictionaryEncoding() const { return encoding; }
   const std::string &headerXML() const { return header_buffer; }
 
+  // ——— Test-only metrics accessors ———
+  // These are const getters that expose internal metadata for offline
+  // resource-measurement tools.  They are never called by the App target
+  // and do not change any production behaviour.
+  uint32_t headerBytesSize() const { return header_bytes_size; }
+  uint64_t keyBlockCount() const { return key_block_num; }
+  uint64_t keyBlockInfoCompressedSize() const { return key_block_info_size; }
+  uint64_t keyBlockInfoDecompressedSize() const { return key_block_info_decompress_size; }
+  uint64_t keyBlockCompressedSize() const { return key_block_size; }
+  uint64_t recordBlockCount() const { return record_block_number; }
+  uint64_t recordBlockInfoSize() const { return record_block_info_size; }
+  uint64_t recordBlockHeaderSizeValue() const { return record_block_header_size; }
+  uint64_t recordBlockCompressedSize() const { return record_block_size; }
+  int encryptionMode() const { return encrypt; }
+  const std::vector<key_block_info *> &keyBlockInfoList() const {
+    return key_block_info_list;
+  }
+  const std::vector<record_header_item *> &recordHeaderList() const {
+    return record_header;
+  }
+
   /**
    * Reduce search range for a phrase
    * @param phrase The phrase to search for
