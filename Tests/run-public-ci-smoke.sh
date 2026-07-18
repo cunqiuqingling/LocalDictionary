@@ -26,6 +26,7 @@ PUBLIC_TESTS=(
   Tests/run-resource-manifest-security-smoke.sh
   Tests/run-resource-manifest-network-smoke.sh
   Tests/run-resource-payload-download-smoke.sh
+  Tests/run-d1b3a2a-resource-limits-smoke.sh
   Tests/run-open-source-compliance-smoke.sh
   Tests/run-third-party-vendor-smoke.sh
   Tests/run-ripemd128-miniz-smoke.sh

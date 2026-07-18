@@ -6,14 +6,14 @@
  * See the LICENSE file for details.
  */
 
-#include <utility>
-
 #pragma once
 
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <string>  // std::stof
+#include <utility>
 #include <vector>
 
 #include "mdict_extern.h"
@@ -22,6 +22,7 @@
 #include "resource_limits.h"
 #include "checked_arithmetic.h"
 #include "bounded_zlib.h"
+#include "resource_test_observer.h"
 
 /**
  * mdx struct analysis
@@ -160,6 +161,8 @@ class key_block_info {
   // key block decompressed size
   uint64_t key_block_decomp_size;
   uint64_t key_block_decomp_accumulator;
+  // Number of entries declared by this key-block metadata record.
+  uint64_t declared_entry_count;
 
   /**
    * constructor
@@ -172,7 +175,7 @@ class key_block_info {
   key_block_info(std::string first_key, std::string last_key,
                  uint64_t kb_start_ofset, uint64_t kb_comp_size,
                  uint64_t kb_decomp_size, uint64_t kb_comp_accu,
-                 uint64_t kb_decomp_accu) {
+                 uint64_t kb_decomp_accu, uint64_t declared_entries) {
     this->key_block_comp_size = kb_comp_size;
     this->key_block_decomp_size = kb_decomp_size;
     this->key_block_start_offset = kb_start_ofset;
@@ -180,6 +183,7 @@ class key_block_info {
     this->last_key = last_key;
     this->key_block_comp_accumulator = kb_comp_accu;
     this->key_block_decomp_accumulator = kb_decomp_accu;
+    this->declared_entry_count = declared_entries;
   }
 };
 
@@ -188,7 +192,16 @@ class key_list_item {
   unsigned long record_start;
   std::string key_word;
   key_list_item(unsigned long kid, std::string kw)
-      : record_start(kid), key_word(std::move(kw)) {}
+      : record_start(kid), key_word(std::move(kw)) {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeKeyItemCreated();
+#endif
+  }
+  ~key_list_item() {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeKeyItemDestroyed();
+#endif
+  }
 };
 
 class record_header_item {
@@ -611,9 +624,9 @@ class Mdict {
    * @param block_id the block index (for diagnostics / future use)
    * D1b-3A-2A-R1: key_block_len widened to uint64_t; block_id to size_t.
    */
-  std::vector<key_list_item *> split_key_block(unsigned char *key_block,
-                                               uint64_t key_block_len,
-                                               size_t block_id);
+  std::vector<std::unique_ptr<key_list_item>> split_key_block_owned(
+      unsigned char *key_block, uint64_t key_block_len, size_t block_id,
+      uint64_t declared_entry_count, uint64_t remaining_global_entries);
 
   /********************************
    *     INNER DICTIONARY PART    *

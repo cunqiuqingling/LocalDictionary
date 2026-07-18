@@ -1,5 +1,19 @@
 # Tests
 
+## D1b-3A-2A-R2 bounded Key parsing
+
+`run-d1b3a2a-resource-limits-smoke.sh` builds a runtime-only synthetic MDX
+suite in Debug (ASan/UBSan and warnings-as-errors) and Release
+(`-O2 -DNDEBUG` and warnings-as-errors). It exercises actual per-block and
+global entry counts, RAII rollback, canonical four-byte compression prefixes,
+type-0/type-2 checksums, cumulative metadata arithmetic, UTF-16 delimiters,
+all 20 ResourceLimits defaults, all seven checked-arithmetic helpers, and
+test-only allocation/live-item observers. It uses no private dictionary,
+network, Keychain, local configuration, or Application Support data.
+
+Record-block ResourceLimits remain a D1b-3A-2B task. Directory-descriptor
+`openat`/`renameat` hardening remains a D1b-3B task.
+
 Phase 2 was exercised against the selected real Oxford MDX with the documented 20-word set. Additional checks cover ASCII case fallback, English and curly-quote cleanup, trailing punctuation cleanup, read-only index reuse, SQLite integrity, and an in-process cache hit.
 
 `run-multidictionary-smoke.sh` reads the ignored machine-local configuration and tests all five fixed dictionaries through the production SQLite core and native formatters. It writes only ignored fixtures and temporary Markdown notes below `.build/`; no dictionary or user note is copied or modified. The smoke test also verifies multi-source Markdown sections, duplicate prevention, and isolation of a missing dictionary path.

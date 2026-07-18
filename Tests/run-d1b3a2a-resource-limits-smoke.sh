@@ -22,7 +22,8 @@ mkdir -p "$DEBUG_DIR/objects"
 
 CFLAGS_DBG=(-std=c17 -Wall -Wextra -Werror -O1 -g -isysroot "$SDKROOT"
             -fsanitize=address,undefined -fno-omit-frame-pointer)
-CXXFLAGS_DBG=(-std=c++17 -Wall -Wextra -Werror -O1 -g -isysroot "$SDKROOT"
+CXXFLAGS_DBG=(-std=c++17 -Wall -Wextra -Werror -O1 -g
+              -DMDICT_RESOURCE_TEST_OBSERVER -isysroot "$SDKROOT"
               -fsanitize=address,undefined -fno-omit-frame-pointer)
 
 for src in miniz.c miniz_tinfl.c miniz_tdef.c; do
@@ -59,7 +60,8 @@ RELEASE_DIR="$ROOT/.build/d1b3a2a-smoke-release"
 mkdir -p "$RELEASE_DIR/objects"
 
 CFLAGS_REL=(-std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -isysroot "$SDKROOT")
-CXXFLAGS_REL=(-std=c++17 -Wall -Wextra -Werror -O2 -DNDEBUG -isysroot "$SDKROOT")
+CXXFLAGS_REL=(-std=c++17 -Wall -Wextra -Werror -O2 -DNDEBUG
+              -DMDICT_RESOURCE_TEST_OBSERVER -isysroot "$SDKROOT")
 
 for src in miniz.c miniz_tinfl.c miniz_tdef.c; do
   "$CC" "${CFLAGS_REL[@]}" -I"$MINIZ" -c "$MINIZ/$src" \

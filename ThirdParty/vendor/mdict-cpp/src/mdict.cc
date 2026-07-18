@@ -14,6 +14,9 @@
 #include <encode/base64.h>
 
 #include <algorithm>
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+#include <atomic>
+#endif
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -33,6 +36,58 @@
 const std::regex re_pattern("(\\s|:|\\.|,|-|_|'|\\(|\\)|#|<|>|!)");
 
 namespace mdict {
+
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+namespace {
+std::atomic<uint64_t> g_input_buffer_allocations{0};
+std::atomic<uint64_t> g_output_buffer_allocations{0};
+std::atomic<uint64_t> g_uncompress_calls{0};
+std::atomic<uint64_t> g_key_items_live{0};
+}  // namespace
+
+void resetResourceTestObserver() noexcept {
+  g_input_buffer_allocations.store(0, std::memory_order_relaxed);
+  g_output_buffer_allocations.store(0, std::memory_order_relaxed);
+  g_uncompress_calls.store(0, std::memory_order_relaxed);
+  g_key_items_live.store(0, std::memory_order_relaxed);
+}
+
+ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept {
+  return {g_input_buffer_allocations.load(std::memory_order_relaxed),
+          g_output_buffer_allocations.load(std::memory_order_relaxed),
+          g_uncompress_calls.load(std::memory_order_relaxed),
+          g_key_items_live.load(std::memory_order_relaxed)};
+}
+
+void observeInputBufferAllocation() noexcept {
+  g_input_buffer_allocations.fetch_add(1, std::memory_order_relaxed);
+}
+void observeOutputBufferAllocation() noexcept {
+  g_output_buffer_allocations.fetch_add(1, std::memory_order_relaxed);
+}
+void observeUncompressCall() noexcept {
+  g_uncompress_calls.fetch_add(1, std::memory_order_relaxed);
+}
+void observeKeyItemCreated() noexcept {
+  g_key_items_live.fetch_add(1, std::memory_order_relaxed);
+}
+void observeKeyItemDestroyed() noexcept {
+  g_key_items_live.fetch_sub(1, std::memory_order_relaxed);
+}
+#endif
+
+namespace {
+uint32_t validatedKeyBlockCompressionType(const uint8_t *prefix) {
+  const uint32_t raw = static_cast<uint32_t>(prefix[0]) |
+                       (static_cast<uint32_t>(prefix[1]) << 8) |
+                       (static_cast<uint32_t>(prefix[2]) << 16) |
+                       (static_cast<uint32_t>(prefix[3]) << 24);
+  if (raw != 0 && raw != 1 && raw != 2) {
+    throw ResourceException(ResourceErrorCode::invalidCompressionType);
+  }
+  return raw;
+}
+}  // namespace
 
 // constructor (production defaults)
 Mdict::Mdict(std::string fn) noexcept : filename(std::move(fn)) {
@@ -275,7 +330,7 @@ void Mdict::read_header() {
   }
 
   // ---------- encoding ------------
-  if (headinfo.find("Encoding") != headinfo.end() ||
+  if (headinfo.find("Encoding") == headinfo.end() ||
       headinfo["Encoding"] == "" || headinfo["Encoding"] == "UTF-8") {
     this->encoding = ENCODING_UTF8;
   } else if (headinfo["Encoding"] == "GBK" ||
@@ -284,7 +339,9 @@ void Mdict::read_header() {
   } else if (headinfo["Encoding"] == "Big5" || headinfo["Encoding"] == "BIG5") {
     this->encoding = ENCODING_BIG5;
   } else if (headinfo["Encoding"] == "utf16" ||
-             headinfo["Encoding"] == "utf-16") {
+             headinfo["Encoding"] == "utf-16" ||
+             headinfo["Encoding"] == "UTF16" ||
+             headinfo["Encoding"] == "UTF-16") {
     this->encoding = ENCODING_UTF16;
   } else {
     this->encoding = ENCODING_UTF8;
@@ -476,7 +533,6 @@ void Mdict::read_key_block_header() {
   else if (this->number_width == 4)
     key_block_size =
         be_bin_to_u32(key_block_size_buffer.data());
-        be_bin_to_u32(key_block_size_buffer.data());
   /// passed
 
   // D1b-3A-2A: validate total key block size
@@ -527,6 +583,9 @@ void Mdict::read_key_block_info() {
   }
 
   // RAII: full key-block compressed buffer
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+  observeInputBufferAllocation();
+#endif
   std::vector<uint8_t> key_block_compressed_buffer(
       checkedUInt64ToSizeT(this->key_block_size));
   readfile(this->key_block_compressed_start_offset,
@@ -649,9 +708,9 @@ byte *mdx_decrypt(byte *comp_block, const int comp_block_len) {
  * @param key_block_len key block length in bytes (must be > 0)
  * @param block_id block index (unused; retained for signature compatibility)
  */
-std::vector<key_list_item *> Mdict::split_key_block(unsigned char *key_block,
-                                                    uint64_t key_block_len,
-                                                    size_t block_id) {
+std::vector<std::unique_ptr<key_list_item>> Mdict::split_key_block_owned(
+    unsigned char *key_block, uint64_t key_block_len, size_t block_id,
+    uint64_t declared_entry_count, uint64_t remaining_global_entries) {
   (void)block_id;
 
   // --- validate input ---
@@ -661,7 +720,10 @@ std::vector<key_list_item *> Mdict::split_key_block(unsigned char *key_block,
     throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
 
   size_t buf_len = checkedUInt64ToSizeT(key_block_len);
-  std::vector<key_list_item *> inner_key_list;
+  std::vector<std::unique_ptr<key_list_item>> inner_key_list;
+  inner_key_list.reserve(checkedUInt64ToSizeT(
+      std::min(declared_entry_count, remaining_global_entries)));
+  uint64_t parsed_entry_count = 0;
 
   size_t key_start_idx = 0;
   size_t num_width = static_cast<size_t>(this->number_width);
@@ -785,8 +847,21 @@ std::vector<key_list_item *> Mdict::split_key_block(unsigned char *key_block,
           static_cast<unsigned long>(key_len_st));
     }
 
-    // --- create key_list_item (only after all validation passes) ---
-    inner_key_list.push_back(new key_list_item(record_start, key_text));
+    // Count actual parsed entries before allocation.  The global resource cap
+    // has priority over metadata mismatch so a malicious block cannot hide an
+    // over-limit actual count behind an inaccurate declaration.
+    uint64_t next_entry_count = checkedAddUInt64(parsed_entry_count, 1ULL);
+    if (next_entry_count > remaining_global_entries) {
+      throw ResourceException(ResourceErrorCode::entryCountTooLarge);
+    }
+    if (next_entry_count > declared_entry_count) {
+      throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
+    }
+
+    // Ownership remains local until the whole block is validated.
+    inner_key_list.push_back(
+        std::make_unique<key_list_item>(record_start, key_text));
+    parsed_entry_count = next_entry_count;
 
     // --- advance key_start_idx: must be strictly greater (infinite loop guard) ---
     size_t next_idx = key_end_idx + width;
@@ -794,6 +869,9 @@ std::vector<key_list_item *> Mdict::split_key_block(unsigned char *key_block,
       throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
     }
     key_start_idx = next_idx;
+  }
+  if (parsed_entry_count != declared_entry_count) {
+    throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
   }
   return inner_key_list;
 }
@@ -825,8 +903,18 @@ Mdict::decode_key_block_by_block_id(unsigned long block_id) {
       checkedAddUInt64(this->key_block_info_list[idx]->key_block_comp_accumulator,
                        this->key_block_compressed_start_offset);
 
-  // D1b-3A-2A: validate comp_size >= 8 (includes 8-byte prefix).
-  if (comp_size < 8) {
+  if (comp_size > limits_.maximumSingleKeyBlockCompressedBytes) {
+    throw ResourceException(ResourceErrorCode::singleKeyBlockCompressedTooLarge);
+  }
+  if (decomp_size > limits_.maximumSingleKeyBlockDecompressedBytes) {
+    throw ResourceException(ResourceErrorCode::singleKeyBlockDecompressedTooLarge);
+  }
+  if (decomp_size == 0) {
+    throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
+  }
+
+  // A block must contain an 8-byte prefix and a non-empty payload.
+  if (comp_size <= 8) {
     throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
   }
   uint64_t payloadLen = checkedSubtractUInt64(comp_size, 8ULL);
@@ -838,19 +926,21 @@ Mdict::decode_key_block_by_block_id(unsigned long block_id) {
   }
 
   // RAII: input buffer
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+  observeInputBufferAllocation();
+#endif
   std::vector<uint8_t> key_block_buffer(checkedUInt64ToSizeT(comp_size));
   readfile(start_ofset, comp_size, reinterpret_cast<char *>(key_block_buffer.data()));
 
   // Read 4 bytes comp type and 4 bytes Adler-32 from prefix
-  uint32_t comp_type_raw = key_block_buffer[0] | (static_cast<uint32_t>(key_block_buffer[1]) << 8) |
-                           (static_cast<uint32_t>(key_block_buffer[2]) << 16) |
-                           (static_cast<uint32_t>(key_block_buffer[3]) << 24);
+  uint32_t comp_type_raw =
+      validatedKeyBlockCompressionType(key_block_buffer.data());
   uint32_t chksum = be_bin_to_u32(key_block_buffer.data() + 4);
 
   // RAII: decompressed data always owned by vector (never a pointer into input)
   std::vector<uint8_t> kb_uncompressed;
 
-  if ((comp_type_raw & 255) == 0) {
+  if (comp_type_raw == 0) {
     // --- type 0: uncompressed ---
     // decomp_size must exactly equal payloadLen
     if (decomp_size != payloadLen) {
@@ -868,11 +958,11 @@ Mdict::decode_key_block_by_block_id(unsigned long block_id) {
     // Copy payload into owned vector
     kb_uncompressed.assign(key_block_buffer.begin() + 8, key_block_buffer.end());
 
-  } else if ((comp_type_raw & 255) == 1) {
+  } else if (comp_type_raw == 1) {
     // TODO lzo decompress
     throw ResourceException(ResourceErrorCode::invalidCompressionType);
 
-  } else if ((comp_type_raw & 255) == 2) {
+  } else if (comp_type_raw == 2) {
     // zlib compress
     // D1b-3A-2A: use bounded exact zlib decompression with payload length.
     kb_uncompressed =
@@ -891,11 +981,15 @@ Mdict::decode_key_block_by_block_id(unsigned long block_id) {
     throw ResourceException(ResourceErrorCode::invalidCompressionType);
   }
 
-  // key_block_buffer is still in scope here — kb_uncompressed owns the data.
-  // split key — no UAF possible since kb_uncompressed outlives split_key_block.
-  std::vector<key_list_item *> tlist =
-      split_key_block(kb_uncompressed.data(), decomp_size, idx);
-  return tlist;
+  auto owned = split_key_block_owned(
+      kb_uncompressed.data(), decomp_size, idx,
+      this->key_block_info_list[idx]->declared_entry_count,
+      limits_.maximumEntryCount);
+  std::vector<key_list_item *> result;
+  result.reserve(owned.size());
+  for (const auto &item : owned) result.push_back(item.get());
+  for (auto &item : owned) item.release();
+  return result;
 }
 
 /**
@@ -912,6 +1006,9 @@ Mdict::decode_key_block_by_block_id(unsigned long block_id) {
 int Mdict::decode_key_block(unsigned char *key_block_buffer,
                             unsigned long kb_buff_len) {
   size_t i = 0;
+  uint64_t parsed_entry_count = 0;
+  std::vector<std::unique_ptr<key_list_item>> parsed_items;
+  parsed_items.reserve(checkedUInt64ToSizeT(this->entries_num));
 
   for (size_t idx = 0; idx < this->key_block_info_list.size(); idx++) {
     uint64_t comp_size =
@@ -920,8 +1017,7 @@ int Mdict::decode_key_block(unsigned char *key_block_buffer,
         this->key_block_info_list[idx]->key_block_decomp_size;
     size_t start_ofset = i;
 
-    // D1b-3A-2A: validate comp_size >= 8 (includes 8-byte prefix).
-    if (comp_size < 8) {
+    if (comp_size <= 8) {
       throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
     }
     if (decomp_size == 0) {
@@ -945,9 +1041,8 @@ int Mdict::decode_key_block(unsigned char *key_block_buffer,
       throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
     }
 
-    // Read 4 bytes comp type (RAII via vector)
-    std::vector<uint8_t> comp_type_buf(4);
-    memcpy(comp_type_buf.data(), key_block_buffer + start_ofset, 4);
+    const uint32_t comp_type_raw = validatedKeyBlockCompressionType(
+        key_block_buffer + start_ofset);
     // 4 bytes adler checksum of decompressed key block
     uint32_t chksum =
         be_bin_to_u32(key_block_buffer + start_ofset + 4);
@@ -956,7 +1051,7 @@ int Mdict::decode_key_block(unsigned char *key_block_buffer,
     // into the caller's buffer.
     std::vector<uint8_t> kb_uncompressed;
 
-    if ((comp_type_buf[0] & 255) == 0) {
+    if (comp_type_raw == 0) {
       // --- type 0: uncompressed ---
       // payloadLen must be > 0 (guaranteed by comp_size >= 8 and subtraction)
       // decomp_size must exactly equal payloadLen
@@ -977,11 +1072,11 @@ int Mdict::decode_key_block(unsigned char *key_block_buffer,
           key_block_buffer + start_ofset + 8,
           key_block_buffer + start_ofset + 8 + payloadLenSt);
 
-    } else if ((comp_type_buf[0] & 255) == 1) {
+    } else if (comp_type_raw == 1) {
       // TODO lzo decompress
       throw ResourceException(ResourceErrorCode::invalidCompressionType);
 
-    } else if ((comp_type_buf[0] & 255) == 2) {
+    } else if (comp_type_raw == 2) {
       // zlib compress
       // D1b-3A-2A: use bounded exact zlib decompression with payload length.
       kb_uncompressed =
@@ -1000,10 +1095,20 @@ int Mdict::decode_key_block(unsigned char *key_block_buffer,
       throw ResourceException(ResourceErrorCode::invalidCompressionType);
     }
 
-    // split key — kb_uncompressed owns the data, no UAF possible
-    std::vector<key_list_item *> tlist =
-        split_key_block(kb_uncompressed.data(), decomp_size, idx);
-    key_list.insert(key_list.end(), tlist.begin(), tlist.end());
+    const uint64_t remaining = checkedSubtractUInt64(
+        limits_.maximumEntryCount, parsed_entry_count);
+    auto block_items = split_key_block_owned(
+        kb_uncompressed.data(), decomp_size, idx,
+        this->key_block_info_list[idx]->declared_entry_count, remaining);
+    parsed_entry_count = checkedAddUInt64(
+        parsed_entry_count, static_cast<uint64_t>(block_items.size()));
+    if (parsed_entry_count > limits_.maximumEntryCount) {
+      throw ResourceException(ResourceErrorCode::entryCountTooLarge);
+    }
+    if (parsed_entry_count > this->entries_num) {
+      throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
+    }
+    for (auto &item : block_items) parsed_items.push_back(std::move(item));
 
     // next round — checked cumulative addition
     i = checkedUInt64ToSizeT(blockEnd);
@@ -1013,9 +1118,16 @@ int Mdict::decode_key_block(unsigned char *key_block_buffer,
   }
 
   // D1b-3A-2A: runtime validation (was assert).
-  if (key_list.size() != this->entries_num) {
+  if (parsed_entry_count != this->entries_num) {
     throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
   }
+
+  std::vector<key_list_item *> committed;
+  committed.reserve(parsed_items.size());
+  for (const auto &item : parsed_items) committed.push_back(item.get());
+  for (auto &item : parsed_items) item.release();
+  for (auto *item : key_list) delete item;
+  key_list.swap(committed);
   /// passed
 
   this->record_block_info_offset = checkedAddUInt64(
@@ -1382,8 +1494,6 @@ int Mdict::decode_key_block_info(char *key_block_info_buffer,
                                  uint64_t kb_info_buff_len,
                                  uint64_t key_block_num,
                                  uint64_t entries_num) {
-  (void)key_block_num; (void)entries_num;
-
   // D1b-3A-2A-R1: validate buffer and length BEFORE any memory access
   if (key_block_info_buffer == nullptr) {
     throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
@@ -1391,6 +1501,9 @@ int Mdict::decode_key_block_info(char *key_block_info_buffer,
   if (kb_info_buff_len < 8) {
     throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
   }
+
+  std::vector<std::unique_ptr<key_block_info>> parsed_block_info;
+  parsed_block_info.reserve(checkedUInt64ToSizeT(key_block_num));
 
   byte *kb_info_decrypted = reinterpret_cast<byte *>(key_block_info_buffer);
 
@@ -1488,6 +1601,12 @@ int Mdict::decode_key_block_info(char *key_block_info_buffer,
         current_entries = be_bin_to_u32(bin_pointer);
       }
       num_entries_counter = checkedAddUInt64(num_entries_counter, current_entries);
+      if (num_entries_counter > limits_.maximumEntryCount) {
+        throw ResourceException(ResourceErrorCode::entryCountTooLarge);
+      }
+      if (num_entries_counter > entries_num) {
+        throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
+      }
 
       // move offset
       data_offset += static_cast<size_t>(this->number_width) * sizeof(uint8_t);
@@ -1617,7 +1736,7 @@ int Mdict::decode_key_block_info(char *key_block_info_buffer,
       data_offset += static_cast<size_t>(this->number_width);
 
       // D1b-3A-2A: per-block size validation
-      if (key_block_compress_size == 0 || key_block_decompress_size == 0) {
+      if (key_block_compress_size <= 8 || key_block_decompress_size == 0) {
         throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
       }
       if (key_block_compress_size > limits_.maximumSingleKeyBlockCompressedBytes) {
@@ -1627,19 +1746,25 @@ int Mdict::decode_key_block_info(char *key_block_info_buffer,
         throw ResourceException(ResourceErrorCode::singleKeyBlockDecompressedTooLarge);
       }
 
-      key_block_info *kbinfo = new key_block_info(
+      const uint64_t next_comp_acc =
+          checkedAddUInt64(comp_acc, key_block_compress_size);
+      const uint64_t next_decomp_acc =
+          checkedAddUInt64(decomp_acc, key_block_decompress_size);
+      if (next_comp_acc > limits_.maximumTotalKeyBlockCompressedBytes) {
+        throw ResourceException(ResourceErrorCode::totalKeyBlockCompressedTooLarge);
+      }
+      if (next_decomp_acc > limits_.maximumTotalKeyBlockDecompressedBytes) {
+        throw ResourceException(ResourceErrorCode::totalKeyBlockDecompressedTooLarge);
+      }
+
+      parsed_block_info.push_back(std::make_unique<key_block_info>(
           first_key, last_key, previous_start_offset, key_block_compress_size,
-          key_block_decompress_size, comp_acc, decomp_acc);
+          key_block_decompress_size, comp_acc, decomp_acc, current_entries));
 
-      // adjust offset
-      previous_start_offset = checkedAddUInt64(previous_start_offset, key_block_compress_size);
-      key_block_info_list.push_back(kbinfo);
-
-      // key block counter
+      previous_start_offset = next_comp_acc;
       counter = checkedAddUInt64(counter, 1ULL);
-      // D1b-3A-2A: fix I10 — checked cumulative addition.
-      comp_acc = checkedAddUInt64(comp_acc, key_block_compress_size);
-      decomp_acc = checkedAddUInt64(decomp_acc, key_block_decompress_size);
+      comp_acc = next_comp_acc;
+      decomp_acc = next_decomp_acc;
     }
 
     // D1b-3A-2A: validate block count consistency.
@@ -1662,6 +1787,17 @@ int Mdict::decode_key_block_info(char *key_block_info_buffer,
     if (num_entries_counter != this->entries_num) {
       throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
     }
+
+    if (data_offset != decompress_buff.size()) {
+      throw ResourceException(ResourceErrorCode::malformedKeyBlockMetadata);
+    }
+
+    std::vector<key_block_info *> committed;
+    committed.reserve(parsed_block_info.size());
+    for (const auto &item : parsed_block_info) committed.push_back(item.get());
+    for (auto *item : key_block_info_list) delete item;
+    key_block_info_list.swap(committed);
+    for (auto &item : parsed_block_info) item.release();
 
   } else {
     // doesn't compression
@@ -1721,7 +1857,8 @@ void Mdict::init() {
     throw ResourceException(ResourceErrorCode::truncatedFile);
   }
 
-  // D1b-3A-2A: obtain actual file size from the same stream (TOCTOU-safe).
+  // Obtain the size from the opened stream, avoiding a separate stat-size
+  // lookup.  This does not claim complete path/open TOCTOU hardening.
   this->instream.seekg(0, std::ios::end);
   std::streamoff endPos = this->instream.tellg();
   if (endPos < 0) {
@@ -1756,7 +1893,8 @@ void Mdict::initMetadataOnly() {
     throw ResourceException(ResourceErrorCode::truncatedFile);
   }
 
-  // D1b-3A-2A: obtain actual file size from the same stream (TOCTOU-safe).
+  // Obtain the size from the opened stream, avoiding a separate stat-size
+  // lookup.  This does not claim complete path/open TOCTOU hardening.
   this->instream.seekg(0, std::ios::end);
   std::streamoff endPos = this->instream.tellg();
   if (endPos < 0) {

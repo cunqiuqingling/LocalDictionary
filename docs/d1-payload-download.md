@@ -43,20 +43,20 @@ signed name, the operation directory is `fsync`ed, the partial directory is atom
 renamed to its verified name, and the staging root is `fsync`ed. Cancellation and
 failure close the descriptor and remove only the current partial operation. Existing
 verified directories are never removed. A crash may leave a clearly named partial
-directory; startup recovery is intentionally deferred to D1b-3.
+directory; startup recovery is intentionally deferred to D1b-3B.
 
 The injected root and each newly created operation directory are checked with
 `lstat`, symlink resolution, and direct-parent containment before the payload file is
 opened with `O_EXCL | O_NOFOLLOW`. Because this scoped implementation does not yet
 use directory file descriptors with `openat`/`renameat`, an attacker who can mutate
 the private `0700` staging root concurrently still represents a residual path-based
-TOCTOU risk. D1b-3 must preserve or strengthen this boundary before production host
+TOCTOU risk. D1b-3B must preserve or strengthen this boundary before production host
 configuration is enabled.
 
 The coordinator permits one operation at a time and emits progress containing only
 an operation UUID, byte counts, and a phase. It never reports URLs, paths, Manifest
 contents, or hashes. The verified staging result means only that transport limits,
 exact size, and SHA-256 passed. It does not write the Catalog, build an index, enable
-or query a dictionary, accept a license, or install the file. D1b-3 owns installation
-and lifecycle integration. C++ MDict parser resource limits remain a P1 prerequisite
+or query a dictionary, accept a license, or install the file. D1b-3B owns installation
+and lifecycle integration. C++ Record resource limits remain a D1b-3A-2B prerequisite
 before any real resource is opened.

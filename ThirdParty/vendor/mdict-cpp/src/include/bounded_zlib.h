@@ -32,6 +32,7 @@
 
 #include "checked_arithmetic.h"
 #include "miniz/miniz.h"
+#include "resource_test_observer.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -74,6 +75,9 @@ inline std::vector<uint8_t> boundedExactZlibDecompress(
   // --- allocate output AFTER all checks pass ---
   std::vector<uint8_t> buffer;
   try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeOutputBufferAllocation();
+#endif
     buffer.resize(expectedSize);
   } catch (const std::bad_alloc &) {
     throw ResourceException(ResourceErrorCode::allocationFailed);
@@ -82,6 +86,9 @@ inline std::vector<uint8_t> boundedExactZlibDecompress(
   uLongf destLen = static_cast<uLongf>(expectedSize);
 
   // --- single uncompress call; no retry ---
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+  observeUncompressCall();
+#endif
   int err = uncompress(
       buffer.data(), &destLen,
       reinterpret_cast<const Bytef *>(source),

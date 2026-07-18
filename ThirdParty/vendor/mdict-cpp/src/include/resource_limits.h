@@ -115,7 +115,7 @@ struct ResourceLimits {
   // --- Single key (enforced in D1b-3A-2A-R1 via split_key_block) ---
   uint64_t maximumSingleKeyBytes = 0;
 
-  // --- Record blocks (model only; not enforced in D1b-3A-2A) ---
+  // --- Record blocks (model only; enforcement is scheduled for D1b-3A-2B) ---
   uint64_t maximumRecordBlockInfoBytes = 0;
   uint64_t maximumRecordBlockCount = 0;
   uint64_t maximumSingleRecordBlockCompressedBytes = 0;
@@ -123,7 +123,7 @@ struct ResourceLimits {
   uint64_t maximumTotalRecordBlockCompressedBytes = 0;
   uint64_t maximumTotalRecordBlockDecompressedBytes = 0;
 
-  // --- Record read (model only; not enforced in D1b-3A-2A) ---
+  // --- Record read (model only; enforcement is scheduled for D1b-3A-2B) ---
   uint64_t maximumRecordRangeBytes = 0;
   uint64_t maximumReturnedRecordBytes = 0;
 
