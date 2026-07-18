@@ -11,7 +11,7 @@ ac084e23471374c8864c7678438ab4b37c1393821cd87f08e27d511783c1c0ea  vendor/mdict-c
 f812e8ef1c91cbd7deef004ead27948273e2d1c6910e0f9940d36e859d20dec7  vendor/mdict-cpp/src/encode/char_decoder.h
 f80b8918fa342ef88ba374a9f07402dda9611c7c59727e11a4e95ba2d453be66  vendor/mdict-cpp/src/include/adler32.h
 4cbaef912ce18f0ca9894e09951afc5df8196198a355e53ca7adc31bdf9f242e  vendor/mdict-cpp/src/include/binutils.h
-c800c441351aaf5ac5eddc86697423d21a53b5fd3f83f56fb3eecdf13d417ad6  vendor/mdict-cpp/src/include/mdict.h
+3615de9cf920384e4625f9a6a0e0d134bd67ca8f19e52e003f2b4f39432308c8  vendor/mdict-cpp/src/include/mdict.h
 52b51b1fb829df70cb40566bbfca39154b6a8c0b77ab0273d9b4a304c26fb39b  vendor/mdict-cpp/src/include/mdict_extern.h
 8113a1700b03cf345a617de0cca7b8e4448c390ab5211c5926f2df2bbb91391b  vendor/mdict-cpp/src/include/mdict_simple_key.h
 3c7aa46e637078127a1a0e35b1aab640e903759d5366e31c6534dbf173ad077a  vendor/mdict-cpp/src/include/xmlutils.h

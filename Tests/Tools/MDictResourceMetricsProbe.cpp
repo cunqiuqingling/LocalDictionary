@@ -181,12 +181,43 @@ static DictMetrics collectMetrics(const char *anonymousID, const char *path) {
     return m;
   }
 
-  // 2. init metadata-only
+  // 2. pre-check: file must be large enough for a minimal MDX v2 header
+  if (m.actualFileBytes < 12) {
+    m.error = ProbeError::malformedMetadata;
+    return m;
+  }
+
+  // Read the first 4 bytes to get the declared header size and verify
+  // it fits within the actual file (prevents offset-out-of-bounds reads
+  // from being misclassified as unsupportedVersion).
+  {
+    std::ifstream precheck(path, std::ios::binary);
+    if (!precheck) { m.error = ProbeError::fileUnavailable; return m; }
+    unsigned char sizebuf[4];
+    precheck.read(reinterpret_cast<char *>(sizebuf), 4);
+    if (!precheck || precheck.gcount() != 4) {
+      m.error = ProbeError::malformedMetadata;
+      return m;
+    }
+    uint32_t declared = (uint32_t(sizebuf[0]) << 24) |
+                        (uint32_t(sizebuf[1]) << 16) |
+                        (uint32_t(sizebuf[2]) << 8) |
+                        uint32_t(sizebuf[3]);
+    // header_bytes_size + 4-byte size field + 4-byte adler32 + minimum
+    // key-block header (44 bytes for v2) must fit in the file.
+    if (declared > m.actualFileBytes ||
+        declared + 8ULL > m.actualFileBytes) {
+      m.error = ProbeError::offsetOutOfBounds;
+      return m;
+    }
+  }
+
+  // 3. init metadata-only
   mdict::Mdict dict(path);
   try {
     dict.initMetadataOnly();
   } catch (const std::exception &) {
-    // Try to classify the error
+    // Classify remaining failures.
     if (dict.engineVersion() < 2.0f) {
       m.error = ProbeError::unsupportedVersion;
       return m;

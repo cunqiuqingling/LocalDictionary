@@ -51,6 +51,12 @@ the build; the reviewed vendored files already contain their result.
 3. `vendor/mdict-cpp/patches/0003-libtomcrypt-ripemd128-adapter.patch`:
    replaces the old RIPEMD sample call with the project adapter backed by
    LibTomCrypt.
+4. D1b-3A-1 metrics probe (manually applied; no standalone patch file):
+   adds read-only `const` getter methods to `src/include/mdict.h` so that a
+   test-only command-line metrics tool can collect anonymous resource
+   statistics.  The getters never run inside the App target.  No object data
+   members, object layout, virtual functions, parsing logic, allocation logic
+   or error handling are changed.
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
@@ -58,7 +64,7 @@ vendored SHA-256 values:
 | Upstream path | Upstream SHA-256 | Vendored SHA-256 |
 |---|---|---|
 | `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `fdf000c601af92f0227df80bbf9b3b240e661e4d0b70bce87835036ffe9d4709` |
-| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `c800c441351aaf5ac5eddc86697423d21a53b5fd3f83f56fb3eecdf13d417ad6` |
+| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `3615de9cf920384e4625f9a6a0e0d134bd67ca8f19e52e003f2b4f39432308c8` |
 | `src/encode/base64.h` | `6c0264e1941fcf458b5d7200751cb561025c0e2f616c136e0e07bfdc81f5b4b5` | `19113b27ba310db9fd8cf22988de90f301825e2cc317690614019651a505be51` |
 
 All other mdict-cpp paths listed above are byte-identical to the fixed commit;
