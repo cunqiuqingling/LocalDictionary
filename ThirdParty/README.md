@@ -57,15 +57,40 @@ the build; the reviewed vendored files already contain their result.
    statistics.  The getters never run inside the App target.  No object data
    members, object layout, virtual functions, parsing logic, allocation logic
    or error handling are changed.
+5. D1b-3A-2A ResourceLimits and bounded key parsing (manually applied;
+   no standalone patch file): adds ResourceLimits model (19 uint64_t + 1
+   uint32_t fields) with production defaults and cross-relation validation;
+   closed ResourceException error codes; checked-arithmetic helpers for
+   uint64_t ↔ size_t/streamoff/streamsize conversions; bounded exact zlib
+   decompression (no sourceLen<<3, no <<=2 retry); pre-allocation bounds
+   validation for Header and Key-block metadata; per-key-block compressed
+   and decompressed size enforcement; runtime checksum and size-mismatch
+   rejection replacing Debug-only asserts; integer truncation fixes
+   (uint64_t→int, uint64_t→uint32_t, unchecked cumulative addition);
+   key_block_info member type widened from unsigned long to uint64_t;
+   offset members widened from uint32_t to uint64_t.
+   This patch changes Mdict object layout (limits_ and actual_file_size_
+   members added).  All in-repository callers are rebuilt together;
+   no external binary ABI is promised.  Existing source callers continue
+   through default constructors (which use production defaults).
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
 
 | Upstream path | Upstream SHA-256 | Vendored SHA-256 |
 |---|---|---|
-| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `fdf000c601af92f0227df80bbf9b3b240e661e4d0b70bce87835036ffe9d4709` |
-| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `3615de9cf920384e4625f9a6a0e0d134bd67ca8f19e52e003f2b4f39432308c8` |
+| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `c7d335aa0521022bb07fcc80596652b420a95c3ecbd184f0a51169352bd2a926` |
+| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `5e1ac9bf08e2263b03fc53560ad21795c94cab809a1dc5846f05290d810576f3` |
+| `src/include/zlib_wrapper.h` | `29d187709287366541e387cdea35cbe39c8eea6ad32cd92746276ca0c05c0b28` | `0e1e75b8ee84014cd731b033aa755991cc3d055db6f39595bcb91e18d0c5a356` |
 | `src/encode/base64.h` | `6c0264e1941fcf458b5d7200751cb561025c0e2f616c136e0e07bfdc81f5b4b5` | `19113b27ba310db9fd8cf22988de90f301825e2cc317690614019651a505be51` |
+
+New files added by D1b-3A-2A:
+
+| Path | Vendored SHA-256 |
+|---|---|
+| `src/include/resource_limits.h` | `9929982fc97e115292ca828cfe08e78112e21fb6f52d0f68757c317fad6ba0a4` |
+| `src/include/checked_arithmetic.h` | `c6b8b19e05b522209d26ce40194ac1df4d82da3ea578eb5e420bfca18a7b7881` |
+| `src/include/bounded_zlib.h` | `436955a9ac31c958627be70c55d8122dc5cbbaaf7180a20936e42b3e696edc78` |
 
 All other mdict-cpp paths listed above are byte-identical to the fixed commit;
 their hashes are in `SHA256SUMS`. Excluded content includes turbobase64,

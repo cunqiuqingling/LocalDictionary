@@ -18,6 +18,11 @@
 
 #include "mdict_extern.h"
 
+// D1b-3A-2A: ResourceLimits, checked arithmetic and bounded zlib.
+#include "resource_limits.h"
+#include "checked_arithmetic.h"
+#include "bounded_zlib.h"
+
 /**
  * mdx struct analysis
  * mdx file:
@@ -139,6 +144,7 @@ namespace mdict {
 
 /**
  * key block info class definition
+ * D1b-3A-2A: size/offset fields widened from unsigned long to uint64_t.
  */
 class key_block_info {
  public:
@@ -146,14 +152,14 @@ class key_block_info {
   std::string first_key;
   // last key of this key block
   std::string last_key;
-  // key block start offset
-  unsigned long key_block_start_offset;
-  // key block compressed size
-  unsigned long key_block_comp_size;
-  unsigned long key_block_comp_accumulator;
+  // key block start offset (cumulative within key-block section)
+  uint64_t key_block_start_offset;
+  // key block compressed size (on-disk, includes 8-byte prefix)
+  uint64_t key_block_comp_size;
+  uint64_t key_block_comp_accumulator;
   // key block decompressed size
-  unsigned long key_block_decomp_size;
-  unsigned long key_block_decomp_accumulator;
+  uint64_t key_block_decomp_size;
+  uint64_t key_block_decomp_accumulator;
 
   /**
    * constructor
@@ -164,9 +170,9 @@ class key_block_info {
    * @param kb_decomp_size key block decompressed size
    */
   key_block_info(std::string first_key, std::string last_key,
-                 unsigned long kb_start_ofset, unsigned long kb_comp_size,
-                 unsigned long kb_decomp_size, unsigned long kb_comp_accu,
-                 unsigned long kb_decomp_accu) {
+                 uint64_t kb_start_ofset, uint64_t kb_comp_size,
+                 uint64_t kb_decomp_size, uint64_t kb_comp_accu,
+                 uint64_t kb_decomp_accu) {
     this->key_block_comp_size = kb_comp_size;
     this->key_block_decomp_size = kb_decomp_size;
     this->key_block_start_offset = kb_start_ofset;
@@ -237,18 +243,35 @@ class record {
 class Mdict {
  public:
   /**
-   * constructor
+   * constructor (production defaults)
    * @param fn dictionary file name
    */
   Mdict(std::string fn) noexcept;
 
   /**
-   * constructor with additional files
+   * constructor with explicit resource limits
+   * @param fn dictionary file name
+   * @param limits resource limits (must pass validate())
+   */
+  Mdict(std::string fn, ResourceLimits limits) noexcept;
+
+  /**
+   * constructor with additional files (production defaults)
    * @param fn dictionary file name
    * @param aff_fn affix file name
    * @param dic_fn dictionary file name
    */
   Mdict(std::string fn, std::string aff_fn, std::string dic_fn) noexcept;
+
+  /**
+   * constructor with additional files and explicit resource limits
+   * @param fn dictionary file name
+   * @param aff_fn affix file name
+   * @param dic_fn dictionary file name
+   * @param limits resource limits (must pass validate())
+   */
+  Mdict(std::string fn, std::string aff_fn, std::string dic_fn,
+        ResourceLimits limits) noexcept;
 
   /**
    * deconstructor
@@ -332,6 +355,10 @@ class Mdict {
   uint64_t recordBlockInfoSize() const { return record_block_info_size; }
   uint64_t recordBlockHeaderSizeValue() const { return record_block_header_size; }
   uint64_t recordBlockCompressedSize() const { return record_block_size; }
+
+  // D1b-3A-2A: test-only accessors for limits and file size.
+  const ResourceLimits &resourceLimits() const { return limits_; }
+  uint64_t actualFileBytes() const { return actual_file_size_; }
   int encryptionMode() const { return encrypt; }
   const std::vector<key_block_info *> &keyBlockInfoList() const {
     return key_block_info_list;
@@ -415,8 +442,8 @@ class Mdict {
    * @return 0 on success, non-zero on failure
    */
   int decode_key_block_info(char *key_block_info_buffer,
-                            unsigned long kb_info_buff_len, int key_block_num,
-                            int entries_num);
+                            uint64_t kb_info_buff_len, uint64_t key_block_num,
+                            uint64_t entries_num);
 
   /**
    * Decode a key block from a buffer
@@ -480,6 +507,12 @@ class Mdict {
   // file input stream
   std::ifstream instream;
 
+  // D1b-3A-2A: immutable resource limits for this parse session.
+  ResourceLimits limits_ = ResourceLimits::productionDefaults();
+
+  // D1b-3A-2A: actual file size obtained from the opened stream (not stat).
+  uint64_t actual_file_size_ = 0;
+
   /********************************
    *     header section           *
    ********************************/
@@ -504,14 +537,17 @@ class Mdict {
 
   // key block start offset
   // key_block_start_offset = header_bytes_size + 8;
-  uint32_t key_block_start_offset = 0;
+  // D1b-3A-2A: widened from uint32_t to uint64_t.
+  uint64_t key_block_start_offset = 0;
 
   // key_block_info_start_offset = key_block_start_offset + info_size (>=2.0:
   // 40+4, <2.0: 16)
-  uint32_t key_block_info_start_offset = 0;
+  // D1b-3A-2A: widened from uint32_t to uint64_t.
+  uint64_t key_block_info_start_offset = 0;
   // key block compressed start offset = this->key_block_info_start_offset +
   // key_block_info_size
-  uint32_t key_block_compressed_start_offset = 0;
+  // D1b-3A-2A: widened from uint32_t to uint64_t.
+  uint64_t key_block_compressed_start_offset = 0;
 
   // ---------------------
   //     block key info part

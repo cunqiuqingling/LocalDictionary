@@ -4,6 +4,10 @@
  *
  * This code is licensed under the BSD 3-Clause License.
  * See the LICENSE file for details.
+ *
+ * NOTE (D1b-3A-2A): These zlib_mem_uncompress() overloads are now used ONLY
+ * by Record-block decompression paths.  Key-block paths use
+ * boundedExactZlibDecompress() from bounded_zlib.h instead.
  */
 
 #pragma once
@@ -15,6 +19,8 @@
  * Decompresses zlib-compressed data into a vector
  * This function automatically handles buffer sizing and retries with larger
  * buffers if needed
+ *
+ * NOTE: Used only by Record-block paths after D1b-3A-2A.
  *
  * @param source Pointer to the compressed data
  * @param sourceLen Length of the compressed data in bytes
