@@ -77,15 +77,31 @@ If the decryption path fails the tool reports `encryptedMetadataUnsupported`.
 - No SHA checksums, no inode numbers, no user-identifying data.
 - Output file permissions are set to `0600`.
 
+## Build modes
+
+The probe script supports two build modes:
+
+| Mode | Flag | Compiler flags | Sanitizers | Use case |
+|------|------|---------------|------------|----------|
+| **Debug** | (default) | `-O1 -g` | asan + ubsan | Synthetic smoke tests only |
+| **Release** | `--release` | `-O2 -DNDEBUG` | None | Real dictionary measurement |
+
+- **Synthetic smoke** may use Debug mode.
+- **Real dictionary measurement on trusted local dictionaries MUST use
+  `--release`.**
+- **Encrypted=2 dictionaries MUST be measured with `--release`**
+  (Debug assertions will abort on the encrypted key-block info path).
+- The script refuses `--dictionary` without `--release`.
+
 ## Manual run procedure (for the project Owner only)
 
 1. Quit Claude Code.
 2. Open a plain Terminal window.
 3. `cd /path/to/LocalDictionary-d1b3a-deepseek`
-4. Build: `Tests/run-mdict-resource-metrics-probe-smoke.sh`
-5. Run:
+4. Build check: `Tests/run-mdict-resource-metrics-probe-smoke.sh`
+5. Measure (note the **`--release`** flag):
    ```
-   Tests/run-mdict-resource-metrics-probe.sh \
+   Tests/run-mdict-resource-metrics-probe.sh --release \
      --dictionary D1 "/private/path/to/dict1.mdx" \
      --dictionary D2 "/private/path/to/dict2.mdx" \
      --output /tmp/localdictionary-mdict-metrics.json
@@ -93,6 +109,18 @@ If the decryption path fails the tool reports `encryptedMetadataUnsupported`.
 6. Verify `ls -la /tmp/localdictionary-mdict-metrics.json` shows `-rw-------`.
 7. Inspect the JSON — confirm no paths, filenames, or content.
 8. Share only the numeric JSON; never share the `.mdx` files.
+
+## Important caveats
+
+- The script arguments (including dictionary paths) appear in the process
+  `argv` and may be visible to other processes running under the same user
+  on macOS.  This is inherent to all command-line tools.
+- The JSON output does **not** contain any paths, basenames, key text,
+  record content, header XML, or user-identifying data.
+- This tool is intended for the Owner's **long-trusted local dictionaries**
+  only.  Do not run it on untrusted or internet-downloaded MDX files.
+- The probe does **not** add resource limits or bounds checking.  It has
+  the same attack surface as `initMetadataOnly()`.
 
 ## Not a security fix
 

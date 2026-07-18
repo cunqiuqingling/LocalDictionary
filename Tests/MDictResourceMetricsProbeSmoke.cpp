@@ -365,6 +365,44 @@ static void test_encrypted2_Unsupported(const std::string &workDir, const std::s
   std::fprintf(stderr, "  encrypted=2 closed failure: PASS\n");
 }
 
+static void test_releaseBinary(const std::string &workDir, const std::string & /*probeBin*/) {
+  // Use the release-built probe binary if available
+  const char *relBin = std::getenv("MDICT_METRICS_PROBE_RELEASE_BIN");
+  if (!relBin || relBin[0] == '\0') {
+    std::fprintf(stderr, "  release binary: SKIP (env not set)\n");
+    return;
+  }
+  std::string releaseBin(relBin);
+  // Sanity: binary exists
+  struct stat st;
+  require(stat(releaseBin.c_str(), &st) == 0, "release binary not found");
+
+  // Run release probe against a valid synthetic MDX
+  std::string mdxPath = buildMinimalMDX(workDir);
+  std::string outPath = workDir + "/release_out.json";
+  std::string cmd = releaseBin + " --dictionary REL \"" + mdxPath + "\" --output \"" + outPath + "\"";
+  require(std::system(cmd.c_str()) == 0, "release probe failed");
+
+  std::string json = readFile(outPath.c_str());
+  require(json.find(mdxPath) == std::string::npos, "release output leaked path");
+  require(json.find("synthetic") == std::string::npos, "release output leaked basename");
+  require(json.find("record for") == std::string::npos, "release output leaked record");
+  require(json.find("GeneratedByEngineVersion") == std::string::npos, "release leaked XML");
+  require(json.find("\"REL\"") != std::string::npos, "release missing anonymous ID");
+
+  // Verify release binary has no sanitizer (asan) symbols
+  std::string nmCmd = "nm \"" + releaseBin + "\" 2>/dev/null";
+  FILE *fp = popen(nmCmd.c_str(), "r");
+  require(fp != nullptr, "nm release failed");
+  std::string syms; char buf[4096];
+  while (fgets(buf, sizeof(buf), fp)) syms += buf;
+  pclose(fp);
+  require(syms.find("__asan_") == std::string::npos, "release binary has asan symbols");
+  require(syms.find("__ubsan_") == std::string::npos, "release binary has ubsan symbols");
+
+  std::fprintf(stderr, "  release binary: PASS\n");
+}
+
 static void test_noSQLiteNoFormatter(const std::string & /*workDir*/, const std::string &probeBin) {
   std::string cmd = "nm \"" + probeBin + "\" 2>/dev/null";
   FILE *fp = popen(cmd.c_str(), "r");
@@ -405,6 +443,7 @@ int main() {
   test_outputParentMissing(workDir, probeBin);
   test_outputPermissions(workDir, probeBin);
   test_encrypted2_Unsupported(workDir, probeBin);
+  test_releaseBinary(workDir, probeBin);
   test_noSQLiteNoFormatter(workDir, probeBin);
 
   std::system(("rm -rf \"" + workDir + "\"").c_str());
