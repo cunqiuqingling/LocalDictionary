@@ -1,0 +1,155 @@
+name: Public macOS CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  public-smoke-and-debug:
+    name: Public smoke and Debug build
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Probe and select Xcode 26
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun --show-sdk-version
+          swift --version
+          xcodebuild -showsdks
+          ls -1 /Applications | grep -E '^Xcode.*\.app$' || true
+
+          selected_developer_dir="$(xcode-select -p)"
+          if [[ "$(DEVELOPER_DIR="$selected_developer_dir" xcodebuild -version | /usr/bin/head -n 1)" != "Xcode 26"* ]]; then
+            candidates=(/Applications/Xcode_26*.app(N))
+            if (( ${#candidates} == 0 )); then
+              print -u2 "No compatible Xcode 26.x installation is available."
+              exit 1
+            fi
+            selected_developer_dir="${candidates[-1]}/Contents/Developer"
+          fi
+
+          export DEVELOPER_DIR="$selected_developer_dir"
+          print "DEVELOPER_DIR=$DEVELOPER_DIR"
+          print "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --show-sdk-version
+          swift --version
+          [[ "$(uname -m)" == "arm64" ]]
+          [[ "$(xcodebuild -version | /usr/bin/head -n 1)" == "Xcode 26"* ]]
+
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Run public smoke suite
+        run: Tests/run-public-ci-smoke.sh
+
+      - name: Build Debug
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          build_root="$RUNNER_TEMP/LocalDictionary-Debug"
+          isolated_home="$RUNNER_TEMP/LocalDictionary-Debug-Home"
+          /bin/mkdir -p "$isolated_home"
+          HOME="$isolated_home" CFFIXED_USER_HOME="$isolated_home" \
+            xcodebuild \
+              -project App/LocalDictionary.xcodeproj \
+              -scheme LocalDictionary \
+              -configuration Debug \
+              -derivedDataPath "$build_root" \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+
+  release-build-and-audit:
+    name: Release build and Bundle audit (exploratory)
+    runs-on: macos-26
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - name: Probe and select Xcode 26
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun --show-sdk-version
+          swift --version
+          xcodebuild -showsdks
+          ls -1 /Applications | grep -E '^Xcode.*\.app$' || true
+
+          selected_developer_dir="$(xcode-select -p)"
+          if [[ "$(DEVELOPER_DIR="$selected_developer_dir" xcodebuild -version | /usr/bin/head -n 1)" != "Xcode 26"* ]]; then
+            candidates=(/Applications/Xcode_26*.app(N))
+            if (( ${#candidates} == 0 )); then
+              print -u2 "No compatible Xcode 26.x installation is available."
+              exit 1
+            fi
+            selected_developer_dir="${candidates[-1]}/Contents/Developer"
+          fi
+
+          export DEVELOPER_DIR="$selected_developer_dir"
+          print "DEVELOPER_DIR=$DEVELOPER_DIR"
+          print "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --show-sdk-version
+          swift --version
+          [[ "$(uname -m)" == "arm64" ]]
+          [[ "$(xcodebuild -version | /usr/bin/head -n 1)" == "Xcode 26"* ]]
+
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build Release
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          build_root="$RUNNER_TEMP/LocalDictionary-Release"
+          isolated_home="$RUNNER_TEMP/LocalDictionary-Release-Home"
+          /bin/mkdir -p "$isolated_home"
+          HOME="$isolated_home" CFFIXED_USER_HOME="$isolated_home" \
+            xcodebuild \
+              -project App/LocalDictionary.xcodeproj \
+              -scheme LocalDictionary \
+              -configuration Release \
+              -derivedDataPath "$build_root" \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+
+      - name: Verify Release architecture and minimum OS
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          executable="$RUNNER_TEMP/LocalDictionary-Release/Build/Products/Release/LocalDictionary.app/Contents/MacOS/LocalDictionary"
+          [[ -x "$executable" ]]
+          file "$executable"
+          lipo -info "$executable"
+          [[ "$(lipo -archs "$executable")" == "arm64" ]]
+          build_info="$(xcrun vtool -show-build "$executable")"
+          print -r -- "$build_info"
+          print -r -- "$build_info" | /usr/bin/grep -Eq 'minos[[:space:]]+15\.0'
+
+      - name: Audit Release App Bundle
+        shell: zsh {0}
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/LocalDictionary-Release/Build/Products/Release/LocalDictionary.app"
+          [[ -d "$app" ]]
+          scripts/audit-app-bundle.sh "$app"

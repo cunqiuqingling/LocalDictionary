@@ -28,6 +28,8 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-open-source-compliance-smoke.sh` performs an offline source-release check. It verifies the exact official GPLv3 root license text, GPL-3.0-only scope statements, third-party notices and fixed provenance, vendored licenses and hashes, privacy/security documentation, D1 policy placeholders, absence of private paths and obvious secret values in public documentation, and consistency between clean-build, AI-network, and private `local.json` statements. It does not access the network, user Application Support, Keychain, dictionaries, or build products.
 
+`run-public-ci-smoke.sh` is the public GitHub Actions entry point. It runs only synthetic or source-compliance tests under an isolated HOME, disables the real Keychain smoke, uses MockURLProtocol for AI transport, and includes `run-public-obsidian-note-store-smoke.sh` for temporary Markdown files. It intentionally excludes `run-multidictionary-smoke.sh` and the private Oxford stage in `run-obsidian-smoke.sh`, because those require the ignored developer `local.json`, commercial dictionaries, and private indexes.
+
 The repository is currently source-only and targets macOS 15.0+ on arm64. A clean clone builds from tracked `ThirdParty/vendor` files without a submodule, a separate mdict-cpp clone, Homebrew dependencies, or private `local.json`. The only runtime permission required for selection lookup is Accessibility; the App does not request screen recording, microphone, or system audio recording permission.
 
 ## C1 manual acceptance checklist

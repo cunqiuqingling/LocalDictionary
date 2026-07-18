@@ -63,17 +63,35 @@ for forbidden in turbobase64 minilzo hunspell googletest benchmark examples test
   }
 done
 
-if rg -q 'ThirdParty/mdict-cpp|src/ripemd128\.c|miniz_zip|turbobase64' \
-    "$PROJECT" "${BUILD_SCRIPTS[@]}" "$ROOT/Tests" --glob '!README.md' \
-    --glob '!run-third-party-vendor-smoke.sh'; then
+scan_files=(
+  "$PROJECT"
+  "${BUILD_SCRIPTS[@]}"
+  "${(@f)$(/usr/bin/find "$ROOT/Tests" -type f \
+    ! -name README.md ! -name run-third-party-vendor-smoke.sh -print)}"
+)
+if /usr/bin/grep -Eq \
+    'ThirdParty/mdict-cpp|src/ripemd128\.c|miniz_zip|turbobase64' \
+    "${scan_files[@]}"; then
   print -u2 "A build or test path still references the ignored checkout."
   exit 1
+else
+  scan_exit=$?
+  if (( scan_exit != 1 )); then
+    print -u2 "Unable to complete the portable build-path scan."
+    exit 1
+  fi
 fi
 
-if rg -q 'Katholieke Universiteit Leuven|All Rights Reserved' \
+if /usr/bin/grep -REq 'Katholieke Universiteit Leuven|All Rights Reserved' \
     "$VENDOR/libtomcrypt-ripemd128"; then
   print -u2 "The unlicensed legacy RIPEMD sample is still present."
   exit 1
+else
+  scan_exit=$?
+  if (( scan_exit != 1 )); then
+    print -u2 "Unable to complete the portable RIPEMD source scan."
+    exit 1
+  fi
 fi
 
 print "Third-party vendor smoke passed"
