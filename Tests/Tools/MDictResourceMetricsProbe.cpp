@@ -334,16 +334,9 @@ static void writeDictJSON(JSONWriter &w, const DictMetrics &m) {
   w.fieldU64("totalKeyBlockCompressedBytes", m.totalKeyBlockCompressed);
   w.fieldU64("totalKeyBlockDecompressedBytes", m.totalKeyBlockDecompressed);
 
-  if (!m.unavailable.empty()) {
-    w.startUnavailableArray("maximumSingleKeyBytes");
-    for (const auto *reason : m.unavailable) {
-      if (std::strcmp(reason, "maximumSingleKeyBytes") == 0 ||
-          std::strcmp(reason, "maximumObservedRecordRangeBytes") == 0) {
-        w.addUnavailable(reason);
-      }
-    }
-    w.endUnavailableArray();
-  }
+  // Unavailable fields: emit null, not a string array
+  w.key("maximumSingleKeyBytes"); w.null();
+  w.key("maximumObservedRecordRangeBytes"); w.null();
 
   w.fieldU64("recordBlockInfoBytes", m.recordBlockInfoBytes);
   w.fieldU64("recordBlockCount", m.recordBlockCount);
@@ -352,19 +345,19 @@ static void writeDictJSON(JSONWriter &w, const DictMetrics &m) {
   w.fieldU64("totalRecordBlockCompressedBytes", m.totalRecordBlockCompressed);
   w.fieldU64("totalRecordBlockDecompressedBytes", m.totalRecordBlockDecompressed);
 
-  if (!m.unavailable.empty()) {
-    w.startUnavailableArray("maximumObservedRecordRangeBytes");
-    for (const auto *reason : m.unavailable) {
-      if (std::strcmp(reason, "maximumObservedRecordRangeBytes") == 0) {
-        w.addUnavailable(reason);
-      }
-    }
-    w.endUnavailableArray();
-  }
-
   w.fieldI32("encryptedMode", m.encryptedMode);
   w.fieldI32("engineVersionMajor", m.engineVersionMajor_);
   w.fieldI32("engineVersionMinor", m.engineVersionMinor_);
+
+  // Single "unavailable" array with deduplicated, stable-order field names
+  w.key("unavailable");
+  w.openArray();
+  w.first_field = true;
+  for (const auto *name : m.unavailable) {
+    w.comma();
+    w.str(name);
+  }
+  w.closeArray();
 
   w.closeObject();
 }

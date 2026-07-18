@@ -193,13 +193,40 @@ static void test_happyPath_Privacy(const std::string &workDir, const std::string
   require(json.find("\"SYNTH\"") != std::string::npos, "missing SYNTH ID");
   require(json.find("\"entryCount\"") != std::string::npos, "missing entryCount");
 
-  // 11-13. Unavailable fields are NOT numeric 0 — they are string arrays
-  require(json.find("\"maximumSingleKeyBytes\":0") == std::string::npos,
-          "maximumSingleKeyBytes should not be numeric 0");
-  require(json.find("\"maximumObservedRecordRangeBytes\":0") == std::string::npos,
-          "maximumObservedRecordRangeBytes should not be numeric 0");
-  require(json.find("maximumSingleKeyBytes") != std::string::npos, "missing unavailable field");
-  require(json.find("maximumObservedRecordRangeBytes") != std::string::npos, "missing unavailable field");
+  // 11-13. Unavailable fields are null — not numeric 0, not a string array
+  require(json.find("\"maximumSingleKeyBytes\":null") != std::string::npos,
+          "maximumSingleKeyBytes must be null");
+  require(json.find("\"maximumObservedRecordRangeBytes\":null") != std::string::npos,
+          "maximumObservedRecordRangeBytes must be null");
+  // They must NOT appear as arrays
+  require(json.find("\"maximumSingleKeyBytes\":[") == std::string::npos,
+          "maximumSingleKeyBytes must not be an array");
+  require(json.find("\"maximumObservedRecordRangeBytes\":[") == std::string::npos,
+          "maximumObservedRecordRangeBytes must not be an array");
+
+  // 11b. "unavailable" field is a JSON array containing the right names
+  require(json.find("\"unavailable\"") != std::string::npos, "missing unavailable field");
+  require(json.find("\"maximumSingleKeyBytes\"") != std::string::npos,
+          "unavailable missing maximumSingleKeyBytes");
+  require(json.find("\"maximumObservedRecordRangeBytes\"") != std::string::npos,
+          "unavailable missing maximumObservedRecordRangeBytes");
+  // unavailable must not duplicate field names within the array
+  size_t uaStart = json.find("\"unavailable\"");
+  require(uaStart != std::string::npos, "missing unavailable array");
+  size_t inArray1 = json.find("\"maximumSingleKeyBytes\"", uaStart);
+  require(inArray1 != std::string::npos, "maxSingleKeyBytes not in unavailable");
+  size_t inArray2 = json.find("\"maximumSingleKeyBytes\"", inArray1 + 1);
+  // If a second occurrence is found, check it's NOT inside the unavailable array
+  if (inArray2 != std::string::npos) {
+    size_t uaEnd = json.find(']', uaStart);
+    require(inArray2 > uaEnd, "maximumSingleKeyBytes duplicated inside unavailable array");
+  }
+
+  // 11c. Available fields are still unsigned JSON numbers (not null)
+  require(json.find("\"entryCount\":null") == std::string::npos, "entryCount must not be null");
+  require(json.find("\"keyBlockCount\":null") == std::string::npos, "keyBlockCount must not be null");
+  require(json.find("\"recordBlockCount\":null") == std::string::npos, "recordBlockCount must not be null");
+  require(json.find("\"actualFileBytes\":null") == std::string::npos, "actualFileBytes must not be null");
 
   std::fprintf(stderr, "  privacy & happy path: PASS\n");
 }

@@ -61,8 +61,10 @@ collects those values anonymously.
 | `maximumSingleKeyBytes` | Requires parsing full key blocks (materialises all keys) |
 | `maximumObservedRecordRangeBytes` | Requires entry-level record parsing |
 
-Both appear in the JSON as string arrays under their field names so the
-consumer can distinguish "0" (a real value) from "unavailable".
+Unavailable fields appear as JSON `null`.  A separate `unavailable` array
+lists the field names.  This distinguishes "0" (a real measurement) from
+"unknown" and keeps all numeric fields as stable unsigned-integer types
+for downstream aggregation.
 
 ## Encrypted=2 support
 
