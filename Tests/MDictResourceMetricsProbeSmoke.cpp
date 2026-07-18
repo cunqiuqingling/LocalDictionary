@@ -97,7 +97,7 @@ static std::string buildMinimalMDX(const std::string &dir) {
   kbRaw.push_back('z'); kbRaw.push_back('z'); kbRaw.push_back('z'); kbRaw.push_back(0);
 
   auto kbComp = zlibCompress(kbRaw.data(), kbRaw.size());
-  uint64_t kbCS = kbComp.size(), kbDS = kbRaw.size();
+  uint64_t kbCS = kbComp.size() + 8, kbDS = kbRaw.size();
   for (int i = 0; i < 8; ++i) {
     kbiRaw[compOff + i] = static_cast<uint8_t>((kbCS >> ((7 - i) * 8)) & 0xff);
     kbiRaw[decompOff + i] = static_cast<uint8_t>((kbDS >> ((7 - i) * 8)) & 0xff);

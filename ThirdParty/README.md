@@ -74,13 +74,35 @@ the build; the reviewed vendored files already contain their result.
    no external binary ABI is promised.  Existing source callers continue
    through default constructors (which use production defaults).
 
+6. D1b-3A-2A-R1 Key-path memory safety (manually applied; no standalone
+   patch file): fixes type-0 key block use-after-free by owning all
+   decompressed data in std::vector<uint8_t>; enforces exact
+   payload/decomp/Adler-32 validation for uncompressed type-0 blocks;
+   rewrites split_key_block with complete boundary validation (null
+   pointer, empty buffer, number_width bounds, UTF-8/UTF-16 delimiter
+   checks, maximumSingleKeyBytes enforcement, stale key_end_idx sentinel,
+   key_start_idx advance guard, checked subtraction, RAII temporary
+   buffers); fixes key-block-info prefix check ordering (buffer/null
+   validation before memory access); adds pre-allocation EOF checks for
+   both full key-block and per-block reads; converts Header buffer,
+   Key-block header buffer, Key-block-info buffer, full key-block
+   compressed buffer, single key-block compressed buffer, and
+   decompression output to RAII (std::vector<uint8_t> / std::string);
+   fixes bounded zlib error model (malformedCompressedData instead of
+   checksumMismatch, std::bad_alloc → allocationFailed, sourceLen==0
+   rejection); adds external Adler-32 checksum for key-block-info
+   (version >= 2); removes the spurious validate() cross-relation
+   maximumTotalRecordBlockDecompressedBytes >=
+   maximumTotalRecordBlockCompressedBytes; activates
+   maximumSingleKeyBytes in split_key_block.
+
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
 
 | Upstream path | Upstream SHA-256 | Vendored SHA-256 |
 |---|---|---|
-| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `c7d335aa0521022bb07fcc80596652b420a95c3ecbd184f0a51169352bd2a926` |
-| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `5e1ac9bf08e2263b03fc53560ad21795c94cab809a1dc5846f05290d810576f3` |
+| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `f6cf35d7d5e1aac8b0a3576f61c1393fd6f1a691bc5d5d12d51fc05b041fa60f` |
+| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `57fa5acf2db7b3ab2ac980da92f3ae257b0721c58fe0f50685e76443aaa9977f` |
 | `src/include/zlib_wrapper.h` | `29d187709287366541e387cdea35cbe39c8eea6ad32cd92746276ca0c05c0b28` | `0e1e75b8ee84014cd731b033aa755991cc3d055db6f39595bcb91e18d0c5a356` |
 | `src/encode/base64.h` | `6c0264e1941fcf458b5d7200751cb561025c0e2f616c136e0e07bfdc81f5b4b5` | `19113b27ba310db9fd8cf22988de90f301825e2cc317690614019651a505be51` |
 
@@ -88,9 +110,9 @@ New files added by D1b-3A-2A:
 
 | Path | Vendored SHA-256 |
 |---|---|
-| `src/include/resource_limits.h` | `9929982fc97e115292ca828cfe08e78112e21fb6f52d0f68757c317fad6ba0a4` |
+| `src/include/resource_limits.h` | `e852033763e3e94370d1310f786c0177b2ff58ab0cac577b6f65f3a55433b566` |
 | `src/include/checked_arithmetic.h` | `c6b8b19e05b522209d26ce40194ac1df4d82da3ea578eb5e420bfca18a7b7881` |
-| `src/include/bounded_zlib.h` | `436955a9ac31c958627be70c55d8122dc5cbbaaf7180a20936e42b3e696edc78` |
+| `src/include/bounded_zlib.h` | `8d3475e67937ba565e672089731f76ae9a9e426511d7788a86d0eb9b15a276ac` |
 
 All other mdict-cpp paths listed above are byte-identical to the fixed commit;
 their hashes are in `SHA256SUMS`. Excluded content includes turbobase64,

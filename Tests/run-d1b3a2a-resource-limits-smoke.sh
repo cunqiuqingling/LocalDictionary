@@ -59,7 +59,7 @@ RELEASE_DIR="$ROOT/.build/d1b3a2a-smoke-release"
 mkdir -p "$RELEASE_DIR/objects"
 
 CFLAGS_REL=(-std=c17 -Wall -Wextra -Werror -O2 -DNDEBUG -isysroot "$SDKROOT")
-CXXFLAGS_REL=(-std=c++17 -O2 -DNDEBUG -isysroot "$SDKROOT")
+CXXFLAGS_REL=(-std=c++17 -Wall -Wextra -Werror -O2 -DNDEBUG -isysroot "$SDKROOT")
 
 for src in miniz.c miniz_tinfl.c miniz_tdef.c; do
   "$CC" "${CFLAGS_REL[@]}" -I"$MINIZ" -c "$MINIZ/$src" \

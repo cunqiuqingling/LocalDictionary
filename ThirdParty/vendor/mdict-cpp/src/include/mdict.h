@@ -606,14 +606,14 @@ class Mdict {
 
   /**
    * split key block from key block buffer
-   * @param key_block the key block buffer
-   * @param key_block_len the key block buffer length
+   * @param key_block the key block buffer (non-null)
+   * @param key_block_len the key block buffer length in bytes (must be > 0)
+   * @param block_id the block index (for diagnostics / future use)
+   * D1b-3A-2A-R1: key_block_len widened to uint64_t; block_id to size_t.
    */
-  // # void split_key_block(unsigned char *key_block, unsigned long
-  //  key_block_len);
   std::vector<key_list_item *> split_key_block(unsigned char *key_block,
-                                               unsigned long key_block_len,
-                                               unsigned long block_id);
+                                               uint64_t key_block_len,
+                                               size_t block_id);
 
   /********************************
    *     INNER DICTIONARY PART    *

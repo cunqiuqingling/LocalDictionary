@@ -42,6 +42,7 @@ enum class ResourceErrorCode {
   offsetOutOfBounds,
   allocationFailed,
   invalidCompressionType,
+  malformedCompressedData,
 };
 
 inline const char *resourceErrorCodeString(ResourceErrorCode code) {
@@ -66,6 +67,7 @@ inline const char *resourceErrorCodeString(ResourceErrorCode code) {
     case ResourceErrorCode::offsetOutOfBounds:              return "offset out of bounds";
     case ResourceErrorCode::allocationFailed:               return "memory allocation failed";
     case ResourceErrorCode::invalidCompressionType:         return "invalid or unsupported compression type";
+    case ResourceErrorCode::malformedCompressedData:        return "malformed compressed data or zlib error";
   }
   return "internal error";
 }
@@ -110,7 +112,7 @@ struct ResourceLimits {
   uint64_t maximumTotalKeyBlockCompressedBytes = 0;
   uint64_t maximumTotalKeyBlockDecompressedBytes = 0;
 
-  // --- Single key (not enforced in D1b-3A-2A; deferred to entry materialization) ---
+  // --- Single key (enforced in D1b-3A-2A-R1 via split_key_block) ---
   uint64_t maximumSingleKeyBytes = 0;
 
   // --- Record blocks (model only; not enforced in D1b-3A-2A) ---
@@ -205,8 +207,10 @@ struct ResourceLimits {
       throw ResourceException(ResourceErrorCode::invalidResourceLimits);
     if (maximumTotalRecordBlockCompressedBytes > maximumFileBytes)
       throw ResourceException(ResourceErrorCode::invalidResourceLimits);
-    if (maximumTotalRecordBlockDecompressedBytes < maximumTotalRecordBlockCompressedBytes)
-      throw ResourceException(ResourceErrorCode::invalidResourceLimits);
+    // D1b-3A-2A-R1: removed the relationship
+    //   maximumTotalRecordBlockDecompressedBytes >= maximumTotalRecordBlockCompressedBytes.
+    // These two fields are independent security caps; compression does not
+    // guarantee the decompressed form is always larger.
 
     if (maximumReturnedRecordBytes > maximumRecordRangeBytes)
       throw ResourceException(ResourceErrorCode::invalidResourceLimits);

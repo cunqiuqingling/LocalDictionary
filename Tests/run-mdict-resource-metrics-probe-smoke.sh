@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
   writeBE64(kbRaw,13);
   kbRaw.push_back('z');kbRaw.push_back('z');kbRaw.push_back('z');kbRaw.push_back(0);
   auto kbc=zlibCompress(kbRaw.data(),kbRaw.size());
-  for (int i=0;i<8;++i){kbiRaw[co+i]=(kbc.size()>>((7-i)*8))&0xff;kbiRaw[dod+i]=(kbRaw.size()>>((7-i)*8))&0xff;}
+  for (int i=0;i<8;++i){kbiRaw[co+i]=((kbc.size()+8)>>((7-i)*8))&0xff;kbiRaw[dod+i]=(kbRaw.size()>>((7-i)*8))&0xff;}
   auto kbic=zlibCompress(kbiRaw.data(),kbiRaw.size());
   std::string rc="record for aaa\0record for zzz"; rc.push_back('\0');
   auto recC=zlibCompress(rc.data(),rc.size());
