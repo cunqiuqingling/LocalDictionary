@@ -30,6 +30,8 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-public-ci-smoke.sh` is the public GitHub Actions entry point. It runs only synthetic or source-compliance tests under an isolated HOME, disables the real Keychain smoke, uses MockURLProtocol for AI transport, and includes `run-public-obsidian-note-store-smoke.sh` for temporary Markdown files. It intentionally excludes `run-multidictionary-smoke.sh` and the private Oxford stage in `run-obsidian-smoke.sh`, because those require the ignored developer `local.json`, commercial dictionaries, and private indexes.
 
+`run-resource-manifest-security-smoke.sh` covers the offline D1b-1 trust foundation with runtime-generated TEST-ONLY Ed25519 keys and synthetic JSON. It verifies the binary detached-signature envelope, raw-byte signatures, strict duplicate-key/unknown-field JSON parsing, closed Manifest v1 semantics, URL and filename limits, rollback protection, atomic state persistence and permissions, empty production trust, and the Catalog/external-reference boundary. It uses only a temporary rollback directory and does not access the network, Keychain, real Application Support, or dictionary data.
+
 The repository is currently source-only and targets macOS 15.0+ on arm64. A clean clone builds from tracked `ThirdParty/vendor` files without a submodule, a separate mdict-cpp clone, Homebrew dependencies, or private `local.json`. The only runtime permission required for selection lookup is Accessibility; the App does not request screen recording, microphone, or system audio recording permission.
 
 ## C1 manual acceptance checklist

@@ -25,7 +25,7 @@ expect_failure() {
         print -u2 "audit unexpectedly accepted: $label"
         exit 1
     fi
-    if [[ -n "$forbidden_value" ]] && /usr/bin/grep -Fq "$forbidden_value" "$output"; then
+    if [[ -n "$forbidden_value" ]] && /usr/bin/grep -Fq -- "$forbidden_value" "$output"; then
         print -u2 "audit exposed a synthetic sensitive value: $label"
         exit 1
     fi
@@ -86,6 +86,16 @@ SYMLINK_RISK="$(make_bundle symlink-risk)"
 /bin/ln -s "$WORK/non-bundle-target" "$SYMLINK_RISK/Contents/Resources/external-data"
 expect_failure symlink "$SYMLINK_RISK" ""
 
+SIGNING_WORK_RISK="$(make_bundle manifest-signing-work-risk)"
+/bin/mkdir -p "$SIGNING_WORK_RISK/Contents/Resources/manifest-signing"
+print 'synthetic' > "$SIGNING_WORK_RISK/Contents/Resources/manifest-signing/notes.txt"
+expect_failure manifest-signing "$SIGNING_WORK_RISK" ""
+
+PRIVATE_KEY_MARKER="-----BEGIN PRIVATE KEY-----"
+PRIVATE_KEY_RISK="$(make_bundle private-key-risk)"
+print -r -- "$PRIVATE_KEY_MARKER" > "$PRIVATE_KEY_RISK/Contents/Resources/synthetic.txt"
+expect_failure private-key "$PRIVATE_KEY_RISK" "$PRIVATE_KEY_MARKER"
+
 FAKE_PROJECT="$WORK/Fake Project With Spaces"
 /bin/mkdir -p "$FAKE_PROJECT/scripts" "$FAKE_PROJECT/config"
 /usr/bin/ditto "$ROOT/scripts/install-private-local-config.sh" \
@@ -120,4 +130,4 @@ PROJECT_FILE="$ROOT/App/LocalDictionary.xcodeproj/project.pbxproj"
 /usr/bin/grep -q 'Audit Release App Bundle' "$PROJECT_FILE"
 /usr/bin/grep -q 'audit-app-bundle.sh' "$ROOT/scripts/install-local-app.sh"
 
-print "AppBundleAuditSmoke PASS (14/14)"
+print "AppBundleAuditSmoke PASS (16/16)"
