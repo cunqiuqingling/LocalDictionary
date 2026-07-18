@@ -34,6 +34,8 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-resource-manifest-network-smoke.sh` covers the offline D1b-2A HTTPS transport with an injected `URLProtocol`. It verifies exact-host URL and redirect policy, bounded chunked signature/Manifest delivery, status/content rules, cancellation, one-refresh-at-a-time behavior, cookie/cache isolation, raw-byte verifier handoff, and disabled production endpoint/trust defaults. It uses only synthetic `example.test` URLs and runtime-generated TEST-ONLY Ed25519 keys; it performs no DNS or network access and writes no resource, Catalog, or rollback state.
 
+`run-resource-payload-download-smoke.sh` covers the offline D1b-2B single-MDX payload boundary. It verifies signed/App exact-host intersection, UInt64 size and disk-capacity limits, chunk-by-chunk POSIX writes, incremental SHA-256, HTTP and redirect policy, cancellation and single-flight behavior, `0700`/`0600` staging permissions, failure cleanup, and fsync/atomic publication from `.partial-*` to `verified-*`. It uses only synthetic bytes, temporary directories, and an injected `URLProtocol`; production payload hosts remain empty and no Catalog, index, query, AppDelegate, UI, real resource, or Keychain is involved.
+
 The repository is currently source-only and targets macOS 15.0+ on arm64. A clean clone builds from tracked `ThirdParty/vendor` files without a submodule, a separate mdict-cpp clone, Homebrew dependencies, or private `local.json`. The only runtime permission required for selection lookup is Accessibility; the App does not request screen recording, microphone, or system audio recording permission.
 
 ## C1 manual acceptance checklist
