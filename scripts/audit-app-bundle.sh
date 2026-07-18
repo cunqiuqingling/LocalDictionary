@@ -52,6 +52,10 @@ while IFS= read -r -d '' item; do
     if [[ "$lower_path" == *"application support/localdictionary"* ]]; then
         report_risk "Application Support 运行数据" "$relative_path"
     fi
+    if [[ "$lower_path" == *"manifest-signing"* ||
+          "$lower_path" == *"signing-private"* ]]; then
+        report_risk "资源清单签名工作目录" "$relative_path"
+    fi
 
     if [[ -L "$item" ]]; then
         report_risk "符号链接内容" "$relative_path"
@@ -78,6 +82,9 @@ while IFS= read -r -d '' item; do
         catalog-v*.json|catalog-v*.backup.json|*dictionary-catalog*.json)
             report_risk "Catalog 运行数据" "$relative_path"
             ;;
+        *.pem|*.p8|*.p12|*.key)
+            report_risk "私钥或签名密钥文件" "$relative_path"
+            ;;
         *.md)
             if ! is_allowed_markdown "$name"; then
                 report_risk "用户 Markdown 笔记" "$relative_path"
@@ -95,6 +102,8 @@ while IFS= read -r -d '' item; do
         "([Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Xx]-?[Aa][Pp][Ii]-?[Kk][Ee][Yy]|[Kk]eychain[_-]?[Vv]alue)[\"']?[[:space:]]*[:=][[:space:]]*[\"']?[A-Za-z0-9_.-]{20,}"
     scan_printable_strings "$item" "$relative_path" "疑似服务密钥" \
         '(sk-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{20,})'
+    scan_printable_strings "$item" "$relative_path" "正式私钥格式" \
+        '-----BEGIN ([A-Z0-9]+ )?PRIVATE KEY-----|OPENSSH PRIVATE KEY'
 done < <(/usr/bin/find "$BUNDLE" -print0)
 
 if (( RISK_COUNT > 0 )); then

@@ -75,6 +75,13 @@
 		A10000000000000000000043 /* DictionaryManagerPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004C /* DictionaryManagerPresentation.swift */; };
 		A10000000000000000000044 /* DictionaryAppearanceTextAdapter.mm in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */; };
 		A10000000000000000000045 /* AIRequestLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000004F /* AIRequestLifecycle.swift */; };
+		A10000000000000000000060 /* ResourceManifestModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000060 /* ResourceManifestModels.swift */; };
+		A10000000000000000000061 /* StrictJSON.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000061 /* StrictJSON.swift */; };
+		A10000000000000000000062 /* StrictResourceManifestDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000062 /* StrictResourceManifestDecoder.swift */; };
+		A10000000000000000000063 /* ResourceManifestValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000063 /* ResourceManifestValidator.swift */; };
+		A10000000000000000000064 /* ResourceManifestSignature.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000064 /* ResourceManifestSignature.swift */; };
+		A10000000000000000000065 /* ResourceManifestVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000065 /* ResourceManifestVerifier.swift */; };
+		A10000000000000000000066 /* VerifiedManifestStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000066 /* VerifiedManifestStateStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -157,6 +164,13 @@
 		B1000000000000000000004D /* DictionaryAppearanceTextAdapter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DictionaryAppearanceTextAdapter.h; sourceTree = "<group>"; };
 		B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DictionaryAppearanceTextAdapter.mm; sourceTree = "<group>"; };
 		B1000000000000000000004F /* AIRequestLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIRequestLifecycle.swift; sourceTree = "<group>"; };
+		B10000000000000000000060 /* ResourceManifestModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000061 /* StrictJSON.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrictJSON.swift; sourceTree = "<group>"; };
+		B10000000000000000000062 /* StrictResourceManifestDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrictResourceManifestDecoder.swift; sourceTree = "<group>"; };
+		B10000000000000000000063 /* ResourceManifestValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestValidator.swift; sourceTree = "<group>"; };
+		B10000000000000000000064 /* ResourceManifestSignature.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestSignature.swift; sourceTree = "<group>"; };
+		B10000000000000000000065 /* ResourceManifestVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestVerifier.swift; sourceTree = "<group>"; };
+		B10000000000000000000066 /* VerifiedManifestStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifiedManifestStateStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -244,6 +258,13 @@
 				B1000000000000000000004D /* DictionaryAppearanceTextAdapter.h */,
 				B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */,
 				B1000000000000000000004F /* AIRequestLifecycle.swift */,
+				B10000000000000000000060 /* ResourceManifestModels.swift */,
+				B10000000000000000000061 /* StrictJSON.swift */,
+				B10000000000000000000062 /* StrictResourceManifestDecoder.swift */,
+				B10000000000000000000063 /* ResourceManifestValidator.swift */,
+				B10000000000000000000064 /* ResourceManifestSignature.swift */,
+				B10000000000000000000065 /* ResourceManifestVerifier.swift */,
+				B10000000000000000000066 /* VerifiedManifestStateStore.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -446,6 +467,13 @@
 				A10000000000000000000043 /* DictionaryManagerPresentation.swift in Sources */,
 				A10000000000000000000044 /* DictionaryAppearanceTextAdapter.mm in Sources */,
 				A10000000000000000000045 /* AIRequestLifecycle.swift in Sources */,
+				A10000000000000000000060 /* ResourceManifestModels.swift in Sources */,
+				A10000000000000000000061 /* StrictJSON.swift in Sources */,
+				A10000000000000000000062 /* StrictResourceManifestDecoder.swift in Sources */,
+				A10000000000000000000063 /* ResourceManifestValidator.swift in Sources */,
+				A10000000000000000000064 /* ResourceManifestSignature.swift in Sources */,
+				A10000000000000000000065 /* ResourceManifestVerifier.swift in Sources */,
+				A10000000000000000000066 /* VerifiedManifestStateStore.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,

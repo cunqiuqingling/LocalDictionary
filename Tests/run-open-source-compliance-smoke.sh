@@ -13,6 +13,7 @@ PUBLIC_DOCS=(
   "$ROOT/docs/privacy.md"
   "$ROOT/docs/architecture.md"
   "$ROOT/docs/d1-resource-policy.md"
+  "$ROOT/docs/d1-manifest-format.md"
   "$ROOT/docs/provenance.md"
   "$ROOT/ThirdParty/README.md"
 )
@@ -47,7 +48,7 @@ reject_pattern() {
 
 for file in "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/SECURITY.md" \
             "$ROOT/docs/privacy.md" "$ROOT/docs/d1-resource-policy.md" \
-            "$ROOT/docs/provenance.md"; do
+            "$ROOT/docs/d1-manifest-format.md" "$ROOT/docs/provenance.md"; do
   require_file "$file"
 done
 
@@ -121,6 +122,21 @@ reject_pattern 'Authorization:[[:space:]]*Bearer[[:space:]]+[A-Za-z0-9_.-]{10,}'
 
 reject_pattern 'https?://' "$ROOT/docs/d1-resource-policy.md"
 [[ ! -e "$ROOT/resources.json" ]] || fail "D1 resources.json must not exist"
+require_literal "$ROOT/docs/d1-manifest-format.md" "LDMSIG01"
+require_literal "$ROOT/docs/d1-manifest-format.md" "generic-mdict-v1"
+require_literal "$ROOT/docs/d1-manifest-format.md" \
+  "D1b-1 intentionally ships an empty production trust store"
+private_key_output=""
+if private_key_output="$(git -C "$ROOT" grep --untracked -E \
+  'BEGIN ([A-Z0-9]+ )?PRIVATE KEY|OPENSSH PRIVATE KEY' -- . \
+  ':(exclude)scripts/audit-app-bundle.sh' \
+  ':(exclude)Tests/run-app-bundle-audit-smoke.sh' \
+  ':(exclude)Tests/run-open-source-compliance-smoke.sh')"; then
+  fail "formal private-key material appears outside the synthetic audit boundary"
+else
+  scan_exit=$?
+  (( scan_exit == 1 )) || fail "private-key repository scan failed"
+fi
 require_literal "$ROOT/docs/d1-resource-policy.md" "### A：可由项目托管或镜像"
 require_literal "$ROOT/docs/d1-resource-policy.md" "### B：仅链接官方来源"
 require_literal "$ROOT/docs/d1-resource-policy.md" "### C：暂不收录"

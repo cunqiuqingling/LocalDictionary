@@ -23,6 +23,7 @@ export LOCALDICTIONARY_SKIP_KEYCHAIN_SMOKE=1
 /bin/mkdir -p "$HOME"
 
 PUBLIC_TESTS=(
+  Tests/run-resource-manifest-security-smoke.sh
   Tests/run-open-source-compliance-smoke.sh
   Tests/run-third-party-vendor-smoke.sh
   Tests/run-ripemd128-miniz-smoke.sh
