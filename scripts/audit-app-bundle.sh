@@ -8,6 +8,12 @@ fi
 
 BUNDLE="${1:A}"
 RISK_COUNT=0
+ICON_AUDIT="${0:A:h}/audit-app-icon.sh"
+
+if [[ ! -x "$ICON_AUDIT" ]]; then
+    print -u2 "App Bundle 审计失败：缺少 App 图标审计脚本。"
+    exit 1
+fi
 
 report_risk() {
     local risk="$1"
@@ -111,4 +117,5 @@ if (( RISK_COUNT > 0 )); then
     exit 1
 fi
 
+"$ICON_AUDIT" "$BUNDLE"
 print "App Bundle 审计通过。"

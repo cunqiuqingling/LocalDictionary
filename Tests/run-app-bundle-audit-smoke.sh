@@ -13,6 +13,11 @@ make_bundle() {
     print '#!/bin/sh' > "$bundle/Contents/MacOS/LocalDictionary"
     print 'exit 0' >> "$bundle/Contents/MacOS/LocalDictionary"
     /bin/chmod +x "$bundle/Contents/MacOS/LocalDictionary"
+    /usr/bin/plutil -create xml1 "$bundle/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$bundle/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$bundle/Contents/Info.plist"
+    print -n 'synthetic-compiled-assets' > "$bundle/Contents/Resources/Assets.car"
+    print -n 'synthetic-compiled-icon' > "$bundle/Contents/Resources/AppIcon.icns"
     print -r -- "$bundle"
 }
 
@@ -127,7 +132,7 @@ fi
 
 PROJECT_FILE="$ROOT/App/LocalDictionary.xcodeproj/project.pbxproj"
 ! /usr/bin/grep -q 'Copy optional local configuration\|../config/local.json' "$PROJECT_FILE"
-/usr/bin/grep -q 'Audit Release App Bundle' "$PROJECT_FILE"
+/usr/bin/grep -q 'Audit App Bundle' "$PROJECT_FILE"
 /usr/bin/grep -q 'audit-app-bundle.sh' "$ROOT/scripts/install-local-app.sh"
 
 print "AppBundleAuditSmoke PASS (16/16)"

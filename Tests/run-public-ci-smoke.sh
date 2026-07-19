@@ -32,6 +32,7 @@ PUBLIC_TESTS=(
   Tests/run-ripemd128-miniz-smoke.sh
   Tests/run-local-configuration-isolation-smoke.sh
   Tests/run-app-bundle-audit-smoke.sh
+  Tests/run-app-icon-persistence-smoke.sh
   Tests/run-dictionary-catalog-smoke.sh
   Tests/run-dictionary-import-smoke.sh
   Tests/run-dictionary-indexing-smoke.sh

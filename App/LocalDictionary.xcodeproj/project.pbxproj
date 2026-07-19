@@ -357,7 +357,7 @@
 				C10000000000000000000002 /* Sources */,
 				C10000000000000000000001 /* Frameworks */,
 				C10000000000000000000003 /* Resources */,
-				C10000000000000000000004 /* Audit Release App Bundle */,
+				C10000000000000000000004 /* Audit App Bundle */,
 			);
 			buildRules = (
 			);
@@ -413,7 +413,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		C10000000000000000000004 /* Audit Release App Bundle */ = {
+		C10000000000000000000004 /* Audit App Bundle */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -423,14 +423,14 @@
 			);
 			inputPaths = (
 			);
-			name = "Audit Release App Bundle";
+			name = "Audit App Bundle";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"$CONFIGURATION\" = \"Release\" ]; then\n  /bin/zsh \"$SRCROOT/../scripts/audit-app-bundle.sh\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nfi\n";
+			shellScript = "if [ \"$CONFIGURATION\" = \"Release\" ]; then\n  /bin/zsh \"$SRCROOT/../scripts/audit-app-bundle.sh\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nelse\n  /bin/zsh \"$SRCROOT/../scripts/audit-app-icon.sh\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
