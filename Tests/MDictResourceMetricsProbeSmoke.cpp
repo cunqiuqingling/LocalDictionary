@@ -12,6 +12,7 @@
 #include <sqlite3.h>
 #include <string>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -52,6 +53,16 @@ uint64_t fileSize(const std::string &path) {
   struct stat status {};
   require(stat(path.c_str(), &status) == 0, "stat input");
   return static_cast<uint64_t>(status.st_size);
+}
+
+std::string xattrNames(const std::string &path) {
+  const ssize_t length = listxattr(path.c_str(), nullptr, 0, 0);
+  require(length >= 0, "list input xattrs");
+  if (length == 0) return {};
+  std::vector<char> names(static_cast<size_t>(length));
+  require(listxattr(path.c_str(), names.data(), names.size(), 0) == length,
+          "read input xattrs");
+  return {names.data(), names.size()};
 }
 
 bool exists(const std::string &path) {
@@ -315,8 +326,10 @@ void testAggregateAndPrivacy(const std::string &directory, const std::string &pr
   const std::string output = directory + "/aggregate.json";
   const uint64_t mdxHash = fingerprint(mdx);
   const uint64_t mdxSize = fileSize(mdx);
+  const std::string mdxXattrs = xattrNames(mdx);
   const uint64_t sqliteHash = fingerprint(index);
   const uint64_t sqliteSize = fileSize(index);
+  const std::string sqliteXattrs = xattrNames(index);
 
   require(std::system(probeCommand(probe, "--mdx " + quote(mdx) + " --sqlite " +
                                       quote(index) + " --output " + quote(output)).c_str()) == 0,
@@ -343,8 +356,10 @@ void testAggregateAndPrivacy(const std::string &directory, const std::string &pr
           "output hides hashes");
   require(fingerprint(mdx) == mdxHash && fileSize(mdx) == mdxSize,
           "MDX input unchanged");
+  require(xattrNames(mdx) == mdxXattrs, "MDX xattrs unchanged");
   require(fingerprint(index) == sqliteHash && fileSize(index) == sqliteSize,
           "SQLite input unchanged");
+  require(xattrNames(index) == sqliteXattrs, "SQLite xattrs unchanged");
   require(!exists(index + "-journal") && !exists(index + "-wal") && !exists(index + "-shm"),
           "read-only SQLite created no sidecars");
   struct stat mode {};
