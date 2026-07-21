@@ -17,6 +17,18 @@ builds declare neither hook nor lifecycle observer. It uses no private
 dictionary, network, Keychain, local configuration, or Application Support
 data.
 
+R2.1 explicitly authorizes the test-only Key-info allocation observer
+declarations in `resource_test_observer.h`; they are compiled only when
+`MDICT_RESOURCE_TEST_OBSERVER` is defined. The final smoke count is the total
+runtime assertions, including fixture/setup assertions; it is not a count of
+independent security behaviours. Independent behaviour groups are Header
+integrity and limits, Key-info prefix and Adler validation, Key-info and
+per-block resource limits, EOF and checked-offset overflow, version-1
+four-byte Header fields, ownership rollback, UTF-16 boundaries, bounded zlib,
+and production-limit compatibility. The test-only Header entry point calls the
+real Header parser, duplicates a small amount of initialization preflight, and
+must remain synchronized with the production initialization path.
+
 Record-block ResourceLimits remain a D1b-3A-2B task. Directory-descriptor
 `openat`/`renameat` hardening remains a D1b-3B task.
 

@@ -1436,7 +1436,7 @@ int main() {
 
   std::filesystem::remove_all(directory);
   std::fprintf(stderr,
-               "\nD1b3A2AResourceLimitsSmoke-R2: %d checks PASSED\n",
+               "\nD1b3A2AResourceLimitsSmoke-R2: %d total runtime assertions PASSED\n",
                g_checks);
   return 0;
 }
