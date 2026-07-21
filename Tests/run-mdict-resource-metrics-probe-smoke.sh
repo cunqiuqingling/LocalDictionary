@@ -52,7 +52,7 @@ link_probe() {
   local out_dir="$1"
   shift
   "$CXX" -std=c++17 -Wall -Wextra -Werror -isysroot "$SDKROOT" "$@" \
-    -I"$ROOT/MDictCore" -I"$MDICT/src" -I"$MDICT/src/include" -I"$VENDOR" \
+    -I"$ROOT/MDictCore" -I"$MINIZ" -I"$MDICT/src" -I"$MDICT/src/include" -I"$VENDOR" \
     "$PROBE_SRC" \
     "$out_dir/objects/mdict.o" "$out_dir/objects/binutils.o" \
     "$out_dir/objects/adler32.o" "$out_dir/objects/rmd128.o" \

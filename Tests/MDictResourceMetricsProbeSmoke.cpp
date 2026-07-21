@@ -185,6 +185,82 @@ std::string buildMinimalMDX(const std::string &directory) {
   return path;
 }
 
+void writeNumber(std::vector<uint8_t> &bytes, uint64_t value, uint64_t width) {
+  if (width == 4) {
+    writeBE32(bytes, static_cast<uint32_t>(value));
+  } else {
+    writeBE64(bytes, value);
+  }
+}
+
+std::string buildRecordMetadataMDX(
+    const std::string &directory, const std::string &filename,
+    const std::string &version, const std::string &encrypted,
+    const std::vector<std::pair<uint64_t, uint64_t>> &recordPairs,
+    uint64_t declaredPairBytes = 0, uint64_t declaredCompressedBytes = UINT64_MAX,
+    size_t truncateBytes = 0) {
+  const std::string path = directory + "/" + filename;
+  const int major = version.empty() ? 0 : version[0] - '0';
+  const uint64_t width = major >= 2 ? 8 : 4;
+  const char *prefix = "<Dictionary GeneratedByEngineVersion=\"";
+  const std::string header = std::string(prefix) + version +
+      "\" RequiredEngineVersion=\"" + version + "\" Encrypted=\"" + encrypted +
+      "\" Encoding=\"UTF-8\"/>";
+  std::vector<uint8_t> headerUTF16;
+  for (char character : header) {
+    headerUTF16.push_back(static_cast<uint8_t>(character));
+    headerUTF16.push_back(0);
+  }
+
+  uint64_t pairCompressedTotal = 0;
+  for (const auto &[compressed, unused] : recordPairs) {
+    (void)unused;
+    pairCompressedTotal += compressed;
+  }
+  if (declaredPairBytes == 0) declaredPairBytes = recordPairs.size() * 2 * width;
+  if (declaredCompressedBytes == UINT64_MAX) declaredCompressedBytes = pairCompressedTotal;
+
+  std::vector<uint8_t> file;
+  writeBE32(file, static_cast<uint32_t>(headerUTF16.size()));
+  file.insert(file.end(), headerUTF16.begin(), headerUTF16.end());
+  writeBE32(file, adler32Bytes(headerUTF16.data(), headerUTF16.size()));
+  writeNumber(file, 0, width);  // key block count
+  writeNumber(file, 0, width);  // entry count
+  if (width == 8) {
+    writeNumber(file, 0, width);  // key-info decompressed bytes
+    writeNumber(file, 0, width);  // key-info compressed bytes
+    writeNumber(file, 0, width);  // key block bytes
+    writeBE32(file, adler32Bytes(file.data() + file.size() - 40, 40));
+  } else {
+    writeNumber(file, 0, width);  // key-info bytes
+    writeNumber(file, 0, width);  // key block bytes
+  }
+  writeNumber(file, recordPairs.size(), width);
+  writeNumber(file, 0, width);  // entry count matches key header
+  writeNumber(file, declaredPairBytes, width);
+  writeNumber(file, declaredCompressedBytes, width);
+  for (const auto &[compressed, decompressed] : recordPairs) {
+    writeNumber(file, compressed, width);
+    writeNumber(file, decompressed, width);
+  }
+  if (declaredCompressedBytes <= 4096) {
+    file.insert(file.end(), static_cast<size_t>(declaredCompressedBytes), 0);
+  }
+  if (truncateBytes > 0 && truncateBytes < file.size()) file.resize(file.size() - truncateBytes);
+
+  std::ofstream output(path, std::ios::binary);
+  require(output.good(), "open record metadata MDX");
+  output.write(reinterpret_cast<const char *>(file.data()),
+               static_cast<std::streamsize>(file.size()));
+  require(output.good(), "write record metadata MDX");
+  return path;
+}
+
+std::string buildHeaderOnlyMDX(const std::string &directory, const std::string &filename,
+                               const std::string &version, const std::string &encrypted) {
+  return buildRecordMetadataMDX(directory, filename, version, encrypted, {});
+}
+
 void sqliteRequire(int status, sqlite3 *database, const char *message) {
   if (status != SQLITE_OK && status != SQLITE_DONE) {
     std::fprintf(stderr, "SQLite fixture failure: %s (%s)\n", message,
@@ -261,6 +337,8 @@ void testAggregateAndPrivacy(const std::string &directory, const std::string &pr
   require(json.find("synthetic record") == std::string::npos &&
               json.find("alpha") == std::string::npos,
           "output hides content and headwords");
+  require(json.find("GeneratedByEngineVersion") == std::string::npos,
+          "output hides Header text");
   require(json.find("SHA") == std::string::npos && json.find("sha") == std::string::npos,
           "output hides hashes");
   require(fingerprint(mdx) == mdxHash && fileSize(mdx) == mdxSize,
@@ -294,6 +372,8 @@ void testExplicitInputsOnly(const std::string &directory, const std::string &pro
           "SQLite-only range aggregate");
   require(json.find("\"actualFileBytes\":0") != std::string::npos,
           "unprovided MDX was not discovered");
+  require(json.find("\"metricsSupportStatus\":\"noMDXInput\"") != std::string::npos,
+          "SQLite-only status identifies absent MDX");
   require(json.find(unusedMdx) == std::string::npos, "unprovided MDX not output");
 
   const std::string noInputOutput = directory + "/no-input.json";
@@ -408,6 +488,182 @@ void testMdxAndOutputFailures(const std::string &directory, const std::string &p
   std::fprintf(stderr, "  MDX failures / output protection: PASS\n");
 }
 
+void testVersionIdentificationAndLegacyRecords(const std::string &directory,
+                                               const std::string &probe) {
+  const std::string v10 = buildRecordMetadataMDX(
+      directory, "legacy-v10.mdx", "1.0", "No", {{8, 3}});
+  const std::string v10Output = directory + "/legacy-v10.json";
+  const uint64_t v10Hash = fingerprint(v10);
+  const uint64_t v10Size = fileSize(v10);
+  require(std::system(probeCommand(probe, "--mdx " + quote(v10) + " --output " +
+                                      quote(v10Output)).c_str()) == 0,
+          "v1.0 Record metrics succeed");
+  const std::string v10JSON = readFile(v10Output);
+  require(v10JSON.find("\"engineVersionMajor\":1") != std::string::npos &&
+              v10JSON.find("\"engineVersionMinor\":0") != std::string::npos,
+          "v1.0 identified anonymously");
+  require(v10JSON.find("\"metricsSupportStatus\":\"supported\"") != std::string::npos,
+          "v1.0 Record metrics supported");
+  require(v10JSON.find("\"recordBlockCount\":1") != std::string::npos &&
+              v10JSON.find("\"maximumSingleRecordBlockCompressedBytes\":8") !=
+                  std::string::npos &&
+              v10JSON.find("\"totalRecordBlockDecompressedBytes\":3") !=
+                  std::string::npos,
+          "v1.0 Record fields parsed without payload access");
+  require(fingerprint(v10) == v10Hash && fileSize(v10) == v10Size,
+          "v1.0 input unchanged");
+
+  const std::string sameVersionOutput = directory + "/same-v10.json";
+  require(std::system(probeCommand(probe, "--mdx " + quote(v10) + " --mdx " +
+                                      quote(v10) + " --output " + quote(sameVersionOutput)).c_str()) == 0,
+          "multiple same-version inputs succeed");
+  require(readFile(sameVersionOutput).find("\"metricsSupportStatus\":\"supported\"") !=
+              std::string::npos,
+          "multiple same versions retain supported status");
+
+  const std::string v12 = buildRecordMetadataMDX(
+      directory, "legacy-v12.mdx", "1.2", "No", {{8, 2}, {10, 5}});
+  const std::string v12Output = directory + "/legacy-v12.json";
+  require(std::system(probeCommand(probe, "--mdx " + quote(v12) + " --output " +
+                                      quote(v12Output)).c_str()) == 0,
+          "v1.2 Record metrics succeed");
+  const std::string v12JSON = readFile(v12Output);
+  require(v12JSON.find("\"engineVersionMinor\":2") != std::string::npos &&
+              v12JSON.find("\"recordBlockCount\":2") != std::string::npos &&
+              v12JSON.find("\"maximumSingleRecordBlockCompressedBytes\":10") !=
+                  std::string::npos &&
+              v12JSON.find("\"totalRecordBlockCompressedBytes\":18") !=
+                  std::string::npos,
+          "v1.2 multi-block Record aggregate");
+
+  const std::string mixedLegacyOutput = directory + "/mixed-v1.json";
+  require(std::system(probeCommand(probe, "--mdx " + quote(v10) + " --mdx " +
+                                      quote(v12) + " --output " + quote(mixedLegacyOutput)).c_str()) == 0,
+          "multiple legacy Record inputs succeed");
+  require(readFile(mixedLegacyOutput).find("\"metricsSupportStatus\":\"mixedVersions\"") !=
+              std::string::npos,
+          "mixed v1 versions reported anonymously");
+
+  const std::string v20 = buildMinimalMDX(directory);
+  const std::string mixedOutput = directory + "/mixed-v1-v2.json";
+  require(std::system(probeCommand(probe, "--mdx " + quote(v10) + " --mdx " +
+                                      quote(v20) + " --output " + quote(mixedOutput)).c_str()) == 0,
+          "mixed v1/v2 inputs succeed");
+  const std::string mixedJSON = readFile(mixedOutput);
+  require(mixedJSON.find("\"metricsSupportStatus\":\"mixedVersions\"") !=
+              std::string::npos &&
+              mixedJSON.find("legacy-v10.mdx") == std::string::npos &&
+              mixedJSON.find("synthetic-input.mdx") == std::string::npos,
+          "mixed versions expose no input mapping");
+
+  const std::string future = buildHeaderOnlyMDX(directory, "future.mdx", "3.0", "No");
+  const std::string futureOutput = directory + "/future.json";
+  require(std::system(probeCommand(probe, "--mdx " + quote(future) + " --output " +
+                                      quote(futureOutput)).c_str()) == 0,
+          "future version is identified without metrics parsing");
+  require(readFile(futureOutput).find(
+              "\"metricsSupportStatus\":\"identifiedButUnsupportedVersion\"") !=
+              std::string::npos,
+          "future version has precise anonymous status");
+
+  const std::string encryptedRecord = buildRecordMetadataMDX(
+      directory, "encrypted-record.mdx", "1.0", "Yes", {{8, 3}});
+  const std::string encryptedOutput = directory + "/encrypted-record.json";
+  require(std::system(probeCommand(probe, "--mdx " + quote(encryptedRecord) + " --output " +
+                                      quote(encryptedOutput)).c_str()) == 0,
+          "encrypted Record metadata is identified without payload access");
+  const std::string encryptedJSON = readFile(encryptedOutput);
+  require(encryptedJSON.find("\"encryptedMode\":1") != std::string::npos &&
+              encryptedJSON.find("\"metricsSupportStatus\":\"identifiedButUnsupportedEncryption\"") !=
+                  std::string::npos &&
+              encryptedJSON.find("\"recordBlockCount\":1") != std::string::npos,
+          "encrypted mode reports anonymous limited support");
+
+  const std::string encryptedKeyInfo = buildRecordMetadataMDX(
+      directory, "encrypted-key-info.mdx", "1.2", "2", {{8, 3}});
+  const std::string encryptedKeyInfoOutput = directory + "/encrypted-key-info.json";
+  require(std::system(probeCommand(probe, "--mdx " + quote(encryptedKeyInfo) + " --output " +
+                                      quote(encryptedKeyInfoOutput)).c_str()) == 0,
+          "encrypted key-info metadata is identified");
+  require(readFile(encryptedKeyInfoOutput).find("\"encryptedMode\":2") !=
+              std::string::npos,
+          "encrypted key-info mode remains anonymous");
+
+  const std::string malformedVersion = buildHeaderOnlyMDX(
+      directory, "malformed-version.mdx", "not-a-version", "No");
+  const std::string malformedVersionOutput = directory + "/malformed-version.json";
+  const auto [malformedVersionStatus, malformedVersionError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(malformedVersion) + " --output " +
+                              quote(malformedVersionOutput)));
+  require(malformedVersionStatus != 0 && !exists(malformedVersionOutput) &&
+              malformedVersionError.find("malformedVersion") != std::string::npos &&
+              malformedVersionError.find(malformedVersion) == std::string::npos,
+          "malformed version fails precisely without path");
+
+  const std::string malformedEncryption = buildHeaderOnlyMDX(
+      directory, "malformed-encryption.mdx", "1.0", "3");
+  const std::string malformedEncryptionOutput = directory + "/malformed-encryption.json";
+  const auto [malformedEncryptionStatus, malformedEncryptionError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(malformedEncryption) + " --output " +
+                              quote(malformedEncryptionOutput)));
+  require(malformedEncryptionStatus != 0 && !exists(malformedEncryptionOutput) &&
+              malformedEncryptionError.find("malformedEncryptedMode") != std::string::npos &&
+              malformedEncryptionError.find(malformedEncryption) == std::string::npos,
+          "malformed encrypted mode fails precisely without path");
+  std::fprintf(stderr, "  version identification / legacy Record metadata: PASS\n");
+}
+
+void testLegacyRecordMetadataFailures(const std::string &directory, const std::string &probe) {
+  const std::string truncated = buildRecordMetadataMDX(
+      directory, "legacy-truncated.mdx", "1.0", "No", {{8, 3}}, 0, UINT64_MAX, 1);
+  const std::string truncatedOutput = directory + "/legacy-truncated.json";
+  const auto [truncatedStatus, truncatedErrors] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(truncated) + " --output " + quote(truncatedOutput)));
+  require(truncatedStatus != 0 && !exists(truncatedOutput) &&
+              truncatedErrors.find("truncatedFile") != std::string::npos,
+          "v1 Record EOF minus one fails precisely");
+
+  const std::string wrongShape = buildRecordMetadataMDX(
+      directory, "legacy-wrong-shape.mdx", "1.0", "No", {{8, 3}}, 16);
+  const std::string wrongShapeOutput = directory + "/legacy-wrong-shape.json";
+  const auto [wrongShapeStatus, wrongShapeErrors] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(wrongShape) + " --output " + quote(wrongShapeOutput)));
+  require(wrongShapeStatus != 0 && !exists(wrongShapeOutput) &&
+              wrongShapeErrors.find("malformedRecordMetadata") != std::string::npos,
+          "v1 Record table shape mismatch fails precisely");
+
+  const std::string wrongTotal = buildRecordMetadataMDX(
+      directory, "legacy-wrong-total.mdx", "1.0", "No", {{8, 3}}, 0, 7);
+  const std::string wrongTotalOutput = directory + "/legacy-wrong-total.json";
+  const auto [wrongTotalStatus, wrongTotalErrors] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(wrongTotal) + " --output " + quote(wrongTotalOutput)));
+  require(wrongTotalStatus != 0 && !exists(wrongTotalOutput) &&
+              wrongTotalErrors.find("malformedRecordMetadata") != std::string::npos,
+          "v1 declared Record total mismatch fails precisely");
+
+  const std::string overflow = buildRecordMetadataMDX(
+      directory, "v2-overflow.mdx", "2.0", "Yes",
+      {{UINT64_MAX, 1}, {UINT64_MAX, 1}}, 0, 0);
+  const std::string overflowOutput = directory + "/v2-overflow.json";
+  const auto [overflowStatus, overflowErrors] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(overflow) + " --output " + quote(overflowOutput)));
+  require(overflowStatus != 0 && !exists(overflowOutput) &&
+              overflowErrors.find("arithmeticOverflow") != std::string::npos,
+          "Record compressed accumulator overflow fails precisely");
+
+  const std::string decompressedOverflow = buildRecordMetadataMDX(
+      directory, "v2-decompressed-overflow.mdx", "2.0", "Yes",
+      {{1, UINT64_MAX}, {1, UINT64_MAX}}, 0, 2);
+  const std::string decompressedOverflowOutput = directory + "/v2-decompressed-overflow.json";
+  const auto [decompressedOverflowStatus, decompressedOverflowErrors] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(decompressedOverflow) + " --output " +
+                              quote(decompressedOverflowOutput)));
+  require(decompressedOverflowStatus != 0 && !exists(decompressedOverflowOutput) &&
+              decompressedOverflowErrors.find("arithmeticOverflow") != std::string::npos,
+          "Record decompressed accumulator overflow fails precisely");
+  std::fprintf(stderr, "  legacy Record malformed metadata: PASS\n");
+}
+
 void testReleaseBinary(const std::string &directory) {
   const char *releasePath = std::getenv("MDICT_METRICS_PROBE_RELEASE_BIN");
   require(releasePath != nullptr && releasePath[0] != '\0', "release probe path provided");
@@ -430,6 +686,11 @@ void testReleaseBinary(const std::string &directory) {
   require(symbols.find("__asan_") == std::string::npos &&
               symbols.find("__ubsan_") == std::string::npos,
           "release binary has no sanitizer symbols");
+  const std::string releaseCompatibilityDirectory = directory + "/release-version-matrix";
+  require(mkdir(releaseCompatibilityDirectory.c_str(), 0700) == 0,
+          "create release version matrix workspace");
+  testVersionIdentificationAndLegacyRecords(releaseCompatibilityDirectory, releaseProbe);
+  testLegacyRecordMetadataFailures(releaseCompatibilityDirectory, releaseProbe);
   std::fprintf(stderr, "  release aggregate probe: PASS\n");
 }
 
@@ -454,6 +715,8 @@ int main() {
   testExplicitInputsOnly(workDirectory, probe);
   testSQLiteRangesAndFailures(workDirectory, probe);
   testMdxAndOutputFailures(workDirectory, probe);
+  testVersionIdentificationAndLegacyRecords(workDirectory, probe);
+  testLegacyRecordMetadataFailures(workDirectory, probe);
   testReleaseBinary(workDirectory);
 
   const std::string cleanup = "rm -rf " + quote(workDirectory);

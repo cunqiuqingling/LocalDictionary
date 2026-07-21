@@ -97,7 +97,7 @@ for src in mdict.cc binutils.cc adler32.cc; do
 done
 
 # probe (strict)
-"$CXX" "${CXXFLAGS_STRICT[@]}" -I"$ROOT/MDictCore" -I"$MDICT/src" \
+"$CXX" "${CXXFLAGS_STRICT[@]}" -I"$ROOT/MDictCore" -I"$MINIZ" -I"$MDICT/src" \
   -I"$MDICT/src/include" -I"$VENDOR" \
   "$PROBE_SRC" \
   "$OBJECTS/mdict.o" "$OBJECTS/binutils.o" "$OBJECTS/adler32.o" \

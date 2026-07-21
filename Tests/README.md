@@ -89,6 +89,20 @@ MDX total fields retain their maximum-single-input semantics; the new
 supplied SQLite inputs. Invalid SQLite types, negative offsets, decreasing
 ranges, overflow, and missing schema fail without emitting partial JSON.
 
+D1b-3A-2B-M1.1 identifies UTF-16 MDict Header versions and encryption modes
+without emitting Header text. It supports test-tool-only, read-only Record
+metadata summaries for engine 1.x (four-byte numbers) and 2.x (eight-byte
+numbers), using the vendored format's Record summary and compressed/
+decompressed pair table. It validates pair-table shape, checked offsets,
+checked accumulators, declared compressed totals, and EOF before it reads no
+more than metadata. It never reads Key text, entry text, or Record payload.
+Unknown future major versions remain successful anonymous identifications with
+`identifiedButUnsupportedVersion`; encrypted inputs report
+`identifiedButUnsupportedEncryption` because detailed Key metadata is not
+claimed without decrypting it. `metricsSupportStatus` is a fixed anonymous
+enum: `supported`, `identifiedButUnsupportedVersion`,
+`identifiedButUnsupportedEncryption`, `mixedVersions`, or `noMDXInput`.
+
 Codex and CI run only the generated synthetic fixtures. A dictionary owner who
 chooses to run the Release-only tool manually must provide every input and may
 retain only the resulting anonymous JSON outside the repository:
