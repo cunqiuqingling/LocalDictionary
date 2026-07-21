@@ -70,6 +70,39 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-resource-payload-download-smoke.sh` covers the offline D1b-2B single-MDX payload boundary. It verifies signed/App exact-host intersection, UInt64 size and disk-capacity limits, chunk-by-chunk POSIX writes, incremental SHA-256, HTTP and redirect policy, cancellation and single-flight behavior, `0700`/`0600` staging permissions, failure cleanup, and fsync/atomic publication from `.partial-*` to `verified-*`. It uses only synthetic bytes, temporary directories, and an injected `URLProtocol`; production payload hosts remain empty and no Catalog, index, query, AppDelegate, UI, real resource, or Keychain is involved.
 
+## D1b-3A-2B-M1 anonymous Record compatibility metrics
+
+`run-mdict-resource-metrics-probe-smoke.sh` builds a synthetic-only Debug
+(ASan/UBSan, warnings-as-errors) and Release (`-O2 -DNDEBUG`,
+warnings-as-errors) probe. It accepts only explicitly supplied repeated
+`--mdx <path>` and `--sqlite <path>` inputs; it never scans directories,
+`local.json`, Application Support, or any default dictionary location. The
+probe opens supplied SQLite files read-only and does not alter its inputs or
+create journal/WAL/SHM sidecars.
+
+Its JSON is one anonymous global aggregate, containing only numeric metadata
+and fixed field names. It never writes input paths, filenames, dictionary IDs,
+headwords, entry text, record bytes, hashes, UUIDs, or row samples. Existing
+MDX total fields retain their maximum-single-input semantics; the new
+`maximumRecordRangeBytes` is the maximum validated
+`entries.record_end - entries.record_start` range across all explicitly
+supplied SQLite inputs. Invalid SQLite types, negative offsets, decreasing
+ranges, overflow, and missing schema fail without emitting partial JSON.
+
+Codex and CI run only the generated synthetic fixtures. A dictionary owner who
+chooses to run the Release-only tool manually must provide every input and may
+retain only the resulting anonymous JSON outside the repository:
+
+```sh
+Tests/run-mdict-resource-metrics-probe.sh --release \
+  --mdx /path/to/owner-supplied.mdx \
+  --sqlite /path/to/owner-supplied.sqlite \
+  --output /path/to/anonymous-record-metrics.json
+```
+
+The placeholders above are documentation only: do not add real private paths,
+dictionary files, indexes, or produced metrics JSON to Git.
+
 The repository is currently source-only and targets macOS 15.0+ on arm64. A clean clone builds from tracked `ThirdParty/vendor` files without a submodule, a separate mdict-cpp clone, Homebrew dependencies, or private `local.json`. The only runtime permission required for selection lookup is Accessibility; the App does not request screen recording, microphone, or system audio recording permission.
 
 ## C1 manual acceptance checklist

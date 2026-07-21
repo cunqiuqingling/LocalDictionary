@@ -25,7 +25,7 @@ VENDOR="$ROOT/ThirdParty/vendor"
 
 # ---------- argument scanning ----------
 RELEASE_MODE=0
-HAS_DICTIONARY=0
+HAS_EXPLICIT_INPUT=0
 FORWARD_ARGS=()
 
 for arg in "$@"; do
@@ -33,8 +33,8 @@ for arg in "$@"; do
     --release)
       RELEASE_MODE=1
       ;;
-    --dictionary)
-      HAS_DICTIONARY=1
+    --mdx|--sqlite)
+      HAS_EXPLICIT_INPUT=1
       FORWARD_ARGS+=("$arg")
       ;;
     *)
@@ -44,8 +44,8 @@ for arg in "$@"; do
 done
 
 # ---------- safety gate ----------
-if (( HAS_DICTIONARY && ! RELEASE_MODE )); then
-  print -u2 "Error: real dictionary measurement requires --release"
+if (( HAS_EXPLICIT_INPUT && ! RELEASE_MODE )); then
+  print -u2 "Error: explicit dictionary or index measurement requires --release"
   exit 1
 fi
 
@@ -103,6 +103,7 @@ done
   "$OBJECTS/mdict.o" "$OBJECTS/binutils.o" "$OBJECTS/adler32.o" \
   "$OBJECTS/rmd128.o" "$OBJECTS/ripemd128-adapter.o" \
   "$OBJECTS/miniz.o" "$OBJECTS/miniz_tinfl.o" "$OBJECTS/miniz_tdef.o" \
+  -lsqlite3 \
   -o "$BUILD_DIR/MDictResourceMetricsProbe"
 
 exec "$BUILD_DIR/MDictResourceMetricsProbe" "${FORWARD_ARGS[@]}"
