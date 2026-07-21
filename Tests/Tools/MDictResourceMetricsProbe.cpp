@@ -41,6 +41,59 @@ enum class ProbeError {
   internalFailure,
 };
 
+// Fixed, anonymous checksum diagnostics. These values describe only which
+// bounded verification path stopped; they intentionally carry no checksum,
+// path, Header, or input identity data.
+enum class ChecksumFailureStage { none, header, keyInfo, keyBlock, recordBlock };
+enum class ChecksumStatus { valid, mismatch, notReached, notChecked, notApplicable };
+enum class HeaderChecksumEncodingMatch {
+  canonicalBigEndian,
+  byteReversed,
+  neither,
+  notChecked,
+};
+
+const char *checksumFailureStageString(ChecksumFailureStage value) {
+  switch (value) {
+    case ChecksumFailureStage::none: return "none";
+    case ChecksumFailureStage::header: return "header";
+    case ChecksumFailureStage::keyInfo: return "keyInfo";
+    case ChecksumFailureStage::keyBlock: return "keyBlock";
+    case ChecksumFailureStage::recordBlock: return "recordBlock";
+  }
+  return "none";
+}
+
+const char *checksumStatusString(ChecksumStatus value) {
+  switch (value) {
+    case ChecksumStatus::valid: return "valid";
+    case ChecksumStatus::mismatch: return "mismatch";
+    case ChecksumStatus::notReached: return "notReached";
+    case ChecksumStatus::notChecked: return "notChecked";
+    case ChecksumStatus::notApplicable: return "notApplicable";
+  }
+  return "notChecked";
+}
+
+const char *headerChecksumEncodingMatchString(HeaderChecksumEncodingMatch value) {
+  switch (value) {
+    case HeaderChecksumEncodingMatch::canonicalBigEndian: return "canonicalBigEndian";
+    case HeaderChecksumEncodingMatch::byteReversed: return "byteReversed";
+    case HeaderChecksumEncodingMatch::neither: return "neither";
+    case HeaderChecksumEncodingMatch::notChecked: return "notChecked";
+  }
+  return "notChecked";
+}
+
+struct ChecksumDiagnostics {
+  ChecksumFailureStage failureStage = ChecksumFailureStage::none;
+  ChecksumStatus header = ChecksumStatus::notChecked;
+  ChecksumStatus keyInfo = ChecksumStatus::notChecked;
+  ChecksumStatus keyBlock = ChecksumStatus::notChecked;
+  ChecksumStatus recordBlock = ChecksumStatus::notChecked;
+  HeaderChecksumEncodingMatch headerEncoding = HeaderChecksumEncodingMatch::notChecked;
+};
+
 const char *errorCodeString(ProbeError error) {
   switch (error) {
     case ProbeError::none: return "none";
@@ -92,6 +145,13 @@ bool isRegularFile(const char *path, uint64_t *size = nullptr) {
 uint32_t readBE32(const uint8_t *bytes) {
   return (uint32_t(bytes[0]) << 24) | (uint32_t(bytes[1]) << 16) |
          (uint32_t(bytes[2]) << 8) | uint32_t(bytes[3]);
+}
+
+uint32_t byteReverse32(uint32_t value) {
+  return ((value & UINT32_C(0x000000ff)) << 24) |
+         ((value & UINT32_C(0x0000ff00)) << 8) |
+         ((value & UINT32_C(0x00ff0000)) >> 8) |
+         ((value & UINT32_C(0xff000000)) >> 24);
 }
 
 uint64_t readBE64(const uint8_t *bytes) {
@@ -254,6 +314,7 @@ struct MdxMetrics {
   EngineVersion engineVersion;
   bool recordMetricsSupported = false;
   bool keyDetailUnavailable = false;
+  ChecksumDiagnostics checksum;
 };
 
 struct AggregateMetrics {
@@ -275,6 +336,13 @@ ProbeError collectV2KeyMetrics(const char *path, MdxMetrics &metrics) {
   mdict::Mdict dictionary(path);
   try {
     dictionary.initMetadataOnly();
+  } catch (const mdict::ResourceException &error) {
+    if (error.code() == mdict::ResourceErrorCode::checksumMismatch) {
+      metrics.checksum.failureStage = ChecksumFailureStage::keyInfo;
+      metrics.checksum.keyInfo = ChecksumStatus::mismatch;
+      return ProbeError::checksumMismatch;
+    }
+    return ProbeError::malformedRecordMetadata;
   } catch (const std::exception &) {
     return ProbeError::malformedRecordMetadata;
   }
@@ -291,6 +359,7 @@ ProbeError collectV2KeyMetrics(const char *path, MdxMetrics &metrics) {
     maxAssign(metrics.maximumSingleKeyBlockCompressedBytes, block->key_block_comp_size);
     maxAssign(metrics.maximumSingleKeyBlockDecompressedBytes, block->key_block_decomp_size);
   }
+  metrics.checksum.keyInfo = ChecksumStatus::valid;
   return ProbeError::none;
 }
 
@@ -319,7 +388,19 @@ ProbeError collectMdxMetrics(const char *path, MdxMetrics &metrics) {
   const uint32_t expectedChecksum = readBE32(checksumBytes);
   const uint32_t actualChecksum = static_cast<uint32_t>(
       mz_adler32(MZ_ADLER32_INIT, header.data(), header.size()));
-  if (actualChecksum != expectedChecksum) return ProbeError::checksumMismatch;
+  if (actualChecksum != expectedChecksum) {
+    metrics.checksum.failureStage = ChecksumFailureStage::header;
+    metrics.checksum.header = ChecksumStatus::mismatch;
+    metrics.checksum.keyInfo = ChecksumStatus::notReached;
+    metrics.checksum.keyBlock = ChecksumStatus::notReached;
+    metrics.checksum.recordBlock = ChecksumStatus::notReached;
+    metrics.checksum.headerEncoding = byteReverse32(expectedChecksum) == actualChecksum
+        ? HeaderChecksumEncodingMatch::byteReversed
+        : HeaderChecksumEncodingMatch::neither;
+    return ProbeError::checksumMismatch;
+  }
+  metrics.checksum.header = ChecksumStatus::valid;
+  metrics.checksum.headerEncoding = HeaderChecksumEncodingMatch::canonicalBigEndian;
 
   std::string headerText;
   if (!decodeHeaderASCII(header, headerText)) return ProbeError::invalidHeader;
@@ -411,8 +492,31 @@ ProbeError collectMdxMetrics(const char *path, MdxMetrics &metrics) {
     if (keyError != ProbeError::none) return keyError;
   } else {
     metrics.keyDetailUnavailable = true;
+    metrics.checksum.keyInfo = metrics.engineVersion.major < 2
+        ? ChecksumStatus::notApplicable
+        : ChecksumStatus::notChecked;
   }
   return ProbeError::none;
+}
+
+ChecksumStatus mergeChecksumStatus(ChecksumStatus lhs, ChecksumStatus rhs) {
+  if (lhs == rhs) return lhs;
+  if (lhs == ChecksumStatus::mismatch || rhs == ChecksumStatus::mismatch)
+    return ChecksumStatus::mismatch;
+  if (lhs == ChecksumStatus::notReached || rhs == ChecksumStatus::notReached)
+    return ChecksumStatus::notReached;
+  if (lhs == ChecksumStatus::notChecked || rhs == ChecksumStatus::notChecked)
+    return ChecksumStatus::notChecked;
+  // A mixed supported/not-applicable aggregate must not claim universal
+  // validation of an unavailable stage.
+  if (lhs == ChecksumStatus::notApplicable || rhs == ChecksumStatus::notApplicable)
+    return ChecksumStatus::notChecked;
+  return ChecksumStatus::valid;
+}
+
+HeaderChecksumEncodingMatch mergeHeaderEncoding(
+    HeaderChecksumEncodingMatch lhs, HeaderChecksumEncodingMatch rhs) {
+  return lhs == rhs ? lhs : HeaderChecksumEncodingMatch::notChecked;
 }
 
 void mergeMdxMetrics(AggregateMetrics &aggregate, const MdxMetrics &input) {
@@ -420,6 +524,7 @@ void mergeMdxMetrics(AggregateMetrics &aggregate, const MdxMetrics &input) {
     aggregate.hasMdx = true;
     aggregate.minimumVersion = input.engineVersion;
     aggregate.maximumVersion = input.engineVersion;
+    aggregate.mdx.checksum = input.checksum;
   } else {
     if (versionLess(input.engineVersion, aggregate.minimumVersion))
       aggregate.minimumVersion = input.engineVersion;
@@ -428,6 +533,16 @@ void mergeMdxMetrics(AggregateMetrics &aggregate, const MdxMetrics &input) {
     if (input.engineVersion.major != aggregate.minimumVersion.major ||
         input.engineVersion.minor != aggregate.minimumVersion.minor)
       aggregate.hasMixedVersions = true;
+    aggregate.mdx.checksum.header = mergeChecksumStatus(
+        aggregate.mdx.checksum.header, input.checksum.header);
+    aggregate.mdx.checksum.keyInfo = mergeChecksumStatus(
+        aggregate.mdx.checksum.keyInfo, input.checksum.keyInfo);
+    aggregate.mdx.checksum.keyBlock = mergeChecksumStatus(
+        aggregate.mdx.checksum.keyBlock, input.checksum.keyBlock);
+    aggregate.mdx.checksum.recordBlock = mergeChecksumStatus(
+        aggregate.mdx.checksum.recordBlock, input.checksum.recordBlock);
+    aggregate.mdx.checksum.headerEncoding = mergeHeaderEncoding(
+        aggregate.mdx.checksum.headerEncoding, input.checksum.headerEncoding);
   }
   maxAssign(aggregate.mdx.actualFileBytes, input.actualFileBytes);
   maxAssign(aggregate.mdx.headerBytes, input.headerBytes);
@@ -569,6 +684,14 @@ void writeAggregateJSON(JSONWriter &writer, const AggregateMetrics &aggregate) {
   writer.fieldI32("minimumEngineVersionMajor", aggregate.minimumVersion.major);
   writer.fieldI32("minimumEngineVersionMinor", aggregate.minimumVersion.minor);
   writer.fieldString("metricsSupportStatus", metricsSupportStatus(aggregate));
+  writer.fieldString("checksumFailureStage",
+                     checksumFailureStageString(aggregate.mdx.checksum.failureStage));
+  writer.fieldString("headerChecksumStatus", checksumStatusString(aggregate.mdx.checksum.header));
+  writer.fieldString("keyInfoChecksumStatus", checksumStatusString(aggregate.mdx.checksum.keyInfo));
+  writer.fieldString("keyBlockChecksumStatus", checksumStatusString(aggregate.mdx.checksum.keyBlock));
+  writer.fieldString("recordBlockChecksumStatus", checksumStatusString(aggregate.mdx.checksum.recordBlock));
+  writer.fieldString("headerChecksumEncodingMatch",
+                     headerChecksumEncodingMatchString(aggregate.mdx.checksum.headerEncoding));
   writer.key("unavailable");
   writer.buffer += "[\"maximumSingleKeyBytes\",\"maximumObservedRecordRangeBytes\"";
   if (aggregate.mdx.keyDetailUnavailable) {
@@ -578,14 +701,28 @@ void writeAggregateJSON(JSONWriter &writer, const AggregateMetrics &aggregate) {
   writer.closeObject();
 }
 
+void writeChecksumDiagnosticJSON(JSONWriter &writer, const ChecksumDiagnostics &diagnostics) {
+  writer.openObject();
+  writer.fieldI32("schemaVersion", 2);
+  writer.fieldString("checksumFailureStage", checksumFailureStageString(diagnostics.failureStage));
+  writer.fieldString("headerChecksumStatus", checksumStatusString(diagnostics.header));
+  writer.fieldString("keyInfoChecksumStatus", checksumStatusString(diagnostics.keyInfo));
+  writer.fieldString("keyBlockChecksumStatus", checksumStatusString(diagnostics.keyBlock));
+  writer.fieldString("recordBlockChecksumStatus", checksumStatusString(diagnostics.recordBlock));
+  writer.fieldString("headerChecksumEncodingMatch",
+                     headerChecksumEncodingMatchString(diagnostics.headerEncoding));
+  writer.closeObject();
+}
+
 void printUsage(const char *program) {
   std::fprintf(stderr,
-      "Usage: %s (--mdx <path> | --sqlite <path>)... --output <output.json> [--force]\n"
+      "Usage: %s (--mdx <path> | --sqlite <path>)... --output <output.json> [--force] [--diagnose-checksum]\n"
       "\n"
       "  --mdx path       Explicit MDX metadata input; may be repeated.\n"
       "  --sqlite path    Explicit read-only SQLite range input; may be repeated.\n"
       "  --output path    Write anonymous aggregate JSON (0600).\n"
       "  --force          Overwrite an existing output file.\n"
+      "  --diagnose-checksum  Emit fixed anonymous JSON to stdout on checksum failure.\n"
       "\n"
       "The tool never scans for dictionaries, reads application state, or emits\n"
       "input paths, names, headwords, record content, hashes, or row values.\n",
@@ -611,6 +748,7 @@ int main(int argc, char **argv) {
   std::vector<Input> inputs;
   const char *outputPath = nullptr;
   bool force = false;
+  bool diagnoseChecksum = false;
   size_t mdxOrdinal = 0;
   size_t sqliteOrdinal = 0;
 
@@ -627,6 +765,8 @@ int main(int argc, char **argv) {
       outputPath = argv[++index];
     } else if (std::strcmp(argv[index], "--force") == 0) {
       force = true;
+    } else if (std::strcmp(argv[index], "--diagnose-checksum") == 0) {
+      diagnoseChecksum = true;
     } else if (std::strcmp(argv[index], "--help") == 0 ||
                std::strcmp(argv[index], "-h") == 0) {
       printUsage(argv[0]);
@@ -653,6 +793,14 @@ int main(int argc, char **argv) {
       MdxMetrics metrics;
       const ProbeError error = collectMdxMetrics(input.path.c_str(), metrics);
       if (error != ProbeError::none) {
+        if (diagnoseChecksum && error == ProbeError::checksumMismatch) {
+          JSONWriter diagnostic;
+          writeChecksumDiagnosticJSON(diagnostic, metrics.checksum);
+          std::fputs(diagnostic.buffer.c_str(), stdout);
+          std::fputc('\n', stdout);
+          std::fputs("Error: checksum verification failed; anonymous diagnostic emitted.\n", stderr);
+          return 1;
+        }
         printInputFailure(input.kind, input.ordinal, error);
         return 1;
       }

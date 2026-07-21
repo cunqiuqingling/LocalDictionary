@@ -112,6 +112,82 @@ void writeBE64(std::vector<uint8_t> &bytes, uint64_t value) {
   }
 }
 
+// Golden Header fixtures are deliberately fixed UTF-16LE byte arrays. Their
+// Adler-32 constants were independently precomputed before this source was
+// written; this smoke never calls a checksum helper to create an expectation.
+// v1.0 and v1.2 differ by exactly the ASCII version-minor byte (0x30/0x32).
+constexpr uint8_t kGoldenHeaderV10[] = {
+    0x3C, 0x00, 0x44, 0x00, 0x69, 0x00, 0x63, 0x00, 0x74, 0x00, 0x69, 0x00,
+    0x6F, 0x00, 0x6E, 0x00, 0x61, 0x00, 0x72, 0x00, 0x79, 0x00, 0x20, 0x00,
+    0x47, 0x00, 0x65, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x72, 0x00, 0x61, 0x00,
+    0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x42, 0x00, 0x79, 0x00, 0x45, 0x00,
+    0x6E, 0x00, 0x67, 0x00, 0x69, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x56, 0x00,
+    0x65, 0x00, 0x72, 0x00, 0x73, 0x00, 0x69, 0x00, 0x6F, 0x00, 0x6E, 0x00,
+    0x3D, 0x00, 0x22, 0x00, 0x31, 0x00, 0x2E, 0x00, 0x30, 0x00, 0x22, 0x00,
+    0x20, 0x00, 0x45, 0x00, 0x6E, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00,
+    0x70, 0x00, 0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x3D, 0x00, 0x22, 0x00,
+    0x4E, 0x00, 0x6F, 0x00, 0x22, 0x00, 0x2F, 0x00, 0x3E, 0x00,
+};
+constexpr uint8_t kGoldenHeaderV12[] = {
+    0x3C, 0x00, 0x44, 0x00, 0x69, 0x00, 0x63, 0x00, 0x74, 0x00, 0x69, 0x00,
+    0x6F, 0x00, 0x6E, 0x00, 0x61, 0x00, 0x72, 0x00, 0x79, 0x00, 0x20, 0x00,
+    0x47, 0x00, 0x65, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x72, 0x00, 0x61, 0x00,
+    0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x42, 0x00, 0x79, 0x00, 0x45, 0x00,
+    0x6E, 0x00, 0x67, 0x00, 0x69, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x56, 0x00,
+    0x65, 0x00, 0x72, 0x00, 0x73, 0x00, 0x69, 0x00, 0x6F, 0x00, 0x6E, 0x00,
+    0x3D, 0x00, 0x22, 0x00, 0x31, 0x00, 0x2E, 0x00, 0x32, 0x00, 0x22, 0x00,
+    0x20, 0x00, 0x45, 0x00, 0x6E, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00,
+    0x70, 0x00, 0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x3D, 0x00, 0x22, 0x00,
+    0x4E, 0x00, 0x6F, 0x00, 0x22, 0x00, 0x2F, 0x00, 0x3E, 0x00,
+};
+constexpr uint8_t kGoldenHeaderV20Encrypted[] = {
+    0x3C, 0x00, 0x44, 0x00, 0x69, 0x00, 0x63, 0x00, 0x74, 0x00, 0x69, 0x00,
+    0x6F, 0x00, 0x6E, 0x00, 0x61, 0x00, 0x72, 0x00, 0x79, 0x00, 0x20, 0x00,
+    0x47, 0x00, 0x65, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x72, 0x00, 0x61, 0x00,
+    0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x42, 0x00, 0x79, 0x00, 0x45, 0x00,
+    0x6E, 0x00, 0x67, 0x00, 0x69, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x56, 0x00,
+    0x65, 0x00, 0x72, 0x00, 0x73, 0x00, 0x69, 0x00, 0x6F, 0x00, 0x6E, 0x00,
+    0x3D, 0x00, 0x22, 0x00, 0x32, 0x00, 0x2E, 0x00, 0x30, 0x00, 0x22, 0x00,
+    0x20, 0x00, 0x45, 0x00, 0x6E, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00,
+    0x70, 0x00, 0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x3D, 0x00, 0x22, 0x00,
+    0x59, 0x00, 0x65, 0x00, 0x73, 0x00, 0x22, 0x00, 0x2F, 0x00, 0x3E, 0x00,
+};
+constexpr uint32_t kGoldenHeaderV10Checksum = UINT32_C(0x0FEB1482);
+constexpr uint32_t kGoldenHeaderV12Checksum = UINT32_C(0x10371484);
+constexpr uint32_t kGoldenHeaderV20Checksum = UINT32_C(0x3BB514F7);
+
+void writeFixture(const std::string &path, const std::vector<uint8_t> &bytes) {
+  std::ofstream output(path, std::ios::binary);
+  require(output.good(), "open fixed golden fixture");
+  output.write(reinterpret_cast<const char *>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  require(output.good(), "write fixed golden fixture");
+}
+
+std::string buildGoldenHeaderMDX(const std::string &directory, const std::string &filename,
+                                 const uint8_t *header, size_t headerLength,
+                                 uint32_t fixedChecksum, int major,
+                                 bool metadataAfterChecksum = true) {
+  std::vector<uint8_t> file;
+  writeBE32(file, static_cast<uint32_t>(headerLength));
+  file.insert(file.end(), header, header + headerLength);
+  writeBE32(file, fixedChecksum);
+  if (metadataAfterChecksum) {
+    const uint64_t width = major >= 2 ? 8 : 4;
+    const size_t keyHeaderFields = major >= 2 ? 5 : 4;
+    for (size_t index = 0; index < keyHeaderFields; ++index) {
+      if (width == 4) writeBE32(file, 0); else writeBE64(file, 0);
+    }
+    if (major >= 2) writeBE32(file, 0);  // unused when Encrypted="Yes"
+    for (size_t index = 0; index < 4; ++index) {
+      if (width == 4) writeBE32(file, 0); else writeBE64(file, 0);
+    }
+  }
+  const std::string path = directory + "/" + filename;
+  writeFixture(path, file);
+  return path;
+}
+
 std::string buildMinimalMDX(const std::string &directory) {
   const std::string path = directory + "/synthetic-input.mdx";
   const char *header =
@@ -319,6 +395,8 @@ std::string probeCommand(const std::string &probe, const std::string &arguments)
   return quote(probe) + " " + arguments;
 }
 
+void requireChecksumField(const std::string &json, const char *name, const char *value);
+
 void testAggregateAndPrivacy(const std::string &directory, const std::string &probe) {
   const std::string mdx = buildMinimalMDX(directory);
   const std::string index = directory + "/synthetic-ranges.sqlite";
@@ -340,6 +418,12 @@ void testAggregateAndPrivacy(const std::string &directory, const std::string &pr
           "maximum record range");
   require(json.find("\"recordBlockInfoBytes\":") != std::string::npos,
           "legacy record info field retained");
+  requireChecksumField(json, "checksumFailureStage", "none");
+  requireChecksumField(json, "headerChecksumStatus", "valid");
+  requireChecksumField(json, "keyInfoChecksumStatus", "valid");
+  requireChecksumField(json, "keyBlockChecksumStatus", "notChecked");
+  requireChecksumField(json, "recordBlockChecksumStatus", "notChecked");
+  requireChecksumField(json, "headerChecksumEncodingMatch", "canonicalBigEndian");
   require(json.find("\"dictionaries\"") == std::string::npos,
           "no per-dictionary output");
   require(json.find(mdx) == std::string::npos && json.find(index) == std::string::npos,
@@ -501,6 +585,251 @@ void testMdxAndOutputFailures(const std::string &directory, const std::string &p
                                       quote(protectedOutput) + " --force").c_str()) == 0,
           "force output succeeds");
   std::fprintf(stderr, "  MDX failures / output protection: PASS\n");
+}
+
+void requireChecksumField(const std::string &json, const char *name, const char *value) {
+  const std::string field = std::string("\"") + name + "\":\"" + value + "\"";
+  require(json.find(field) != std::string::npos, "anonymous checksum diagnostic field");
+}
+
+void writeBE32At(std::vector<uint8_t> &bytes, size_t offset, uint32_t value) {
+  require(offset <= bytes.size() && bytes.size() - offset >= 4, "checksum fixture field bounds");
+  for (size_t index = 0; index < 4; ++index) {
+    bytes[offset + index] = static_cast<uint8_t>((value >> ((3 - index) * 8)) & 0xff);
+  }
+}
+
+std::vector<uint8_t> fixtureBytes(const std::string &path) {
+  const std::string data = readFile(path);
+  return {data.begin(), data.end()};
+}
+
+void assertChecksumDiagnosticPrivacy(const std::string &diagnostic,
+                                     const std::string &directory,
+                                     const std::string &basename) {
+  require(diagnostic.find(directory) == std::string::npos &&
+              diagnostic.find(basename) == std::string::npos,
+          "checksum diagnostic hides input path and basename");
+  require(diagnostic.find("Dictionary") == std::string::npos &&
+              diagnostic.find("GeneratedByEngineVersion") == std::string::npos,
+          "checksum diagnostic hides Header text");
+  require(diagnostic.find("0FEB1482") == std::string::npos &&
+              diagnostic.find("267064450") == std::string::npos,
+          "checksum diagnostic hides checksum values");
+  require(diagnostic.find("\"actualFileBytes\"") == std::string::npos,
+          "checksum diagnostic is not partial metrics");
+}
+
+void testChecksumDiagnosticsAndGoldenFixtures(const std::string &directory,
+                                              const std::string &probe) {
+  // The v1.0/v1.2 fixtures differ in exactly one Header byte and have distinct
+  // hardcoded checksum constants. The test never recomputes either constant.
+  const std::string v10 = buildGoldenHeaderMDX(
+      directory, "golden-v10.mdx", kGoldenHeaderV10, sizeof(kGoldenHeaderV10),
+      kGoldenHeaderV10Checksum, 1);
+  const std::string v12 = buildGoldenHeaderMDX(
+      directory, "golden-v12.mdx", kGoldenHeaderV12, sizeof(kGoldenHeaderV12),
+      kGoldenHeaderV12Checksum, 1);
+  const std::string v20 = buildGoldenHeaderMDX(
+      directory, "golden-v20.mdx", kGoldenHeaderV20Encrypted,
+      sizeof(kGoldenHeaderV20Encrypted), kGoldenHeaderV20Checksum, 2);
+  const uint64_t v10Hash = fingerprint(v10);
+  const uint64_t v10Size = fileSize(v10);
+  const std::string v10Xattrs = xattrNames(v10);
+  require(kGoldenHeaderV10Checksum != kGoldenHeaderV12Checksum,
+          "one-byte Header coverage boundary has distinct fixed checksums");
+
+  for (const std::string *input : {&v10, &v12, &v20}) {
+    const std::string output = *input + ".json";
+    require(std::system(probeCommand(probe, "--mdx " + quote(*input) + " --output " +
+                                        quote(output)).c_str()) == 0,
+            "fixed canonical Header accepted");
+    const std::string json = readFile(output);
+    requireChecksumField(json, "checksumFailureStage", "none");
+    requireChecksumField(json, "headerChecksumStatus", "valid");
+    requireChecksumField(json, "headerChecksumEncodingMatch", "canonicalBigEndian");
+    requireChecksumField(json, "keyBlockChecksumStatus", "notChecked");
+    requireChecksumField(json, "recordBlockChecksumStatus", "notChecked");
+  }
+
+  // A checksum ending exactly at EOF is accepted by the checksum path; the
+  // later missing Key metadata yields only the expected truncated-file error.
+  const std::string exactEOF = buildGoldenHeaderMDX(
+      directory, "golden-exact-eof.mdx", kGoldenHeaderV10, sizeof(kGoldenHeaderV10),
+      kGoldenHeaderV10Checksum, 1, false);
+  const std::string exactEOFOutput = exactEOF + ".json";
+  const auto [exactEOFStatus, exactEOFError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(exactEOF) + " --output " + quote(exactEOFOutput)));
+  require(exactEOFStatus != 0 && !exists(exactEOFOutput) &&
+              exactEOFError.find("truncatedFile") != std::string::npos &&
+              exactEOFError.find("checksumMismatch") == std::string::npos,
+          "checksum at exact EOF is accepted before later metadata truncation");
+
+  std::vector<uint8_t> missingChecksum = fixtureBytes(exactEOF);
+  missingChecksum.pop_back();
+  const std::string missingOne = directory + "/golden-missing-one.mdx";
+  writeFixture(missingOne, missingChecksum);
+  const std::string missingOneOutput = missingOne + ".json";
+  const auto [missingStatus, missingError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(missingOne) + " --output " + quote(missingOneOutput)));
+  require(missingStatus != 0 && !exists(missingOneOutput) &&
+              missingError.find("truncatedFile") != std::string::npos &&
+              missingError.find("checksumMismatch") == std::string::npos,
+          "missing checksum byte is truncated rather than mismatch");
+
+  auto diagnose = [&](const std::string &input, const std::string &output) {
+    return runCaptured(probeCommand(
+        probe, "--diagnose-checksum --mdx " + quote(input) + " --output " + quote(output)));
+  };
+  const size_t checksumOffset = 4 + sizeof(kGoldenHeaderV10);
+  std::vector<uint8_t> reversed = fixtureBytes(v10);
+  writeBE32At(reversed, checksumOffset, UINT32_C(0x8214EB0F));
+  const std::string reversedPath = directory + "/golden-reversed.mdx";
+  writeFixture(reversedPath, reversed);
+  const std::string reversedOutput = reversedPath + ".json";
+  const auto [defaultReversedStatus, defaultReversedError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(reversedPath) + " --output " + quote(reversedOutput)));
+  require(defaultReversedStatus != 0 && !exists(reversedOutput) &&
+              defaultReversedError.find("checksumMismatch") != std::string::npos,
+          "default mode strictly rejects byte-reversed checksum without diagnostics");
+  const auto [reversedStatus, reversedDiagnostic] = diagnose(reversedPath, reversedOutput);
+  require(reversedStatus != 0 && !exists(reversedOutput), "byte-reversed checksum remains strict failure");
+  requireChecksumField(reversedDiagnostic, "checksumFailureStage", "header");
+  requireChecksumField(reversedDiagnostic, "headerChecksumStatus", "mismatch");
+  requireChecksumField(reversedDiagnostic, "headerChecksumEncodingMatch", "byteReversed");
+  requireChecksumField(reversedDiagnostic, "keyInfoChecksumStatus", "notReached");
+  requireChecksumField(reversedDiagnostic, "keyBlockChecksumStatus", "notReached");
+  requireChecksumField(reversedDiagnostic, "recordBlockChecksumStatus", "notReached");
+  assertChecksumDiagnosticPrivacy(reversedDiagnostic, directory, "golden-reversed.mdx");
+
+  std::vector<uint8_t> headerOnlyMismatch = fixtureBytes(exactEOF);
+  writeBE32At(headerOnlyMismatch, checksumOffset, UINT32_C(0xA1B2C3D4));
+  const std::string headerOnlyMismatchPath = directory + "/golden-header-only-mismatch.mdx";
+  writeFixture(headerOnlyMismatchPath, headerOnlyMismatch);
+  const auto [headerOnlyMismatchStatus, headerOnlyMismatchDiagnostic] = diagnose(
+      headerOnlyMismatchPath, headerOnlyMismatchPath + ".json");
+  require(headerOnlyMismatchStatus != 0, "Header mismatch occurs before missing metadata");
+  requireChecksumField(headerOnlyMismatchDiagnostic, "checksumFailureStage", "header");
+  require(headerOnlyMismatchDiagnostic.find("truncatedFile") == std::string::npos,
+          "Header mismatch does not continue into Record metadata");
+
+  std::vector<uint8_t> neither = fixtureBytes(v10);
+  writeBE32At(neither, checksumOffset, UINT32_C(0xA1B2C3D4));
+  const std::string neitherPath = directory + "/golden-neither.mdx";
+  writeFixture(neitherPath, neither);
+  const std::string neitherOutput = neitherPath + ".json";
+  const auto [neitherStatus, neitherDiagnostic] = diagnose(neitherPath, neitherOutput);
+  require(neitherStatus != 0 && !exists(neitherOutput), "neither checksum remains strict failure");
+  requireChecksumField(neitherDiagnostic, "headerChecksumEncodingMatch", "neither");
+  assertChecksumDiagnosticPrivacy(neitherDiagnostic, directory, "golden-neither.mdx");
+
+  std::vector<uint8_t> tamperedHeader = fixtureBytes(v10);
+  tamperedHeader[4] ^= UINT8_C(0x01);
+  const std::string tamperedHeaderPath = directory + "/golden-header-tampered.mdx";
+  writeFixture(tamperedHeaderPath, tamperedHeader);
+  const auto [tamperedHeaderStatus, tamperedHeaderDiagnostic] = diagnose(
+      tamperedHeaderPath, tamperedHeaderPath + ".json");
+  require(tamperedHeaderStatus != 0, "tampered Header fixed checksum fails");
+  requireChecksumField(tamperedHeaderDiagnostic, "checksumFailureStage", "header");
+
+  std::vector<uint8_t> tamperedChecksum = fixtureBytes(v10);
+  tamperedChecksum[checksumOffset] ^= UINT8_C(0x01);
+  const std::string tamperedChecksumPath = directory + "/golden-checksum-tampered.mdx";
+  writeFixture(tamperedChecksumPath, tamperedChecksum);
+  const auto [tamperedChecksumStatus, tamperedChecksumDiagnostic] = diagnose(
+      tamperedChecksumPath, tamperedChecksumPath + ".json");
+  require(tamperedChecksumStatus != 0, "tampered checksum byte fails");
+  requireChecksumField(tamperedChecksumDiagnostic, "checksumFailureStage", "header");
+
+  std::vector<uint8_t> changedLength = fixtureBytes(v10);
+  writeBE32At(changedLength, 0, static_cast<uint32_t>(sizeof(kGoldenHeaderV10) - 2));
+  const std::string changedLengthPath = directory + "/golden-length-changed.mdx";
+  writeFixture(changedLengthPath, changedLength);
+  const auto [changedLengthStatus, changedLengthError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(changedLengthPath) + " --output " +
+                              quote(changedLengthPath + ".json")));
+  require(changedLengthStatus != 0 && changedLengthError.find("checksumMismatch") != std::string::npos,
+          "changed Header length cannot reuse checksum coverage");
+
+  std::vector<uint8_t> declaredPastEOF = fixtureBytes(v10);
+  writeBE32At(declaredPastEOF, 0, static_cast<uint32_t>(declaredPastEOF.size()));
+  const std::string declaredPastEOFPath = directory + "/golden-length-eof.mdx";
+  writeFixture(declaredPastEOFPath, declaredPastEOF);
+  const auto [pastEOFStatus, pastEOFError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(declaredPastEOFPath) + " --output " +
+                              quote(declaredPastEOFPath + ".json")));
+  require(pastEOFStatus != 0 && pastEOFError.find("truncatedFile") != std::string::npos,
+          "declared Header length past EOF is truncated");
+
+  std::vector<uint8_t> tooLarge = fixtureBytes(v10);
+  writeBE32At(tooLarge, 0, UINT32_C(16 * 1024 * 1024 + 1));
+  const std::string tooLargePath = directory + "/golden-length-too-large.mdx";
+  writeFixture(tooLargePath, tooLarge);
+  const auto [tooLargeStatus, tooLargeError] = runCaptured(
+      probeCommand(probe, "--mdx " + quote(tooLargePath) + " --output " +
+                              quote(tooLargePath + ".json")));
+  require(tooLargeStatus != 0 && tooLargeError.find("headerTooLarge") != std::string::npos,
+          "declared Header length over tool limit is rejected");
+
+  const std::string validFirstOutput = directory + "/must-not-exist-multi.json";
+  const auto [multiStatus, multiDiagnostic] = runCaptured(probeCommand(
+      probe, "--diagnose-checksum --mdx " + quote(v12) + " --mdx " + quote(neitherPath) +
+                 " --output " + quote(validFirstOutput)));
+  require(multiStatus != 0 && !exists(validFirstOutput),
+          "later checksum failure writes no partial aggregate");
+  requireChecksumField(multiDiagnostic, "checksumFailureStage", "header");
+  require(multiDiagnostic.find("golden-v12.mdx") == std::string::npos,
+          "multi-input diagnostic exposes no input mapping");
+
+  const std::string untouchedSQLite = directory + "/checksum-not-sqlite.sqlite";
+  createEntriesDatabase(untouchedSQLite, {{0, 7}});
+  const uint64_t sqliteHash = fingerprint(untouchedSQLite);
+  const uint64_t sqliteSize = fileSize(untouchedSQLite);
+  const std::string sqliteXattrs = xattrNames(untouchedSQLite);
+  const std::string checksumBeforeSQLiteOutput = directory + "/checksum-before-sqlite.json";
+  const auto [checksumBeforeSQLiteStatus, checksumBeforeSQLiteDiagnostic] = runCaptured(probeCommand(
+      probe, "--diagnose-checksum --mdx " + quote(neitherPath) + " --sqlite " +
+                 quote(untouchedSQLite) + " --output " + quote(checksumBeforeSQLiteOutput)));
+  require(checksumBeforeSQLiteStatus != 0 && !exists(checksumBeforeSQLiteOutput),
+          "checksum mismatch blocks later SQLite aggregate output");
+  requireChecksumField(checksumBeforeSQLiteDiagnostic, "checksumFailureStage", "header");
+  require(fingerprint(untouchedSQLite) == sqliteHash && fileSize(untouchedSQLite) == sqliteSize &&
+              xattrNames(untouchedSQLite) == sqliteXattrs,
+          "Header mismatch does not access or modify later SQLite input");
+  require(!exists(untouchedSQLite + "-journal") && !exists(untouchedSQLite + "-wal") &&
+              !exists(untouchedSQLite + "-shm"),
+          "checksum mismatch creates no SQLite sidecars");
+
+  // Mutating a v2 Key-info checksum reaches the typed vendor exception. The
+  // probe preserves that closed error as the fixed keyInfo stage without using
+  // exception text or exposing any MDX metadata.
+  const std::string keyInfoSource = buildMinimalMDX(directory);
+  std::vector<uint8_t> keyInfoMismatch = fixtureBytes(keyInfoSource);
+  const size_t sourceHeaderBytes = (size_t(keyInfoMismatch[0]) << 24) |
+      (size_t(keyInfoMismatch[1]) << 16) | (size_t(keyInfoMismatch[2]) << 8) |
+      size_t(keyInfoMismatch[3]);
+  const size_t keyInfoChecksumOffset = 4 + sourceHeaderBytes + 4 + 40 + 4 + 4;
+  require(keyInfoChecksumOffset < keyInfoMismatch.size(), "key-info checksum fixture offset");
+  keyInfoMismatch[keyInfoChecksumOffset] ^= UINT8_C(0x01);
+  const std::string keyInfoPath = directory + "/golden-key-info-mismatch.mdx";
+  writeFixture(keyInfoPath, keyInfoMismatch);
+  const std::string keyInfoOutput = keyInfoPath + ".json";
+  const auto [keyInfoStatus, keyInfoDiagnostic] = diagnose(keyInfoPath, keyInfoOutput);
+  require(keyInfoStatus != 0 && !exists(keyInfoOutput), "key-info mismatch remains strict failure");
+  requireChecksumField(keyInfoDiagnostic, "checksumFailureStage", "keyInfo");
+  requireChecksumField(keyInfoDiagnostic, "headerChecksumStatus", "valid");
+  requireChecksumField(keyInfoDiagnostic, "keyInfoChecksumStatus", "mismatch");
+  requireChecksumField(keyInfoDiagnostic, "keyBlockChecksumStatus", "notChecked");
+  requireChecksumField(keyInfoDiagnostic, "recordBlockChecksumStatus", "notChecked");
+  requireChecksumField(keyInfoDiagnostic, "headerChecksumEncodingMatch", "canonicalBigEndian");
+  assertChecksumDiagnosticPrivacy(keyInfoDiagnostic, directory, "golden-key-info-mismatch.mdx");
+  require(fingerprint(v10) == v10Hash && fileSize(v10) == v10Size &&
+              xattrNames(v10) == v10Xattrs,
+          "golden MDX input remains byte-identical with unchanged xattrs");
+  require(!exists(v10 + "-journal") && !exists(v10 + "-wal") && !exists(v10 + "-shm"),
+          "golden MDX creates no sidecars");
+
+  std::fprintf(stderr, "  checksum diagnostics / fixed golden Headers: PASS\n");
 }
 
 void testVersionIdentificationAndLegacyRecords(const std::string &directory,
@@ -706,6 +1035,7 @@ void testReleaseBinary(const std::string &directory) {
           "create release version matrix workspace");
   testVersionIdentificationAndLegacyRecords(releaseCompatibilityDirectory, releaseProbe);
   testLegacyRecordMetadataFailures(releaseCompatibilityDirectory, releaseProbe);
+  testChecksumDiagnosticsAndGoldenFixtures(releaseCompatibilityDirectory, releaseProbe);
   std::fprintf(stderr, "  release aggregate probe: PASS\n");
 }
 
@@ -730,6 +1060,7 @@ int main() {
   testExplicitInputsOnly(workDirectory, probe);
   testSQLiteRangesAndFailures(workDirectory, probe);
   testMdxAndOutputFailures(workDirectory, probe);
+  testChecksumDiagnosticsAndGoldenFixtures(workDirectory, probe);
   testVersionIdentificationAndLegacyRecords(workDirectory, probe);
   testLegacyRecordMetadataFailures(workDirectory, probe);
   testReleaseBinary(workDirectory);

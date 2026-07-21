@@ -103,6 +103,37 @@ claimed without decrypting it. `metricsSupportStatus` is a fixed anonymous
 enum: `supported`, `identifiedButUnsupportedVersion`,
 `identifiedButUnsupportedEncryption`, `mixedVersions`, or `noMDXInput`.
 
+D1b-3A-2B-M1.2 keeps checksum verification strict and adds an optional
+`--diagnose-checksum` failure protocol for owner-run Release measurements. On
+a checksum failure it writes only fixed anonymous JSON to stdout and returns
+nonzero; it never emits a partial metrics file. `checksumFailureStage` is one
+of `none`, `header`, `keyInfo`, `keyBlock`, or `recordBlock`. Each stage status
+is one of `valid`, `mismatch`, `notReached`, `notChecked`, or `notApplicable`.
+`headerChecksumEncodingMatch` is `canonicalBigEndian`, `byteReversed`,
+`neither`, or `notChecked`. `byteReversed` is only an anonymous observation:
+it remains a strict failure and is not a supported compatibility format.
+Header mismatch stops before version, encryption, Key, or Record parsing;
+`notReached` means a preceding failure prevented the stage, whereas
+`notChecked` means the probe intentionally does not read that payload.
+
+The probe never writes expected/actual checksum values, raw Header bytes,
+Header text, paths, filenames, or input mappings. The smoke uses tiny fixed
+golden UTF-16LE byte arrays with independently precomputed, hardcoded Header
+checksum constants, including canonical, byte-reversed, mismatch, exact-EOF,
+missing-byte, and one-byte-coverage-boundary cases. Runtime fixture creation
+does not call an Adler helper to construct those expected constants. Manual
+diagnosis remains outside Codex and must use placeholders only:
+
+```sh
+Tests/run-mdict-resource-metrics-probe.sh --release --diagnose-checksum \
+  --mdx /path/to/owner-supplied.mdx \
+  --output /path/to/anonymous-checksum-output.json
+```
+
+Do not commit a private MDX, SQLite database, local path, or either output
+file. The total runtime assertion count includes fixture/setup assertions; it
+is not a count of independent security behaviours.
+
 Codex and CI run only the generated synthetic fixtures. A dictionary owner who
 chooses to run the Release-only tool manually must provide every input and may
 retain only the resulting anonymous JSON outside the repository:
