@@ -110,14 +110,23 @@ the build; the reviewed vendored files already contain their result.
    `openat`/`renameat` hardening remains D1b-3B; reading size from the opened
    stream avoids a separate stat-size lookup but is not described as complete
    path/open TOCTOU hardening.
+8. D1b-3A-2A-R2.1 Resource regression coverage (manually applied; no
+   standalone patch file): restores synthetic parser-path coverage for Header
+   checksum and EOF boundaries, Key-info prefix and external Adler checks,
+   Key-info/per-block limits, checked offset overflow, and version-1
+   four-byte Header fields.  The extra Key-info input-allocation counter and
+   the Header-only fixture entry point exist only when
+   `MDICT_RESOURCE_TEST_OBSERVER` is defined.  In production builds,
+   `key_list_item` has no explicit test destructor, the observer declarations
+   and state do not exist, and no observer symbol or string is emitted.
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
 
 | Upstream path | Upstream SHA-256 | Vendored SHA-256 |
 |---|---|---|
-| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `88131b74a3978c11813cf0847090df1b2de8170fad22bb77db1903b662e83160` |
-| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `3836095309c1bc2c22f04a685390c779f2dc8598e088d396e7ab59ded5b9e3b4` |
+| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `0e6b4bd6213eadcda47257f0c9e068521d1a455f995a78dce32f713d9b8e8c42` |
+| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `9b8191ed83f3bfc9c397fff3308bc8f839de9ea311e37cdbea7a1d30980fb658` |
 | `src/include/zlib_wrapper.h` | `29d187709287366541e387cdea35cbe39c8eea6ad32cd92746276ca0c05c0b28` | `0e1e75b8ee84014cd731b033aa755991cc3d055db6f39595bcb91e18d0c5a356` |
 | `src/encode/base64.h` | `6c0264e1941fcf458b5d7200751cb561025c0e2f616c136e0e07bfdc81f5b4b5` | `19113b27ba310db9fd8cf22988de90f301825e2cc317690614019651a505be51` |
 
@@ -128,7 +137,7 @@ New files added by D1b-3A-2A:
 | `src/include/resource_limits.h` | `3e80afdbbaa1a4c7ef6b381ee69e23956defc25260bc8c470c917f02c197a036` |
 | `src/include/checked_arithmetic.h` | `c6b8b19e05b522209d26ce40194ac1df4d82da3ea578eb5e420bfca18a7b7881` |
 | `src/include/bounded_zlib.h` | `1ca20f9bc6b258ab21b10ecb93c3db422943cc5ff5874619f508110d643f41c6` |
-| `src/include/resource_test_observer.h` | `0ea917b54183d9d4766d5e7f91d2c306bea1b0e78340036c5a8f381e6296bb85` |
+| `src/include/resource_test_observer.h` | `417df2bde852787b84d88f8e7d5573089edc7384fb6a6330701092705ef8ff7d` |
 
 All other mdict-cpp paths listed above are byte-identical to the fixed commit;
 their hashes are in `SHA256SUMS`. Excluded content includes turbobase64,

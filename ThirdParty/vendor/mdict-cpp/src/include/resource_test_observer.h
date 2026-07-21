@@ -20,6 +20,7 @@ namespace mdict {
 
 struct ResourceTestObserverSnapshot {
   uint64_t inputBufferAllocationCount;
+  uint64_t keyBlockInfoInputBufferAllocationCount;
   uint64_t outputBufferAllocationCount;
   uint64_t uncompressCallCount;
   uint64_t keyItemLiveCount;
@@ -29,6 +30,7 @@ void resetResourceTestObserver() noexcept;
 ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept;
 
 void observeInputBufferAllocation() noexcept;
+void observeKeyBlockInfoInputBufferAllocation() noexcept;
 void observeOutputBufferAllocation() noexcept;
 void observeUncompressCall() noexcept;
 void observeKeyItemCreated() noexcept;

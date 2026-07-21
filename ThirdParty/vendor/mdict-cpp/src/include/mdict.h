@@ -197,11 +197,14 @@ class key_list_item {
     observeKeyItemCreated();
 #endif
   }
-  ~key_list_item() {
+  // This explicit destructor exists only in the test-observer build.  The
+  // production type keeps its implicit destructor and therefore has no test
+  // lifecycle hook, symbol, or altered special-member semantics.
 #ifdef MDICT_RESOURCE_TEST_OBSERVER
+  ~key_list_item() {
     observeKeyItemDestroyed();
-#endif
   }
+#endif
 };
 
 class record_header_item {
@@ -432,6 +435,12 @@ class Mdict {
    * Read and parse the dictionary header
    */
   void read_header();
+
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+  // Opens this synthetic fixture and executes only the real Header parser.
+  // This is intentionally absent from production builds.
+  void readHeaderForResourceTest();
+#endif
 
   /**
    * Read the key block header

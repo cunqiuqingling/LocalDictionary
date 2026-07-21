@@ -5,6 +5,7 @@
 
 #include "mdict.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -80,6 +81,30 @@ uint32_t readBE32(const uint8_t *bytes) {
          (static_cast<uint32_t>(bytes[1]) << 16) |
          (static_cast<uint32_t>(bytes[2]) << 8) |
          static_cast<uint32_t>(bytes[3]);
+}
+
+uint64_t readBE64(const uint8_t *bytes) {
+  uint64_t value = 0;
+  for (int index = 0; index < 8; ++index) {
+    value = (value << 8) | bytes[index];
+  }
+  return value;
+}
+
+void overwriteBE32(std::vector<uint8_t> &buffer, size_t offset,
+                   uint32_t value) {
+  for (int index = 3; index >= 0; --index) {
+    buffer[offset + static_cast<size_t>(3 - index)] =
+        static_cast<uint8_t>((value >> (index * 8)) & 0xff);
+  }
+}
+
+void overwriteBE64(std::vector<uint8_t> &buffer, size_t offset,
+                   uint64_t value) {
+  for (int index = 7; index >= 0; --index) {
+    buffer[offset + static_cast<size_t>(7 - index)] =
+        static_cast<uint8_t>((value >> (index * 8)) & 0xff);
+  }
 }
 
 uint32_t adler32Bytes(const void *bytes, size_t length) {
@@ -273,6 +298,24 @@ void writeFixture(const std::string &path, const BuiltFixture &fixture) {
   require(output.good(), "write synthetic fixture");
 }
 
+void writeBytes(const std::string &path, const std::vector<uint8_t> &bytes) {
+  std::ofstream output(path, std::ios::binary);
+  require(output.good(), "open synthetic byte fixture");
+  output.write(reinterpret_cast<const char *>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  require(output.good(), "write synthetic byte fixture");
+}
+
+size_t keyHeaderOffset(const BuiltFixture &fixture) {
+  return static_cast<size_t>(readBE32(fixture.bytes.data())) + 8U;
+}
+
+size_t keyInfoOffset(const BuiltFixture &fixture) {
+  return keyHeaderOffset(fixture) + 44U;
+}
+
+void deleteReturnedKeys(std::vector<mdict::key_list_item *> &items);
+
 BlockSpec oneBlock(std::vector<KeySpec> keys, uint64_t declared,
                    uint8_t compression = 2) {
   BlockSpec block;
@@ -384,6 +427,408 @@ void testCheckedArithmetic() {
         static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1);
   });
   std::fprintf(stderr, "  checked arithmetic (all 7 helpers): PASS\n");
+}
+
+FixtureSpec basicFixtureSpec() {
+  FixtureSpec spec;
+  spec.blocks = {oneBlock({{"alpha"}}, 1)};
+  return spec;
+}
+
+mdict::ResourceLimits maximalKeyLimits();
+
+void testHeaderRegressionMatrix(const std::string &directory) {
+  const BuiltFixture valid = buildFixture(basicFixtureSpec());
+  const size_t header_size = readBE32(valid.bytes.data());
+  const size_t checksum_offset = header_size + 4U;
+
+  const std::string valid_path = directory + "/header-valid.mdx";
+  writeFixture(valid_path, valid);
+  {
+    mdict::Mdict dictionary(valid_path, smallLimits());
+    dictionary.initMetadataOnly();
+    require(dictionary.headerBytesSize() == header_size,
+            "correct Header checksum reaches Header parser");
+  }
+
+  {
+    BuiltFixture wrong = valid;
+    wrong.bytes[checksum_offset] ^= 0x01;
+    const std::string path = directory + "/header-checksum-wrong.mdx";
+    writeFixture(path, wrong);
+    expectCode(ResourceErrorCode::checksumMismatch,
+               "wrong Header checksum exact code", [&] {
+      mdict::Mdict dictionary(path, smallLimits());
+      dictionary.initMetadataOnly();
+    });
+  }
+
+  {
+    BuiltFixture endian = valid;
+    std::reverse(endian.bytes.begin() + static_cast<std::ptrdiff_t>(checksum_offset),
+                 endian.bytes.begin() + static_cast<std::ptrdiff_t>(checksum_offset + 4));
+    if (std::equal(endian.bytes.begin() + static_cast<std::ptrdiff_t>(checksum_offset),
+                   endian.bytes.begin() + static_cast<std::ptrdiff_t>(checksum_offset + 4),
+                   valid.bytes.begin() + static_cast<std::ptrdiff_t>(checksum_offset))) {
+      endian.bytes[checksum_offset] ^= 0x01;
+    }
+    const std::string path = directory + "/header-checksum-byte-order.mdx";
+    writeFixture(path, endian);
+    expectCode(ResourceErrorCode::checksumMismatch,
+               "byte-reversed Header checksum exact code", [&] {
+      mdict::Mdict dictionary(path, smallLimits());
+      dictionary.initMetadataOnly();
+    });
+  }
+
+  {
+    std::vector<uint8_t> header_only(valid.bytes.begin(),
+                                     valid.bytes.begin() +
+                                         static_cast<std::ptrdiff_t>(header_size + 8U));
+    const std::string path = directory + "/header-at-eof.mdx";
+    writeBytes(path, header_only);
+    mdict::Mdict dictionary(path, smallLimits());
+    dictionary.readHeaderForResourceTest();
+    require(dictionary.actualFileBytes() == header_only.size(),
+            "Header checksum accepted when final byte is EOF");
+  }
+
+  {
+    std::vector<uint8_t> truncated(valid.bytes.begin(),
+                                   valid.bytes.begin() +
+                                       static_cast<std::ptrdiff_t>(header_size + 7U));
+    const std::string path = directory + "/header-checksum-minus-one.mdx";
+    writeBytes(path, truncated);
+    expectCode(ResourceErrorCode::truncatedFile,
+               "Header checksum missing one byte exact code", [&] {
+      mdict::Mdict dictionary(path, smallLimits());
+      dictionary.readHeaderForResourceTest();
+    });
+  }
+
+  {
+    const std::string path = directory + "/header-over-limit.mdx";
+    writeFixture(path, valid);
+    auto limits = smallLimits();
+    limits.maximumHeaderBytes = header_size - 1U;
+    limits.validate();
+    expectCode(ResourceErrorCode::headerTooLarge,
+               "declared Header size exceeds injected limit", [&] {
+      mdict::Mdict dictionary(path, limits);
+      dictionary.readHeaderForResourceTest();
+    });
+  }
+
+  {
+    BuiltFixture truncated = valid;
+    overwriteBE32(truncated.bytes, 0, static_cast<uint32_t>(header_size + 1U));
+    truncated.bytes.resize(header_size + 8U);
+    const std::string path = directory + "/header-declared-past-eof.mdx";
+    writeFixture(path, truncated);
+    expectCode(ResourceErrorCode::truncatedFile,
+               "declared Header size past EOF exact code", [&] {
+      mdict::Mdict dictionary(path, smallLimits());
+      dictionary.readHeaderForResourceTest();
+    });
+  }
+
+  {
+    const std::string path = directory + "/file-over-limit.mdx";
+    writeFixture(path, valid);
+    auto limits = smallLimits();
+    limits.maximumFileBytes = valid.bytes.size() - 1U;
+    limits.maximumHeaderBytes = header_size;
+    limits.maximumKeyBlockInfoCompressedBytes = UINT64_C(128);
+    limits.maximumSingleKeyBlockCompressedBytes = UINT64_C(128);
+    limits.maximumTotalKeyBlockCompressedBytes = UINT64_C(128);
+    limits.maximumSingleRecordBlockCompressedBytes = UINT64_C(128);
+    limits.maximumTotalRecordBlockCompressedBytes = UINT64_C(128);
+    limits.maximumRecordRangeBytes = UINT64_C(128);
+    limits.maximumReturnedRecordBytes = UINT64_C(128);
+    limits.validate();
+    expectCode(ResourceErrorCode::fileTooLarge,
+               "actual file size exceeds injected limit", [&] {
+      mdict::Mdict dictionary(path, limits);
+      dictionary.readHeaderForResourceTest();
+    });
+  }
+  std::fprintf(stderr, "  Header checksum/EOF/limit matrix: PASS\n");
+}
+
+void testKeyInfoPrefixAndChecksum(const std::string &directory) {
+  const BuiltFixture valid = buildFixture(basicFixtureSpec());
+  const size_t key_header = keyHeaderOffset(valid);
+  const size_t info_size_offset = key_header + 24U;
+
+  for (uint64_t size : {UINT64_C(0), UINT64_C(1), UINT64_C(3),
+                        UINT64_C(4), UINT64_C(7), UINT64_C(8)}) {
+    BuiltFixture fixture = valid;
+    overwriteBE64(fixture.bytes, info_size_offset, size);
+    const std::string path = directory + "/key-info-prefix-" +
+                             std::to_string(size) + ".mdx";
+    writeFixture(path, fixture);
+    expectCode(ResourceErrorCode::malformedKeyBlockMetadata,
+               "short or empty key-info prefix exact code", [&] {
+      mdict::Mdict dictionary(path, smallLimits());
+      dictionary.initMetadataOnly();
+    });
+  }
+
+  {
+    const std::string path = directory + "/key-info-normal.mdx";
+    writeFixture(path, valid);
+    mdict::Mdict dictionary(path, smallLimits());
+    dictionary.initMetadataOnly();
+    require(dictionary.keyBlockInfoList().size() == 1,
+            "normal key-info size reaches actual metadata parser");
+  }
+  {
+    BuiltFixture corrupt = valid;
+    corrupt.bytes[keyInfoOffset(corrupt) + 4U] ^= 0x01;
+    const std::string path = directory + "/key-info-external-adler-bad.mdx";
+    writeFixture(path, corrupt);
+    expectCode(ResourceErrorCode::checksumMismatch,
+               "key-info external Adler exact code", [&] {
+      mdict::Mdict dictionary(path, smallLimits());
+      dictionary.initMetadataOnly();
+    });
+  }
+  std::fprintf(stderr, "  key-info prefix and external Adler matrix: PASS\n");
+}
+
+void testKeyInfoAndKeyBlockLimitBoundaries(const std::string &directory) {
+  const BuiltFixture fixture = buildFixture(basicFixtureSpec());
+  const std::string path = directory + "/key-limit-boundaries.mdx";
+  writeFixture(path, fixture);
+  const uint64_t info_compressed = readBE64(fixture.bytes.data() +
+                                             keyHeaderOffset(fixture) + 24U);
+  const uint64_t info_decompressed = readBE64(fixture.bytes.data() +
+                                               keyHeaderOffset(fixture) + 16U);
+
+  {
+    auto limits = smallLimits();
+    limits.maximumKeyBlockInfoCompressedBytes = info_compressed;
+    limits.validate();
+    mdict::Mdict dictionary(path, limits);
+    dictionary.initMetadataOnly();
+    require(dictionary.keyBlockInfoCompressedSize() == info_compressed,
+            "key-info compressed exact upper limit accepted");
+  }
+  {
+    auto limits = smallLimits();
+    limits.maximumKeyBlockInfoCompressedBytes = info_compressed - 1U;
+    limits.validate();
+    mdict::resetResourceTestObserver();
+    expectCode(ResourceErrorCode::keyBlockInfoCompressedTooLarge,
+               "key-info compressed upper limit plus one", [&] {
+      mdict::Mdict dictionary(path, limits);
+      dictionary.initMetadataOnly();
+    });
+    require(mdict::resourceTestObserverSnapshot()
+                    .keyBlockInfoInputBufferAllocationCount == 0,
+            "key-info compressed limit precedes metadata input allocation");
+  }
+  {
+    auto limits = smallLimits();
+    limits.maximumKeyBlockInfoDecompressedBytes = info_decompressed;
+    limits.validate();
+    mdict::Mdict dictionary(path, limits);
+    dictionary.initMetadataOnly();
+    require(dictionary.keyBlockInfoDecompressedSize() == info_decompressed,
+            "key-info decompressed exact upper limit accepted");
+  }
+  {
+    auto limits = smallLimits();
+    limits.maximumKeyBlockInfoDecompressedBytes = info_decompressed - 1U;
+    limits.validate();
+    mdict::resetResourceTestObserver();
+    expectCode(ResourceErrorCode::keyBlockInfoDecompressedTooLarge,
+               "key-info decompressed upper limit plus one", [&] {
+      mdict::Mdict dictionary(path, limits);
+      dictionary.initMetadataOnly();
+    });
+    const auto snapshot = mdict::resourceTestObserverSnapshot();
+    require(snapshot.keyBlockInfoInputBufferAllocationCount == 0,
+            "key-info decompressed limit precedes metadata input allocation");
+    require(snapshot.outputBufferAllocationCount == 0,
+            "key-info decompressed limit precedes output allocation");
+    require(snapshot.uncompressCallCount == 0,
+            "key-info decompressed limit precedes uncompress");
+  }
+
+  const uint64_t block_decompressed = fixture.actualDecompressedSizes.front();
+  {
+    auto limits = smallLimits();
+    limits.maximumKeyBlockInfoDecompressedBytes = info_decompressed;
+    limits.maximumSingleKeyBlockDecompressedBytes = block_decompressed;
+    limits.maximumTotalKeyBlockDecompressedBytes =
+        std::max(block_decompressed, info_decompressed);
+    limits.validate();
+    mdict::Mdict dictionary(path, limits);
+    dictionary.init();
+    require(dictionary.keyList().size() == 1,
+            "single key block decompressed exact upper limit accepted");
+  }
+  {
+    mdict::Mdict dictionary(path, smallLimits());
+    dictionary.initMetadataOnly();
+    auto &limits = const_cast<mdict::ResourceLimits &>(dictionary.resourceLimits());
+    limits.maximumSingleKeyBlockDecompressedBytes = block_decompressed - 1U;
+    mdict::resetResourceTestObserver();
+    expectCode(ResourceErrorCode::singleKeyBlockDecompressedTooLarge,
+               "single key block decompressed upper limit plus one", [&] {
+      (void)dictionary.decode_key_block_by_block_id(0);
+    });
+    const auto snapshot = mdict::resourceTestObserverSnapshot();
+    require(snapshot.inputBufferAllocationCount == 0,
+            "single key decompressed limit precedes block input allocation");
+    require(snapshot.uncompressCallCount == 0,
+            "single key decompressed limit precedes block uncompress");
+  }
+
+  {
+    FixtureSpec total_spec;
+    total_spec.blocks = {oneBlock({{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                                   {"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                                   {"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+                                   {"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},
+                                  4)};
+    const BuiltFixture total_fixture = buildFixture(total_spec);
+    const std::string total_path = directory + "/total-key-limits.mdx";
+    writeFixture(total_path, total_fixture);
+    const uint64_t total_info_decompressed =
+        readBE64(total_fixture.bytes.data() + keyHeaderOffset(total_fixture) + 16U);
+    const uint64_t total_block_compressed = total_fixture.actualCompressedSizes.front();
+    const uint64_t total_block_decompressed = total_fixture.actualDecompressedSizes.front();
+    require(total_block_decompressed >= total_info_decompressed,
+            "total boundary fixture satisfies ResourceLimits relation");
+    auto limits = smallLimits();
+    limits.maximumKeyBlockInfoDecompressedBytes = total_info_decompressed;
+    limits.maximumSingleKeyBlockCompressedBytes = total_block_compressed;
+    limits.maximumSingleKeyBlockDecompressedBytes = total_block_decompressed;
+    limits.maximumTotalKeyBlockCompressedBytes = total_block_compressed;
+    limits.maximumTotalKeyBlockDecompressedBytes = total_block_decompressed;
+    limits.validate();
+    mdict::Mdict dictionary(total_path, limits);
+    dictionary.init();
+    require(dictionary.keyList().size() == 4,
+            "total key compressed/decompressed exact upper limits accepted");
+  }
+  std::fprintf(stderr, "  key-info and key-block exact/over limit matrix: PASS\n");
+}
+
+void testEOFOverflowAndNumberWidthFour(const std::string &directory) {
+  const BuiltFixture valid = buildFixture(basicFixtureSpec());
+  const uint64_t key_body_size =
+      readBE64(valid.bytes.data() + keyHeaderOffset(valid) + 32U);
+  {
+    BuiltFixture at_eof = valid;
+    at_eof.bytes.resize(at_eof.keyBodyOffset +
+                         static_cast<size_t>(key_body_size));
+    const std::string path = directory + "/key-body-at-eof.mdx";
+    writeFixture(path, at_eof);
+    mdict::Mdict dictionary(path, smallLimits());
+    dictionary.readHeaderForResourceTest();
+    dictionary.read_key_block_header();
+    dictionary.read_key_block_info_metadata();
+    std::vector<mdict::key_list_item *> keys =
+        dictionary.decode_key_block_by_block_id(0);
+    require(keys.size() == 1,
+            "complete key block ending at EOF accepted");
+    deleteReturnedKeys(keys);
+  }
+  {
+    BuiltFixture truncated = valid;
+    truncated.bytes.resize(truncated.keyBodyOffset +
+                           static_cast<size_t>(key_body_size - 1U));
+    const std::string path = directory + "/key-body-minus-one.mdx";
+    writeFixture(path, truncated);
+    mdict::resetResourceTestObserver();
+    try {
+      mdict::Mdict dictionary(path, smallLimits());
+      dictionary.readHeaderForResourceTest();
+      dictionary.read_key_block_header();
+      dictionary.read_key_block_info_metadata();
+      (void)dictionary.decode_key_block_by_block_id(0);
+      require(false, "key block missing one byte must throw");
+    } catch (const ResourceException &error) {
+      require(error.code() == ResourceErrorCode::truncatedFile,
+              "key block missing one byte exact code");
+    }
+    require(mdict::resourceTestObserverSnapshot().inputBufferAllocationCount == 0,
+            "truncated key block rejected before input allocation");
+  }
+  {
+    BuiltFixture overflow = valid;
+    const size_t header = keyHeaderOffset(overflow);
+    const uint64_t start = keyInfoOffset(overflow);
+    overwriteBE64(overflow.bytes, header + 24U, UINT64_MAX - start + 1U);
+    const std::string path = directory + "/key-info-offset-overflow.mdx";
+    writeFixture(path, overflow);
+    auto limits = maximalKeyLimits();
+    limits.maximumKeyBlockInfoCompressedBytes = UINT64_MAX;
+    limits.validate();
+    expectCode(ResourceErrorCode::arithmeticOverflow,
+               "key-info offset plus size overflow exact code", [&] {
+      mdict::Mdict dictionary(path, limits);
+      dictionary.initMetadataOnly();
+    });
+  }
+  {
+    const std::string path = directory + "/key-block-offset-overflow.mdx";
+    writeFixture(path, valid);
+    mdict::Mdict dictionary(path, smallLimits());
+    dictionary.initMetadataOnly();
+    const_cast<mdict::key_block_info *>(dictionary.keyBlockInfoList().front())
+        ->key_block_comp_accumulator = UINT64_MAX;
+    expectCode(ResourceErrorCode::arithmeticOverflow,
+               "key block offset plus size overflow exact code", [&] {
+      (void)dictionary.decode_key_block_by_block_id(0);
+    });
+  }
+  {
+    const std::string xml =
+        "<Dictionary GeneratedByEngineVersion=\"1.0\" "
+        "RequiredEngineVersion=\"1.0\" Encrypted=\"No\" Encoding=\"UTF-8\"/>";
+    std::vector<uint8_t> header_utf16;
+    appendEncodedText(header_utf16, xml, FixtureEncoding::utf16);
+    std::vector<uint8_t> bytes;
+    writeBE32(bytes, static_cast<uint32_t>(header_utf16.size()));
+    bytes.insert(bytes.end(), header_utf16.begin(), header_utf16.end());
+    writeBE32(bytes, adler32Bytes(header_utf16.data(), header_utf16.size()));
+    writeBE32(bytes, 3);
+    writeBE32(bytes, 7);
+    writeBE32(bytes, 1);
+    writeBE32(bytes, 1);
+    bytes.push_back(0);
+    const std::string path = directory + "/version-one-width-four.mdx";
+    writeBytes(path, bytes);
+    mdict::Mdict dictionary(path, smallLimits());
+    dictionary.readHeaderForResourceTest();
+    dictionary.read_key_block_header();
+    require(dictionary.keyBlockCount() == 3,
+            "number_width four reads key_block_num field");
+    require(dictionary.entryCount() == 7,
+            "number_width four reads entries_num field");
+    require(dictionary.keyBlockCount() != dictionary.entryCount(),
+            "number_width four fields do not overwrite each other");
+  }
+  std::fprintf(stderr, "  EOF/overflow/number-width-four parser paths: PASS\n");
+}
+
+void testAnonymousCompatibilityLowerBounds() {
+  const auto limits = mdict::ResourceLimits::productionDefaults();
+  require(limits.maximumFileBytes >= UINT64_C(33718916), "compat file lower bound");
+  require(limits.maximumHeaderBytes >= UINT64_C(2466), "compat Header lower bound");
+  require(limits.maximumKeyBlockInfoCompressedBytes >= UINT64_C(6719), "compat key-info compressed lower bound");
+  require(limits.maximumKeyBlockInfoDecompressedBytes >= UINT64_C(16495), "compat key-info decompressed lower bound");
+  require(limits.maximumKeyBlockCount >= UINT64_C(308), "compat key-block count lower bound");
+  require(limits.maximumEntryCount >= UINT64_C(483723), "compat entry count lower bound");
+  require(limits.maximumSingleKeyBlockCompressedBytes >= UINT64_C(15416), "compat single key compressed lower bound");
+  require(limits.maximumSingleKeyBlockDecompressedBytes >= UINT64_C(32769), "compat single key decompressed lower bound");
+  require(limits.maximumTotalKeyBlockCompressedBytes >= UINT64_C(3688100), "compat total key compressed lower bound");
+  require(limits.maximumTotalKeyBlockDecompressedBytes >= UINT64_C(10080682), "compat total key decompressed lower bound");
+  std::fprintf(stderr, "  anonymous production compatibility lower bounds: PASS\n");
 }
 
 void testBaselineIntegrity(const std::string &directory) {
@@ -970,8 +1415,13 @@ int main() {
 
   std::fprintf(stderr, "D1b3A2AResourceLimitsSmoke-R2\n");
   testProductionDefaults();
+  testAnonymousCompatibilityLowerBounds();
   testResourceLimitValidation();
   testCheckedArithmetic();
+  testHeaderRegressionMatrix(directory);
+  testKeyInfoPrefixAndChecksum(directory);
+  testKeyInfoAndKeyBlockLimitBoundaries(directory);
+  testEOFOverflowAndNumberWidthFour(directory);
   testBaselineIntegrity(directory);
   testRealKeyBlockCount(directory);
   testEntryCounts(directory);

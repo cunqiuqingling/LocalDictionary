@@ -8,8 +8,14 @@ suite in Debug (ASan/UBSan and warnings-as-errors) and Release
 global entry counts, RAII rollback, canonical four-byte compression prefixes,
 type-0/type-2 checksums, cumulative metadata arithmetic, UTF-16 delimiters,
 all 20 ResourceLimits defaults, all seven checked-arithmetic helpers, and
-test-only allocation/live-item observers. It uses no private dictionary,
-network, Keychain, local configuration, or Application Support data.
+test-only allocation/live-item observers. R2.1 additionally exercises real
+Header checksum/EOF/limit paths, short Key-info prefixes and external Adler,
+Key-info and per-block limit boundaries, EOF/checked-offset overflow paths,
+and the version-1 four-byte Header fields. The observer macro also exposes a
+test-only Header entry point and Key-info input-allocation count; production
+builds declare neither hook nor lifecycle observer. It uses no private
+dictionary, network, Keychain, local configuration, or Application Support
+data.
 
 Record-block ResourceLimits remain a D1b-3A-2B task. Directory-descriptor
 `openat`/`renameat` hardening remains a D1b-3B task.

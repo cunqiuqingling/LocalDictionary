@@ -40,6 +40,7 @@ namespace mdict {
 #ifdef MDICT_RESOURCE_TEST_OBSERVER
 namespace {
 std::atomic<uint64_t> g_input_buffer_allocations{0};
+std::atomic<uint64_t> g_key_block_info_input_buffer_allocations{0};
 std::atomic<uint64_t> g_output_buffer_allocations{0};
 std::atomic<uint64_t> g_uncompress_calls{0};
 std::atomic<uint64_t> g_key_items_live{0};
@@ -47,6 +48,8 @@ std::atomic<uint64_t> g_key_items_live{0};
 
 void resetResourceTestObserver() noexcept {
   g_input_buffer_allocations.store(0, std::memory_order_relaxed);
+  g_key_block_info_input_buffer_allocations.store(0,
+                                                   std::memory_order_relaxed);
   g_output_buffer_allocations.store(0, std::memory_order_relaxed);
   g_uncompress_calls.store(0, std::memory_order_relaxed);
   g_key_items_live.store(0, std::memory_order_relaxed);
@@ -54,6 +57,8 @@ void resetResourceTestObserver() noexcept {
 
 ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept {
   return {g_input_buffer_allocations.load(std::memory_order_relaxed),
+          g_key_block_info_input_buffer_allocations.load(
+              std::memory_order_relaxed),
           g_output_buffer_allocations.load(std::memory_order_relaxed),
           g_uncompress_calls.load(std::memory_order_relaxed),
           g_key_items_live.load(std::memory_order_relaxed)};
@@ -61,6 +66,10 @@ ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept {
 
 void observeInputBufferAllocation() noexcept {
   g_input_buffer_allocations.fetch_add(1, std::memory_order_relaxed);
+}
+void observeKeyBlockInfoInputBufferAllocation() noexcept {
+  g_key_block_info_input_buffer_allocations.fetch_add(
+      1, std::memory_order_relaxed);
 }
 void observeOutputBufferAllocation() noexcept {
   g_output_buffer_allocations.fetch_add(1, std::memory_order_relaxed);
@@ -353,6 +362,34 @@ void Mdict::read_header() {
   /// passed
 }
 
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+void Mdict::readHeaderForResourceTest() {
+  limits_.validate();
+  if (!std::filesystem::exists(filename)) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
+  }
+  instream = std::ifstream(filename, std::ios::binary);
+  if (!instream) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
+  }
+  instream.seekg(0, std::ios::end);
+  const std::streamoff end_pos = instream.tellg();
+  if (end_pos < 0) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
+  }
+  actual_file_size_ = static_cast<uint64_t>(end_pos);
+  instream.clear();
+  instream.seekg(0, std::ios::beg);
+  if (!instream) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
+  }
+  if (actual_file_size_ > limits_.maximumFileBytes) {
+    throw ResourceException(ResourceErrorCode::fileTooLarge);
+  }
+  read_header();
+}
+#endif
+
 /**
  * read key block header, key block header contains a serials number, including
  *
@@ -614,6 +651,9 @@ void Mdict::read_key_block_info_metadata() {
   }
 
   // RAII: key-block-info buffer
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+  observeKeyBlockInfoInputBufferAllocation();
+#endif
   std::vector<uint8_t> key_block_info_buffer(
       checkedUInt64ToSizeT(this->key_block_info_size));
   readfile(this->key_block_info_start_offset, this->key_block_info_size,
