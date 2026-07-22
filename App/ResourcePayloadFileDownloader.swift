@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 struct ResourcePayloadFileDownloader: Sendable {
@@ -100,9 +99,9 @@ struct ResourcePayloadFileDownloader: Sendable {
     }
 }
 
-/// URLSession uses a serial delegate queue; Swift cancellation may arrive concurrently. Every
-/// mutable lifecycle field, the file descriptor capability, and the incremental SHA state are
-/// accessed only while `lock` is held. No mutable state escapes this object.
+/// URLSession uses a serial delegate queue; Swift cancellation may arrive concurrently. The
+/// existing delegate lock serializes access to its continuation and to the non-Sendable staging
+/// operation. The operation itself owns the fd, byte count, and incremental SHA state.
 private final class ResourcePayloadDownloadDelegate: NSObject,
     URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private let plan: ResourcePayloadDownloadPlan
@@ -113,8 +112,6 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
 
     private var continuation: CheckedContinuation<VerifiedPayloadStagingResult, Error>?
     private var task: URLSessionDataTask?
-    private var hasher = SHA256()
-    private var receivedBytes: UInt64 = 0
     private var responseAccepted = false
     private var completed = false
     private var cancellationRequested = false
@@ -282,28 +279,22 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
         var failure: ResourcePayloadDownloadError?
         lock.lock()
         if !completed, !cancellationRequested {
-            let count = UInt64(data.count)
-            let addition = receivedBytes.addingReportingOverflow(count)
-            if addition.overflow || addition.partialValue > plan.maximumBytes {
-                failure = .responseTooLarge
-            } else if addition.partialValue > plan.expectedBytes {
-                failure = .sizeMismatch
-            } else {
-                do {
-                    try operation.write(data)
-                    hasher.update(data: data)
-                    receivedBytes = addition.partialValue
-                    event = ResourcePayloadDownloadProgress(
-                        operationID: operation.operationID,
-                        receivedBytes: receivedBytes,
-                        expectedBytes: plan.expectedBytes,
-                        phase: .downloading
-                    )
-                } catch let error as ResourcePayloadDownloadError {
-                    failure = error == .stagingFailure ? .writeFailure : error
-                } catch {
-                    failure = .writeFailure
-                }
+            do {
+                let receivedBytes = try operation.append(
+                    data,
+                    maximumBytes: plan.maximumBytes,
+                    expectedBytes: plan.expectedBytes
+                )
+                event = ResourcePayloadDownloadProgress(
+                    operationID: operation.operationID,
+                    receivedBytes: receivedBytes,
+                    expectedBytes: plan.expectedBytes,
+                    phase: .downloading
+                )
+            } catch let error as ResourcePayloadDownloadError {
+                failure = error
+            } catch {
+                failure = .writeFailure
             }
         }
         lock.unlock()
@@ -329,25 +320,14 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                    cancelTask: false)
             return
         }
-        guard receivedBytes == plan.expectedBytes else {
-            lock.unlock()
-            finish(.failure(.sizeMismatch), cancelTask: false)
-            return
-        }
-        let actualBytes = receivedBytes
-        let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         lock.unlock()
 
         progress(ResourcePayloadDownloadProgress(
             operationID: operation.operationID,
-            receivedBytes: actualBytes,
+            receivedBytes: plan.expectedBytes,
             expectedBytes: plan.expectedBytes,
             phase: .verifying
         ))
-        guard digest == plan.expectedSHA256 else {
-            finish(.failure(.hashMismatch), cancelTask: false)
-            return
-        }
 
         lock.lock()
         guard !completed, !cancellationRequested else {
@@ -358,7 +338,7 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
         lock.unlock()
         progress(ResourcePayloadDownloadProgress(
             operationID: operation.operationID,
-            receivedBytes: actualBytes,
+            receivedBytes: plan.expectedBytes,
             expectedBytes: plan.expectedBytes,
             phase: .publishingToStaging
         ))
@@ -369,7 +349,38 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
             return
         }
         do {
-            try operation.publish()
+            let completed = try operation.finish(
+                expectedBytes: plan.expectedBytes,
+                expectedSHA256: plan.expectedSHA256
+            )
+            guard completed.bytes == plan.expectedBytes else {
+                lock.unlock()
+                finish(.failure(.sizeMismatch), cancelTask: false)
+                return
+            }
+            self.completed = true
+            let continuation = self.continuation
+            self.continuation = nil
+            self.task = nil
+            lock.unlock()
+
+            let result = VerifiedPayloadStagingResult(
+                resourceID: plan.resourceID,
+                resourceRevision: plan.resourceRevision,
+                operationID: operation.operationID,
+                verifiedFileURL: operation.verifiedFile,
+                signedFileName: plan.signedFileName,
+                actualByteCount: completed.bytes,
+                verifiedSHA256: completed.digest
+            )
+            progress(ResourcePayloadDownloadProgress(
+                operationID: operation.operationID,
+                receivedBytes: completed.bytes,
+                expectedBytes: plan.expectedBytes,
+                phase: .completed
+            ))
+            continuation?.resume(returning: result)
+            return
         } catch let error as ResourcePayloadDownloadError {
             lock.unlock()
             finish(.failure(error), cancelTask: false)
@@ -379,28 +390,6 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
             finish(.failure(.stagingFailure), cancelTask: false)
             return
         }
-        completed = true
-        let continuation = self.continuation
-        self.continuation = nil
-        self.task = nil
-        lock.unlock()
-
-        let result = VerifiedPayloadStagingResult(
-            resourceID: plan.resourceID,
-            resourceRevision: plan.resourceRevision,
-            operationID: operation.operationID,
-            verifiedFileURL: operation.verifiedFile,
-            signedFileName: plan.signedFileName,
-            actualByteCount: actualBytes,
-            verifiedSHA256: digest
-        )
-        progress(ResourcePayloadDownloadProgress(
-            operationID: operation.operationID,
-            receivedBytes: actualBytes,
-            expectedBytes: plan.expectedBytes,
-            phase: .completed
-        ))
-        continuation?.resume(returning: result)
     }
 
     private func finish(_ result: Result<Never, ResourcePayloadDownloadError>,

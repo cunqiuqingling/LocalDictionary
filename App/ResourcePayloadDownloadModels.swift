@@ -8,6 +8,17 @@ enum ResourcePayloadDownloadError: LocalizedError, Equatable, Sendable {
     case unsupportedArchiveFormat
     case disallowedHost
     case invalidFileName
+    case invalidPathComponent
+    case unsafePath
+    case missing
+    case conflict
+    case permissionDenied
+    case crossDevicePublication
+    case durabilityFailure
+    case identityChanged
+    case unexpectedFileType
+    case unexpectedLinkCount
+    case ioFailure
     case invalidSignedSize
     case insufficientDiskSpace
     case invalidResponse
@@ -40,6 +51,28 @@ enum ResourcePayloadDownloadError: LocalizedError, Equatable, Sendable {
             return "资源下载地址未通过安全检查。"
         case .invalidFileName:
             return "资源文件名未通过安全检查。"
+        case .invalidPathComponent:
+            return "资源暂存路径组件无效。"
+        case .unsafePath:
+            return "资源暂存路径未通过安全检查。"
+        case .missing:
+            return "资源暂存文件不存在。"
+        case .conflict:
+            return "资源暂存目标已存在。"
+        case .permissionDenied:
+            return "没有访问资源暂存目录的权限。"
+        case .crossDevicePublication:
+            return "资源暂存目录不支持安全发布。"
+        case .durabilityFailure:
+            return "资源暂存内容无法安全持久化。"
+        case .identityChanged:
+            return "资源暂存文件在校验期间发生变化。"
+        case .unexpectedFileType:
+            return "资源暂存对象类型无效。"
+        case .unexpectedLinkCount:
+            return "资源暂存对象链接数无效。"
+        case .ioFailure:
+            return "资源暂存发生输入输出错误。"
         case .invalidSignedSize:
             return "资源清单中的文件大小无效。"
         case .insufficientDiskSpace:

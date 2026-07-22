@@ -39,7 +39,7 @@ xcrun --sdk macosx swiftc \
 
 "$BUILD/ResourcePayloadDownloadSmoke"
 
-if /usr/bin/grep -Eq 'URLSession\.shared|data\(for:|downloadTask|background\(' \
+if /usr/bin/grep -Eq 'URLSession\.shared|\.data\(for:|downloadTask|background\(' \
   "$ROOT/App/ResourcePayloadDownloadModels.swift" \
   "$ROOT/App/ResourcePayloadStagingStore.swift" \
   "$ROOT/App/ResourcePayloadFileDownloader.swift" \

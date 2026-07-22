@@ -24,34 +24,43 @@ the final received byte count must both equal that exact value. Disk capacity is
 checked before creating the payload file, with a default 64 MiB safety margin, while
 write failures such as `ENOSPC` remain authoritative.
 
-Payload chunks are written directly to an exclusive `O_NOFOLLOW` file descriptor;
-they are never accumulated into one `Data` value. Each chunk is checked before the
-write, fully written with partial-write and `EINTR` handling, and then fed into an
-incremental CryptoKit SHA-256 state. The complete lowercase 64-character digest must
-exactly match the signed digest.
+Payload chunks are written directly to an exclusive `O_NOFOLLOW | O_CLOEXEC` file
+descriptor; they are never accumulated into one `Data` value. The staging operation
+is the single authority for successful written-byte accounting and incremental
+CryptoKit SHA-256. Each chunk is checked before the write, fully written with
+partial-write and `EINTR` handling, and only then contributes to the digest.
 
 The staging root is always injected and has no production Application Support
 default. Directories use mode `0700` and the payload file uses `0600`:
 
 ```text
-<injected-root>/.partial-<UUID>/<signed-name>.mdx.part
-<injected-root>/verified-<UUID>/<signed-name>.mdx
+<injected-root>/.partial-<UUID>/payload.mdx.part
+<injected-root>/verified-<UUID>/payload.mdx
 ```
 
-After size and digest verification, the file is `fsync`ed and closed, renamed to the
-signed name, the operation directory is `fsync`ed, the partial directory is atomically
-renamed to its verified name, and the staging root is `fsync`ed. Cancellation and
-failure close the descriptor and remove only the current partial operation. Existing
-verified directories are never removed. A crash may leave a clearly named partial
-directory; startup recovery is intentionally deferred to D1b-3B.
+The injected root is the sole absolute-path boundary. It is opened once with
+`O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`, then every descendant operation uses a
+validated single component with `mkdirat`, `openat`, `fstatat`, `renameat`, or
+`unlinkat`. The root and operation directory are owner-owned, non-symlink directories
+without group/other write permission; the payload is a `0600`, owner-owned regular
+file with link count one.
 
-The injected root and each newly created operation directory are checked with
-`lstat`, symlink resolution, and direct-parent containment before the payload file is
-opened with `O_EXCL | O_NOFOLLOW`. Because this scoped implementation does not yet
-use directory file descriptors with `openat`/`renameat`, an attacker who can mutate
-the private `0700` staging root concurrently still represents a residual path-based
-TOCTOU risk. D1b-3B must preserve or strengthen this boundary before production host
-configuration is enabled.
+Before publication, the writer checks exact size and SHA-256, `fstat`s and `fsync`s
+the still-open payload fd, and compares its identity with the `fstatat` partial entry.
+It then renames the file within the operation directory, verifies the final entry is
+the same inode, `fsync`s that directory, renames the whole operation directory under
+the root fd, verifies its inode again, and finally `fsync`s the root fd. Thus the inode
+streamed, bounded, hashed, and fsynced is the inode atomically published. Failure or
+cancellation uses `unlinkat` only for known leaf components and never recursively
+deletes unknown entries. A crash may still leave a clearly named partial or verified
+directory; startup orphan recovery is intentionally deferred to D1b-3B-2.
+
+The capability boundary prevents descendant path traversal, symlink following, and
+ordinary path substitution. It does not claim to isolate an arbitrary malicious
+process running as the same Unix UID, which can mutate any directory that user owns.
+All tests use synthetic payloads and isolated temporary roots. Production payload hosts
+remain empty, and this stage neither creates Catalog/open-resource records nor installs
+or indexes a payload.
 
 The coordinator permits one operation at a time and emits progress containing only
 an operation UUID, byte counts, and a phase. It never reports URLs, paths, Manifest

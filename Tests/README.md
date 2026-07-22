@@ -84,6 +84,8 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-resource-payload-download-smoke.sh` covers the offline D1b-2B single-MDX payload boundary. It verifies signed/App exact-host intersection, UInt64 size and disk-capacity limits, chunk-by-chunk POSIX writes, incremental SHA-256, HTTP and redirect policy, cancellation and single-flight behavior, `0700`/`0600` staging permissions, failure cleanup, and fsync/atomic publication from `.partial-*` to `verified-*`. It uses only synthetic bytes, temporary directories, and an injected `URLProtocol`; production payload hosts remain empty and no Catalog, index, query, AppDelegate, UI, real resource, or Keychain is involved.
 
+`run-resource-payload-staging-security-smoke.sh` covers D1b-3B-1's directory-fd staging boundary in Debug (Address/Undefined Behavior Sanitizers) and Release. It uses only synthetic payloads and isolated temporary roots to verify single-component rejection, root and payload type/permission checks, fd-bound byte/SHA accounting, partial-file substitution, symlink and hardlink rejection, operation-directory substitution, verified-target conflicts, inode preservation across publication, and non-recursive cleanup. Its output is total runtime assertions, including fixture/setup assertions; that count is not a count of independent security behaviours. Production builds contain no test fixture or fault-injection state. Orphan recovery, Catalog/open-resource installation, indexing, and production payload hosts remain outside this stage.
+
 ## D1b-3A-2B-M1 anonymous Record compatibility metrics
 
 `run-mdict-resource-metrics-probe-smoke.sh` builds a synthetic-only Debug

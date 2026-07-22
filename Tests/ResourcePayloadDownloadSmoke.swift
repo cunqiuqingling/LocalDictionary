@@ -323,11 +323,11 @@ private func hooks(
             try base.synchronize(descriptor)
         },
         close: base.close,
-        rename: { source, destination in
+        renameAt: { sourceDirectory, source, destinationDirectory, destination in
             var current = 0
             renameCount.update { $0 += 1; current = $0 }
             if current == failRenameCall { throw ResourcePayloadDownloadError.stagingFailure }
-            try base.rename(source, destination)
+            try base.renameAt(sourceDirectory, source, destinationDirectory, destination)
         }
     )
 }
@@ -579,7 +579,7 @@ private struct ResourcePayloadDownloadSmoke {
         try FileManager.default.createSymbolicLink(at: symlink, withDestinationURL: target)
         let symlinkPlan = try makePlan(payload: payload, root: symlink)
         MockPayloadURLProtocol.store.reset([payloadURL: [response(payload)]])
-        try await harness.expectError("symlink staging root", matching: .stagingFailure) {
+        try await harness.expectError("symlink staging root", matching: .unsafePath) {
             _ = try await makeDownloader().download(plan: symlinkPlan)
         }
         try harness.check("symlink target untouched", directoryEntries(target).isEmpty)
@@ -593,7 +593,7 @@ private struct ResourcePayloadDownloadSmoke {
         try FileManager.default.createDirectory(at: collisionDirectory,
                                                 withIntermediateDirectories: false)
         let collisionPlan = try makePlan(payload: payload, root: collisionRoot)
-        try await harness.expectError("existing operation not overwritten", matching: .stagingFailure) {
+        try await harness.expectError("existing operation not overwritten", matching: .conflict) {
             _ = try await makeDownloader(operationID: collisionID).download(plan: collisionPlan)
         }
         try harness.check("existing operation remains",
