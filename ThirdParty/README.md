@@ -134,14 +134,17 @@ the build; the reviewed vendored files already contain their result.
     Record range reads validate start/end against the checked decompressed
     stream size before `reserve`, enforce the requested-range cap, and check
     every cross-block append against the returned-byte cap before mutation.
+    The legacy full-record implementation below the early return in
+    `decode_record_block()` is currently unreachable and must not be restored
+    as a production path; a later isolated cleanup may remove that dead code.
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
 
 | Upstream path | Upstream SHA-256 | Vendored SHA-256 |
 |---|---|---|
-| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `ec21f82f6d3b2e862b04ac97e102d485383f558ca0be04698193f06d8b000d3d` |
-| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `9b8191ed83f3bfc9c397fff3308bc8f839de9ea311e37cdbea7a1d30980fb658` |
+| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `ad7bd8f1692621d7dc886bda79d719ba4dec6f3e6b601342bb1f247225b1e764` |
+| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `a7ea81a90c71953f703ef9755fd11b60585ba17462dcec4ec76b884df2e8f780` |
 | `src/include/zlib_wrapper.h` | `29d187709287366541e387cdea35cbe39c8eea6ad32cd92746276ca0c05c0b28` | `0e1e75b8ee84014cd731b033aa755991cc3d055db6f39595bcb91e18d0c5a356` |
 | `src/encode/base64.h` | `6c0264e1941fcf458b5d7200751cb561025c0e2f616c136e0e07bfdc81f5b4b5` | `19113b27ba310db9fd8cf22988de90f301825e2cc317690614019651a505be51` |
 
@@ -149,10 +152,10 @@ New files added by D1b-3A-2A:
 
 | Path | Vendored SHA-256 |
 |---|---|
-| `src/include/resource_limits.h` | `3e80afdbbaa1a4c7ef6b381ee69e23956defc25260bc8c470c917f02c197a036` |
+| `src/include/resource_limits.h` | `6366aa50f76de403791763173368572c19b4dd3db44bd43d56d58db1ddbc11f5` |
 | `src/include/checked_arithmetic.h` | `c6b8b19e05b522209d26ce40194ac1df4d82da3ea578eb5e420bfca18a7b7881` |
 | `src/include/bounded_zlib.h` | `1ca20f9bc6b258ab21b10ecb93c3db422943cc5ff5874619f508110d643f41c6` |
-| `src/include/resource_test_observer.h` | `417df2bde852787b84d88f8e7d5573089edc7384fb6a6330701092705ef8ff7d` |
+| `src/include/resource_test_observer.h` | `4fa72f4fb8da7a1391e7a1faf78cafc52a600d8ab517a8c9605fc527cc3ea0c3` |
 
 All other mdict-cpp paths listed above are byte-identical to the fixed commit;
 their hashes are in `SHA256SUMS`. Excluded content includes turbobase64,

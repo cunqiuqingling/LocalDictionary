@@ -59,6 +59,9 @@ std::atomic<uint64_t> g_record_block_info_input_buffer_allocations{0};
 std::atomic<uint64_t> g_output_buffer_allocations{0};
 std::atomic<uint64_t> g_uncompress_calls{0};
 std::atomic<uint64_t> g_key_items_live{0};
+std::atomic<uint64_t> g_record_range_reserves{0};
+std::atomic<uint64_t> g_record_appends{0};
+std::atomic<uint32_t> g_allocation_fail_point{0};
 }  // namespace
 
 void resetResourceTestObserver() noexcept {
@@ -70,6 +73,9 @@ void resetResourceTestObserver() noexcept {
   g_output_buffer_allocations.store(0, std::memory_order_relaxed);
   g_uncompress_calls.store(0, std::memory_order_relaxed);
   g_key_items_live.store(0, std::memory_order_relaxed);
+  g_record_range_reserves.store(0, std::memory_order_relaxed);
+  g_record_appends.store(0, std::memory_order_relaxed);
+  g_allocation_fail_point.store(0, std::memory_order_relaxed);
 }
 
 ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept {
@@ -80,7 +86,9 @@ ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept {
               std::memory_order_relaxed),
           g_output_buffer_allocations.load(std::memory_order_relaxed),
           g_uncompress_calls.load(std::memory_order_relaxed),
-          g_key_items_live.load(std::memory_order_relaxed)};
+          g_key_items_live.load(std::memory_order_relaxed),
+          g_record_range_reserves.load(std::memory_order_relaxed),
+          g_record_appends.load(std::memory_order_relaxed)};
 }
 
 void observeInputBufferAllocation() noexcept {
@@ -105,6 +113,24 @@ void observeKeyItemCreated() noexcept {
 }
 void observeKeyItemDestroyed() noexcept {
   g_key_items_live.fetch_sub(1, std::memory_order_relaxed);
+}
+void observeRecordRangeReserve() noexcept {
+  g_record_range_reserves.fetch_add(1, std::memory_order_relaxed);
+}
+void observeRecordAppend() noexcept {
+  g_record_appends.fetch_add(1, std::memory_order_relaxed);
+}
+void setResourceTestAllocationFailPoint(
+    ResourceTestAllocationFailPoint point) noexcept {
+  g_allocation_fail_point.store(static_cast<uint32_t>(point),
+                                std::memory_order_relaxed);
+}
+bool consumeResourceTestAllocationFailPoint(
+    ResourceTestAllocationFailPoint point) noexcept {
+  uint32_t expected = static_cast<uint32_t>(point);
+  return g_allocation_fail_point.compare_exchange_strong(
+      expected, static_cast<uint32_t>(ResourceTestAllocationFailPoint::none),
+      std::memory_order_relaxed, std::memory_order_relaxed);
 }
 #endif
 
@@ -1257,7 +1283,7 @@ int Mdict::read_record_block_header() {
   const uint64_t parsed_total_compressed = read_number(
       summary.data() + static_cast<size_t>(3 * number_width));
 
-  if (parsed_block_count == 0 || parsed_entry_count != entries_num) {
+  if (parsed_block_count == 0) {
     throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
   }
   if (parsed_block_count > limits_.maximumRecordBlockCount) {
@@ -1274,6 +1300,9 @@ int Mdict::read_record_block_header() {
       checkedMultiplyUInt64(parsed_block_count, 2ULL),
       static_cast<uint64_t>(number_width));
   if (parsed_info_size != expected_shape) {
+    throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
+  }
+  if (parsed_entry_count != entries_num) {
     throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
   }
   const uint64_t info_end = checkedAddUInt64(summary_end, parsed_info_size);
@@ -1323,8 +1352,19 @@ int Mdict::read_record_block_header() {
     if (next_decomp > limits_.maximumTotalRecordBlockDecompressedBytes) {
       throw ResourceException(ResourceErrorCode::totalRecordBlockDecompressedTooLarge);
     }
-    parsed.push_back(std::make_unique<record_header_item>(
-        block_id, compressed, decompressed, comp_accumulator, decomp_accumulator));
+    try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+      if (consumeResourceTestAllocationFailPoint(
+              ResourceTestAllocationFailPoint::recordMetadataItem)) {
+        throw std::bad_alloc();
+      }
+#endif
+      parsed.push_back(std::make_unique<record_header_item>(
+          block_id, compressed, decompressed, comp_accumulator,
+          decomp_accumulator));
+    } catch (const std::bad_alloc &) {
+      throw ResourceException(ResourceErrorCode::allocationFailed);
+    }
     comp_accumulator = next_comp;
     decomp_accumulator = next_decomp;
   }
@@ -1333,8 +1373,18 @@ int Mdict::read_record_block_header() {
   }
 
   std::vector<record_header_item *> committed;
-  committed.reserve(parsed.size());
-  for (const auto &item : parsed) committed.push_back(item.get());
+  try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    if (consumeResourceTestAllocationFailPoint(
+            ResourceTestAllocationFailPoint::recordMetadataCommit)) {
+      throw std::bad_alloc();
+    }
+#endif
+    committed.reserve(parsed.size());
+    for (const auto &item : parsed) committed.push_back(item.get());
+  } catch (const std::bad_alloc &) {
+    throw ResourceException(ResourceErrorCode::allocationFailed);
+  }
   for (auto *item : record_header) delete item;
   record_header.swap(committed);
   for (auto &item : parsed) item.release();
@@ -2036,7 +2086,17 @@ std::vector<uint8_t> Mdict::readRecordBlockBytes(uint64_t block_id) {
     if (payload_size != decomp_size) {
       throw ResourceException(ResourceErrorCode::decompressedSizeMismatch);
     }
-    output.assign(compressed.begin() + 8, compressed.end());
+    try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+      if (consumeResourceTestAllocationFailPoint(
+              ResourceTestAllocationFailPoint::recordType0Output)) {
+        throw std::bad_alloc();
+      }
+#endif
+      output.assign(compressed.begin() + 8, compressed.end());
+    } catch (const std::bad_alloc &) {
+      throw ResourceException(ResourceErrorCode::allocationFailed);
+    }
   } else if (comp_type == 1) {
     throw ResourceException(ResourceErrorCode::invalidCompressionType);
   } else if (comp_type == 2) {
@@ -2077,6 +2137,9 @@ std::string Mdict::readRecordAt(uint64_t record_start, uint64_t record_end) {
 
   std::string result;
   try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeRecordRangeReserve();
+#endif
     result.reserve(checkedUInt64ToSizeT(requested_size));
   } catch (const std::bad_alloc &) {
     throw ResourceException(ResourceErrorCode::allocationFailed);
@@ -2106,6 +2169,9 @@ std::string Mdict::readRecordAt(uint64_t record_start, uint64_t record_end) {
     if (next_returned > limits_.maximumReturnedRecordBytes) {
       throw ResourceException(ResourceErrorCode::returnedRecordTooLarge);
     }
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeRecordAppend();
+#endif
     result.append(reinterpret_cast<const char *>(bytes.data() + local_start),
                   checkedUInt64ToSizeT(slice_size));
     if (copy_end <= cursor) {
@@ -2113,7 +2179,17 @@ std::string Mdict::readRecordAt(uint64_t record_start, uint64_t record_end) {
     }
     cursor = copy_end;
   }
-  return trim_nulls(result);
+  try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    if (consumeResourceTestAllocationFailPoint(
+            ResourceTestAllocationFailPoint::recordTrimCopy)) {
+      throw std::bad_alloc();
+    }
+#endif
+    return trim_nulls(result);
+  } catch (const std::bad_alloc &) {
+    throw ResourceException(ResourceErrorCode::allocationFailed);
+  }
 }
 
 /**

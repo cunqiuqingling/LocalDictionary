@@ -33,8 +33,15 @@ must remain synchronized with the production initialization path.
 metadata and bounded-block decoder suite in Debug and Release. Its reported
 count is total runtime assertions, including fixture/setup assertions; it
 does not read private dictionaries, `local.json`, or Application Support. It
-also covers empty, invalid, exact-limit, over-limit, and cross-block Record
-range reads.
+exercises independent parser-path groups for Record summary limit-first
+precedence, exact/+1 info/count/single/cumulative limits, checked cumulative
+overflow, short and canonical compression prefixes, type-0 and zlib exact
+size/Adler/EOF validation, metadata rollback and repeat initialization,
+test-only allocation-failure mapping, and single/two/three-block range and
+returned-byte limits. The test-only observer additionally proves range-limit
+rejection happens before reserve and returned-byte rejection happens before
+the next append. These groups are behaviour coverage, not a count derived
+from the total runtime assertions.
 
 Directory-descriptor
 `openat`/`renameat` hardening remains a D1b-3B task.

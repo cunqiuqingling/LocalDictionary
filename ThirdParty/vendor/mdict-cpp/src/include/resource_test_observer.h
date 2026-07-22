@@ -25,6 +25,16 @@ struct ResourceTestObserverSnapshot {
   uint64_t outputBufferAllocationCount;
   uint64_t uncompressCallCount;
   uint64_t keyItemLiveCount;
+  uint64_t recordRangeReserveCount;
+  uint64_t recordAppendCount;
+};
+
+enum class ResourceTestAllocationFailPoint : uint32_t {
+  none = 0,
+  recordMetadataItem = 1,
+  recordMetadataCommit = 2,
+  recordType0Output = 3,
+  recordTrimCopy = 4,
 };
 
 void resetResourceTestObserver() noexcept;
@@ -37,6 +47,12 @@ void observeOutputBufferAllocation() noexcept;
 void observeUncompressCall() noexcept;
 void observeKeyItemCreated() noexcept;
 void observeKeyItemDestroyed() noexcept;
+void observeRecordRangeReserve() noexcept;
+void observeRecordAppend() noexcept;
+void setResourceTestAllocationFailPoint(
+    ResourceTestAllocationFailPoint point) noexcept;
+bool consumeResourceTestAllocationFailPoint(
+    ResourceTestAllocationFailPoint point) noexcept;
 
 }  // namespace mdict
 
