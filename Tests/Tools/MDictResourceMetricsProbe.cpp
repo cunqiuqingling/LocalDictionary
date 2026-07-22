@@ -47,8 +47,8 @@ enum class ProbeError {
 enum class ChecksumFailureStage { none, header, keyInfo, keyBlock, recordBlock };
 enum class ChecksumStatus { valid, mismatch, notReached, notChecked, notApplicable };
 enum class HeaderChecksumEncodingMatch {
-  canonicalBigEndian,
-  byteReversed,
+  canonicalLittleEndian,
+  byteReversedBigEndian,
   neither,
   notChecked,
 };
@@ -77,8 +77,8 @@ const char *checksumStatusString(ChecksumStatus value) {
 
 const char *headerChecksumEncodingMatchString(HeaderChecksumEncodingMatch value) {
   switch (value) {
-    case HeaderChecksumEncodingMatch::canonicalBigEndian: return "canonicalBigEndian";
-    case HeaderChecksumEncodingMatch::byteReversed: return "byteReversed";
+    case HeaderChecksumEncodingMatch::canonicalLittleEndian: return "canonicalLittleEndian";
+    case HeaderChecksumEncodingMatch::byteReversedBigEndian: return "byteReversedBigEndian";
     case HeaderChecksumEncodingMatch::neither: return "neither";
     case HeaderChecksumEncodingMatch::notChecked: return "notChecked";
   }
@@ -145,6 +145,11 @@ bool isRegularFile(const char *path, uint64_t *size = nullptr) {
 uint32_t readBE32(const uint8_t *bytes) {
   return (uint32_t(bytes[0]) << 24) | (uint32_t(bytes[1]) << 16) |
          (uint32_t(bytes[2]) << 8) | uint32_t(bytes[3]);
+}
+
+uint32_t readLE32(const uint8_t *bytes) {
+  return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8) |
+         (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
 }
 
 uint32_t byteReverse32(uint32_t value) {
@@ -385,7 +390,7 @@ ProbeError collectMdxMetrics(const char *path, MdxMetrics &metrics) {
   uint8_t checksumBytes[4] {};
   if (!readExact(input, metrics.actualFileBytes, headerChecksumOffset.value,
                  checksumBytes, sizeof(checksumBytes))) return ProbeError::truncatedFile;
-  const uint32_t expectedChecksum = readBE32(checksumBytes);
+  const uint32_t expectedChecksum = readLE32(checksumBytes);
   const uint32_t actualChecksum = static_cast<uint32_t>(
       mz_adler32(MZ_ADLER32_INIT, header.data(), header.size()));
   if (actualChecksum != expectedChecksum) {
@@ -395,12 +400,12 @@ ProbeError collectMdxMetrics(const char *path, MdxMetrics &metrics) {
     metrics.checksum.keyBlock = ChecksumStatus::notReached;
     metrics.checksum.recordBlock = ChecksumStatus::notReached;
     metrics.checksum.headerEncoding = byteReverse32(expectedChecksum) == actualChecksum
-        ? HeaderChecksumEncodingMatch::byteReversed
+        ? HeaderChecksumEncodingMatch::byteReversedBigEndian
         : HeaderChecksumEncodingMatch::neither;
     return ProbeError::checksumMismatch;
   }
   metrics.checksum.header = ChecksumStatus::valid;
-  metrics.checksum.headerEncoding = HeaderChecksumEncodingMatch::canonicalBigEndian;
+  metrics.checksum.headerEncoding = HeaderChecksumEncodingMatch::canonicalLittleEndian;
 
   std::string headerText;
   if (!decodeHeaderASCII(header, headerText)) return ProbeError::invalidHeader;

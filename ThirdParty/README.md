@@ -119,13 +119,17 @@ the build; the reviewed vendored files already contain their result.
    `MDICT_RESOURCE_TEST_OBSERVER` is defined.  In production builds,
    `key_list_item` has no explicit test destructor, the observer declarations
    and state do not exist, and no observer symbol or string is emitted.
+9. D1b-3A-2A-R3 Header checksum byte order (manually applied; no standalone
+   patch file): decodes the MDX Header Adler-32 field as a little-endian
+   uint32. Header length remains big-endian, and all subsequent Key/Record
+   checksum fields retain their existing format-specific byte order.
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
 
 | Upstream path | Upstream SHA-256 | Vendored SHA-256 |
 |---|---|---|
-| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `0e6b4bd6213eadcda47257f0c9e068521d1a455f995a78dce32f713d9b8e8c42` |
+| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `ec21f82f6d3b2e862b04ac97e102d485383f558ca0be04698193f06d8b000d3d` |
 | `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `9b8191ed83f3bfc9c397fff3308bc8f839de9ea311e37cdbea7a1d30980fb658` |
 | `src/include/zlib_wrapper.h` | `29d187709287366541e387cdea35cbe39c8eea6ad32cd92746276ca0c05c0b28` | `0e1e75b8ee84014cd731b033aa755991cc3d055db6f39595bcb91e18d0c5a356` |
 | `src/encode/base64.h` | `6c0264e1941fcf458b5d7200751cb561025c0e2f616c136e0e07bfdc81f5b4b5` | `19113b27ba310db9fd8cf22988de90f301825e2cc317690614019651a505be51` |

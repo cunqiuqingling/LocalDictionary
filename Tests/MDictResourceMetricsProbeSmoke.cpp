@@ -106,6 +106,12 @@ void writeBE32(std::vector<uint8_t> &bytes, uint32_t value) {
   }
 }
 
+void writeLE32(std::vector<uint8_t> &bytes, uint32_t value) {
+  for (int shift = 0; shift <= 24; shift += 8) {
+    bytes.push_back(static_cast<uint8_t>((value >> shift) & 0xff));
+  }
+}
+
 void writeBE64(std::vector<uint8_t> &bytes, uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) {
     bytes.push_back(static_cast<uint8_t>((value >> shift) & 0xff));
@@ -171,7 +177,7 @@ std::string buildGoldenHeaderMDX(const std::string &directory, const std::string
   std::vector<uint8_t> file;
   writeBE32(file, static_cast<uint32_t>(headerLength));
   file.insert(file.end(), header, header + headerLength);
-  writeBE32(file, fixedChecksum);
+  writeLE32(file, fixedChecksum);
   if (metadataAfterChecksum) {
     const uint64_t width = major >= 2 ? 8 : 4;
     const size_t keyHeaderFields = major >= 2 ? 5 : 4;
@@ -254,7 +260,7 @@ std::string buildMinimalMDX(const std::string &directory) {
   std::vector<uint8_t> file;
   writeBE32(file, static_cast<uint32_t>(headerUTF16.size()));
   file.insert(file.end(), headerUTF16.begin(), headerUTF16.end());
-  writeBE32(file, adler32Bytes(headerUTF16.data(), headerUTF16.size()));
+  writeLE32(file, adler32Bytes(headerUTF16.data(), headerUTF16.size()));
   file.insert(file.end(), keyHeader.begin(), keyHeader.end());
   writeBE32(file, adler32Bytes(keyHeader.data(), keyHeader.size()));
   file.insert(file.end(), keyInfoBlock.begin(), keyInfoBlock.end());
@@ -310,7 +316,7 @@ std::string buildRecordMetadataMDX(
   std::vector<uint8_t> file;
   writeBE32(file, static_cast<uint32_t>(headerUTF16.size()));
   file.insert(file.end(), headerUTF16.begin(), headerUTF16.end());
-  writeBE32(file, adler32Bytes(headerUTF16.data(), headerUTF16.size()));
+  writeLE32(file, adler32Bytes(headerUTF16.data(), headerUTF16.size()));
   writeNumber(file, 0, width);  // key block count
   writeNumber(file, 0, width);  // entry count
   if (width == 8) {
@@ -423,7 +429,7 @@ void testAggregateAndPrivacy(const std::string &directory, const std::string &pr
   requireChecksumField(json, "keyInfoChecksumStatus", "valid");
   requireChecksumField(json, "keyBlockChecksumStatus", "notChecked");
   requireChecksumField(json, "recordBlockChecksumStatus", "notChecked");
-  requireChecksumField(json, "headerChecksumEncodingMatch", "canonicalBigEndian");
+  requireChecksumField(json, "headerChecksumEncodingMatch", "canonicalLittleEndian");
   require(json.find("\"dictionaries\"") == std::string::npos,
           "no per-dictionary output");
   require(json.find(mdx) == std::string::npos && json.find(index) == std::string::npos,
@@ -647,7 +653,7 @@ void testChecksumDiagnosticsAndGoldenFixtures(const std::string &directory,
     const std::string json = readFile(output);
     requireChecksumField(json, "checksumFailureStage", "none");
     requireChecksumField(json, "headerChecksumStatus", "valid");
-    requireChecksumField(json, "headerChecksumEncodingMatch", "canonicalBigEndian");
+    requireChecksumField(json, "headerChecksumEncodingMatch", "canonicalLittleEndian");
     requireChecksumField(json, "keyBlockChecksumStatus", "notChecked");
     requireChecksumField(json, "recordBlockChecksumStatus", "notChecked");
   }
@@ -683,7 +689,7 @@ void testChecksumDiagnosticsAndGoldenFixtures(const std::string &directory,
   };
   const size_t checksumOffset = 4 + sizeof(kGoldenHeaderV10);
   std::vector<uint8_t> reversed = fixtureBytes(v10);
-  writeBE32At(reversed, checksumOffset, UINT32_C(0x8214EB0F));
+  writeBE32At(reversed, checksumOffset, kGoldenHeaderV10Checksum);
   const std::string reversedPath = directory + "/golden-reversed.mdx";
   writeFixture(reversedPath, reversed);
   const std::string reversedOutput = reversedPath + ".json";
@@ -696,7 +702,7 @@ void testChecksumDiagnosticsAndGoldenFixtures(const std::string &directory,
   require(reversedStatus != 0 && !exists(reversedOutput), "byte-reversed checksum remains strict failure");
   requireChecksumField(reversedDiagnostic, "checksumFailureStage", "header");
   requireChecksumField(reversedDiagnostic, "headerChecksumStatus", "mismatch");
-  requireChecksumField(reversedDiagnostic, "headerChecksumEncodingMatch", "byteReversed");
+  requireChecksumField(reversedDiagnostic, "headerChecksumEncodingMatch", "byteReversedBigEndian");
   requireChecksumField(reversedDiagnostic, "keyInfoChecksumStatus", "notReached");
   requireChecksumField(reversedDiagnostic, "keyBlockChecksumStatus", "notReached");
   requireChecksumField(reversedDiagnostic, "recordBlockChecksumStatus", "notReached");
@@ -821,7 +827,7 @@ void testChecksumDiagnosticsAndGoldenFixtures(const std::string &directory,
   requireChecksumField(keyInfoDiagnostic, "keyInfoChecksumStatus", "mismatch");
   requireChecksumField(keyInfoDiagnostic, "keyBlockChecksumStatus", "notChecked");
   requireChecksumField(keyInfoDiagnostic, "recordBlockChecksumStatus", "notChecked");
-  requireChecksumField(keyInfoDiagnostic, "headerChecksumEncodingMatch", "canonicalBigEndian");
+  requireChecksumField(keyInfoDiagnostic, "headerChecksumEncodingMatch", "canonicalLittleEndian");
   assertChecksumDiagnosticPrivacy(keyInfoDiagnostic, directory, "golden-key-info-mismatch.mdx");
   require(fingerprint(v10) == v10Hash && fileSize(v10) == v10Size &&
               xattrNames(v10) == v10Xattrs,

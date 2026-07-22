@@ -37,6 +37,20 @@ const std::regex re_pattern("(\\s|:|\\.|,|-|_|'|\\(|\\)|#|<|>|!)");
 
 namespace mdict {
 
+namespace {
+
+// MDict stores only the Header Adler-32 field in little-endian order. Header
+// length and subsequent Key/Record checksum fields retain their own existing
+// big-endian decoding paths.
+uint32_t readLittleEndianUInt32(const uint8_t *bytes) {
+  return static_cast<uint32_t>(bytes[0]) |
+         (static_cast<uint32_t>(bytes[1]) << 8) |
+         (static_cast<uint32_t>(bytes[2]) << 16) |
+         (static_cast<uint32_t>(bytes[3]) << 24);
+}
+
+}  // namespace
+
 #ifdef MDICT_RESOURCE_TEST_OBSERVER
 namespace {
 std::atomic<uint64_t> g_input_buffer_allocations{0};
@@ -218,12 +232,12 @@ void Mdict::read_header() {
 
   // D1b-3A-2A: enforce header checksum in both Debug and Release.
   // MDX format: adler32 of the raw header bytes (UTF-16 XML) stored as
-  // big-endian uint32 at offset header_bytes_size + 4.
+  // little-endian uint32 at offset header_bytes_size + 4.
   std::vector<uint8_t> head_checksum_buffer(4);
   readfile(header_bytes_size + 4, 4,
            reinterpret_cast<char *>(head_checksum_buffer.data()));
 
-  uint32_t expected_checksum = be_bin_to_u32(head_checksum_buffer.data());
+  uint32_t expected_checksum = readLittleEndianUInt32(head_checksum_buffer.data());
   uint32_t actual_checksum =
       adler32checksum(head_buffer.data(), header_bytes_size);
   if (actual_checksum != expected_checksum) {

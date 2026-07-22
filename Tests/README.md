@@ -109,9 +109,12 @@ a checksum failure it writes only fixed anonymous JSON to stdout and returns
 nonzero; it never emits a partial metrics file. `checksumFailureStage` is one
 of `none`, `header`, `keyInfo`, `keyBlock`, or `recordBlock`. Each stage status
 is one of `valid`, `mismatch`, `notReached`, `notChecked`, or `notApplicable`.
-`headerChecksumEncodingMatch` is `canonicalBigEndian`, `byteReversed`,
-`neither`, or `notChecked`. `byteReversed` is only an anonymous observation:
-it remains a strict failure and is not a supported compatibility format.
+`headerChecksumEncodingMatch` is `canonicalLittleEndian`,
+`byteReversedBigEndian`, `neither`, or `notChecked`. Header Adler-32 is stored
+as a little-endian uint32; Header length stays big-endian, while Key-info,
+Key-block, and Record-block Adler fields remain big-endian. The
+`byteReversedBigEndian` value is only an anonymous negative observation: it
+remains a strict failure and is not a supported compatibility format.
 Header mismatch stops before version, encryption, Key, or Record parsing;
 `notReached` means a preceding failure prevented the stage, whereas
 `notChecked` means the probe intentionally does not read that payload.

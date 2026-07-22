@@ -70,6 +70,12 @@ void writeBE32(std::vector<uint8_t> &buffer, uint32_t value) {
   }
 }
 
+void writeLE32(std::vector<uint8_t> &buffer, uint32_t value) {
+  for (int shift = 0; shift <= 24; shift += 8) {
+    buffer.push_back(static_cast<uint8_t>((value >> shift) & 0xff));
+  }
+}
+
 void writeBE64(std::vector<uint8_t> &buffer, uint64_t value) {
   for (int shift = 56; shift >= 0; shift -= 8) {
     buffer.push_back(static_cast<uint8_t>((value >> shift) & 0xff));
@@ -272,7 +278,7 @@ BuiltFixture buildFixture(const FixtureSpec &spec) {
 
   writeBE32(result.bytes, static_cast<uint32_t>(headerUTF16.size()));
   result.bytes.insert(result.bytes.end(), headerUTF16.begin(), headerUTF16.end());
-  writeBE32(result.bytes,
+  writeLE32(result.bytes,
             adler32Bytes(headerUTF16.data(), headerUTF16.size()));
   result.bytes.insert(result.bytes.end(), keyHeader.begin(), keyHeader.end());
   writeBE32(result.bytes, adler32Bytes(keyHeader.data(), keyHeader.size()));
@@ -437,6 +443,78 @@ FixtureSpec basicFixtureSpec() {
 
 mdict::ResourceLimits maximalKeyLimits();
 
+// Fixed, independently precomputed UTF-16LE bytes for
+// <Dictionary GeneratedByEngineVersion="1.0" Encrypted="No"/>.
+// The hardcoded Adler value covers only these bytes, not the length/checksum
+// fields. It is never calculated at runtime by this Golden fixture.
+constexpr uint8_t kGoldenHeaderV10[] = {
+    0x3C, 0x00, 0x44, 0x00, 0x69, 0x00, 0x63, 0x00, 0x74, 0x00, 0x69, 0x00,
+    0x6F, 0x00, 0x6E, 0x00, 0x61, 0x00, 0x72, 0x00, 0x79, 0x00, 0x20, 0x00,
+    0x47, 0x00, 0x65, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x72, 0x00, 0x61, 0x00,
+    0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x42, 0x00, 0x79, 0x00, 0x45, 0x00,
+    0x6E, 0x00, 0x67, 0x00, 0x69, 0x00, 0x6E, 0x00, 0x65, 0x00, 0x56, 0x00,
+    0x65, 0x00, 0x72, 0x00, 0x73, 0x00, 0x69, 0x00, 0x6F, 0x00, 0x6E, 0x00,
+    0x3D, 0x00, 0x22, 0x00, 0x31, 0x00, 0x2E, 0x00, 0x30, 0x00, 0x22, 0x00,
+    0x20, 0x00, 0x45, 0x00, 0x6E, 0x00, 0x63, 0x00, 0x72, 0x00, 0x79, 0x00,
+    0x70, 0x00, 0x74, 0x00, 0x65, 0x00, 0x64, 0x00, 0x3D, 0x00, 0x22, 0x00,
+    0x4E, 0x00, 0x6F, 0x00, 0x22, 0x00, 0x2F, 0x00, 0x3E, 0x00,
+};
+constexpr uint32_t kGoldenHeaderV10Checksum = UINT32_C(0x0FEB1482);
+
+std::vector<uint8_t> goldenHeaderOnly(uint32_t storedChecksum, bool littleEndian) {
+  std::vector<uint8_t> bytes;
+  writeBE32(bytes, static_cast<uint32_t>(sizeof(kGoldenHeaderV10)));
+  bytes.insert(bytes.end(), kGoldenHeaderV10, kGoldenHeaderV10 + sizeof(kGoldenHeaderV10));
+  if (littleEndian) writeLE32(bytes, storedChecksum); else writeBE32(bytes, storedChecksum);
+  return bytes;
+}
+
+void testFixedGoldenHeaderByteOrder(const std::string &directory) {
+  const std::string canonicalPath = directory + "/golden-header-little-endian.mdx";
+  writeBytes(canonicalPath, goldenHeaderOnly(kGoldenHeaderV10Checksum, true));
+  {
+    mdict::Mdict dictionary(canonicalPath, smallLimits());
+    dictionary.readHeaderForResourceTest();
+    require(dictionary.engineVersion() == 1.0F,
+            "fixed little-endian Header checksum enters production version parser");
+  }
+
+  const std::string bigEndianPath = directory + "/golden-header-big-endian.mdx";
+  writeBytes(bigEndianPath, goldenHeaderOnly(kGoldenHeaderV10Checksum, false));
+  expectCode(ResourceErrorCode::checksumMismatch,
+             "fixed big-endian Header checksum is rejected", [&] {
+    mdict::Mdict dictionary(bigEndianPath, smallLimits());
+    dictionary.readHeaderForResourceTest();
+  });
+
+  const std::string neitherPath = directory + "/golden-header-neither.mdx";
+  writeBytes(neitherPath, goldenHeaderOnly(UINT32_C(0xA1B2C3D4), true));
+  expectCode(ResourceErrorCode::checksumMismatch,
+             "fixed nonmatching Header checksum is rejected", [&] {
+    mdict::Mdict dictionary(neitherPath, smallLimits());
+    dictionary.readHeaderForResourceTest();
+  });
+}
+
+void testHeaderVersionParserPaths(const std::string &directory) {
+  for (const std::string version : {"1.0", "1.2", "2.0"}) {
+    const std::string xml = "<Dictionary GeneratedByEngineVersion=\"" + version +
+        "\" Encrypted=\"No\"/>";
+    std::vector<uint8_t> header;
+    appendEncodedText(header, xml, FixtureEncoding::utf16);
+    std::vector<uint8_t> bytes;
+    writeBE32(bytes, static_cast<uint32_t>(header.size()));
+    bytes.insert(bytes.end(), header.begin(), header.end());
+    writeLE32(bytes, adler32Bytes(header.data(), header.size()));
+    const std::string path = directory + "/header-version-" + version + ".mdx";
+    writeBytes(path, bytes);
+    mdict::Mdict dictionary(path, smallLimits());
+    dictionary.readHeaderForResourceTest();
+    require(dictionary.engineVersion() == std::stof(version),
+            "little-endian Header checksum reaches requested version parser path");
+  }
+}
+
 void testHeaderRegressionMatrix(const std::string &directory) {
   const BuiltFixture valid = buildFixture(basicFixtureSpec());
   const size_t header_size = readBE32(valid.bytes.data());
@@ -448,8 +526,11 @@ void testHeaderRegressionMatrix(const std::string &directory) {
     mdict::Mdict dictionary(valid_path, smallLimits());
     dictionary.initMetadataOnly();
     require(dictionary.headerBytesSize() == header_size,
-            "correct Header checksum reaches Header parser");
+            "little-endian Header and big-endian Key header checksums reach parser");
   }
+
+  testFixedGoldenHeaderByteOrder(directory);
+  testHeaderVersionParserPaths(directory);
 
   {
     BuiltFixture wrong = valid;
@@ -795,7 +876,7 @@ void testEOFOverflowAndNumberWidthFour(const std::string &directory) {
     std::vector<uint8_t> bytes;
     writeBE32(bytes, static_cast<uint32_t>(header_utf16.size()));
     bytes.insert(bytes.end(), header_utf16.begin(), header_utf16.end());
-    writeBE32(bytes, adler32Bytes(header_utf16.data(), header_utf16.size()));
+    writeLE32(bytes, adler32Bytes(header_utf16.data(), header_utf16.size()));
     writeBE32(bytes, 3);
     writeBE32(bytes, 7);
     writeBE32(bytes, 1);
@@ -838,6 +919,14 @@ void testBaselineIntegrity(const std::string &directory) {
   mdict::Mdict valid(validPath, smallLimits());
   valid.init();
   require(valid.keyList().size() == 2, "baseline full parser key count");
+
+  {
+    mdict::Mdict recordReader(validPath, smallLimits());
+    recordReader.initMetadataOnly();
+    const std::string record = recordReader.readRecordAt(0, 2);
+    require(record == "r",
+            "big-endian Record block Adler remains accepted");
+  }
 
   BuiltFixture badHeader = buildFixture(spec);
   const uint32_t headerSize = readBE32(badHeader.bytes.data());
