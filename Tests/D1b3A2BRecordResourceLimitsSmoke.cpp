@@ -159,5 +159,23 @@ int main() {
   require(zlibDictionary.readRecordAt(0, 4) == "zlib", "bounded exact zlib record block");
   require(mdict::resourceTestObserverSnapshot().uncompressCallCount >= 1, "record zlib uses bounded helper");
   std::filesystem::remove(compressedPath);
+
+  const Fixture multiple = fixture({{'a','b'}, {'c','d'}});
+  const std::string multiplePath = writeFixture(multiple);
+  mdict::Mdict multipleDictionary(multiplePath, defaults); multipleDictionary.initMetadataOnly();
+  require(multipleDictionary.readRecordAt(1, 3) == "bc", "two-block bounded range");
+  require(multipleDictionary.readRecordAt(2, 2).empty(), "empty record range");
+  expectCode(ResourceErrorCode::offsetOutOfBounds, "inverted range rejected", [&] { (void)multipleDictionary.readRecordAt(3, 2); });
+  expectCode(ResourceErrorCode::offsetOutOfBounds, "end beyond stream rejected", [&] { (void)multipleDictionary.readRecordAt(0, 5); });
+  auto exactRange = defaults; exactRange.maximumRecordRangeBytes = 4; exactRange.maximumReturnedRecordBytes = 4;
+  mdict::Mdict exactRangeDictionary(multiplePath, exactRange); exactRangeDictionary.initMetadataOnly();
+  require(exactRangeDictionary.readRecordAt(0, 4) == "abcd", "range exact limit accepted");
+  auto rangeTooSmall = exactRange; rangeTooSmall.maximumRecordRangeBytes = 3; rangeTooSmall.maximumReturnedRecordBytes = 3;
+  mdict::Mdict rangeTooSmallDictionary(multiplePath, rangeTooSmall); rangeTooSmallDictionary.initMetadataOnly();
+  expectCode(ResourceErrorCode::recordRangeTooLarge, "range over limit rejected", [&] { (void)rangeTooSmallDictionary.readRecordAt(0, 4); });
+  auto returnedTooSmall = exactRange; returnedTooSmall.maximumReturnedRecordBytes = 3;
+  mdict::Mdict returnedTooSmallDictionary(multiplePath, returnedTooSmall); returnedTooSmallDictionary.initMetadataOnly();
+  expectCode(ResourceErrorCode::returnedRecordTooLarge, "append over returned limit rejected", [&] { (void)returnedTooSmallDictionary.readRecordAt(0, 4); });
+  std::filesystem::remove(multiplePath);
   std::printf("D1b3A2BRecordResourceLimitsSmoke: %d total runtime assertions PASSED\n", g_checks);
 }

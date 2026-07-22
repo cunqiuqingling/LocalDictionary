@@ -131,6 +131,9 @@ the build; the reviewed vendored files already contain their result.
     paths through canonical-prefix, exact-size, bounded-zlib decoding with
     big-endian Adler-32 verification. Test observers remain entirely behind
     `MDICT_RESOURCE_TEST_OBSERVER` and have no production state or symbols.
+    Record range reads validate start/end against the checked decompressed
+    stream size before `reserve`, enforce the requested-range cap, and check
+    every cross-block append against the returned-byte cap before mutation.
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:

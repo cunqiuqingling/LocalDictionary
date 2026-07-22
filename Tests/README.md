@@ -32,7 +32,9 @@ must remain synchronized with the production initialization path.
 `run-d1b3a2b-record-resource-limits-smoke.sh` builds a synthetic Record
 metadata and bounded-block decoder suite in Debug and Release. Its reported
 count is total runtime assertions, including fixture/setup assertions; it
-does not read private dictionaries, `local.json`, or Application Support.
+does not read private dictionaries, `local.json`, or Application Support. It
+also covers empty, invalid, exact-limit, over-limit, and cross-block Record
+range reads.
 
 Directory-descriptor
 `openat`/`renameat` hardening remains a D1b-3B task.

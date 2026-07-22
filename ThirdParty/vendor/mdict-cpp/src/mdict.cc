@@ -1988,7 +1988,8 @@ void Mdict::initMetadataOnly() {
 uint64_t Mdict::recordStreamSize() const {
   if (record_header.empty()) return 0;
   const auto *last = record_header.back();
-  return last->decompressed_size_accumulator + last->decompressed_size;
+  return checkedAddUInt64(last->decompressed_size_accumulator,
+                          last->decompressed_size);
 }
 
 std::vector<uint8_t> Mdict::readRecordBlockBytes(uint64_t block_id) {
@@ -2058,28 +2059,58 @@ std::vector<uint8_t> Mdict::readRecordBlockBytes(uint64_t block_id) {
 
 std::string Mdict::readRecordAt(uint64_t record_start, uint64_t record_end) {
   if (filetype != "MDX") {
-    throw std::runtime_error("readRecordAt is limited to MDX text records");
+    throw ResourceException(ResourceErrorCode::invalidCompressionType);
   }
   if (encoding != 0 /* ENCODING_UTF8 */) {
-    throw std::runtime_error("phase 2 supports UTF-8 MDX records only");
+    throw ResourceException(ResourceErrorCode::invalidCompressionType);
   }
   const uint64_t stream_size = recordStreamSize();
-  if (record_start >= record_end || record_end > stream_size) return {};
+  if (record_end < record_start || record_start > stream_size ||
+      record_end > stream_size) {
+    throw ResourceException(ResourceErrorCode::offsetOutOfBounds);
+  }
+  const uint64_t requested_size = checkedSubtractUInt64(record_end, record_start);
+  if (requested_size == 0) return {};
+  if (requested_size > limits_.maximumRecordRangeBytes) {
+    throw ResourceException(ResourceErrorCode::recordRangeTooLarge);
+  }
 
   std::string result;
-  result.reserve(static_cast<size_t>(record_end - record_start));
+  try {
+    result.reserve(checkedUInt64ToSizeT(requested_size));
+  } catch (const std::bad_alloc &) {
+    throw ResourceException(ResourceErrorCode::allocationFailed);
+  }
   uint64_t cursor = record_start;
   while (cursor < record_end) {
-    const uint64_t block_id = reduce_record_block_offset(cursor);
-    const auto *header = record_header.at(block_id);
+    const long located_block = reduce_record_block_offset(cursor);
+    if (located_block < 0 ||
+        static_cast<uint64_t>(located_block) >= record_header.size()) {
+      throw ResourceException(ResourceErrorCode::offsetOutOfBounds);
+    }
+    const uint64_t block_id = static_cast<uint64_t>(located_block);
+    const auto *header = record_header[block_id];
     const uint64_t block_start = header->decompressed_size_accumulator;
-    const uint64_t block_end = block_start + header->decompressed_size;
+    const uint64_t block_end = checkedAddUInt64(
+        block_start, header->decompressed_size);
+    if (cursor < block_start || cursor >= block_end) {
+      throw ResourceException(ResourceErrorCode::offsetOutOfBounds);
+    }
     const auto bytes = readRecordBlockBytes(block_id);
-    const uint64_t local_start = cursor - block_start;
+    const uint64_t local_start = checkedSubtractUInt64(cursor, block_start);
     const uint64_t copy_end = std::min(record_end, block_end);
-    const uint64_t local_end = copy_end - block_start;
+    const uint64_t local_end = checkedSubtractUInt64(copy_end, block_start);
+    const uint64_t slice_size = checkedSubtractUInt64(local_end, local_start);
+    const uint64_t next_returned = checkedAddUInt64(
+        static_cast<uint64_t>(result.size()), slice_size);
+    if (next_returned > limits_.maximumReturnedRecordBytes) {
+      throw ResourceException(ResourceErrorCode::returnedRecordTooLarge);
+    }
     result.append(reinterpret_cast<const char *>(bytes.data() + local_start),
-                  static_cast<size_t>(local_end - local_start));
+                  checkedUInt64ToSizeT(slice_size));
+    if (copy_end <= cursor) {
+      throw ResourceException(ResourceErrorCode::offsetOutOfBounds);
+    }
     cursor = copy_end;
   }
   return trim_nulls(result);
@@ -2142,9 +2173,24 @@ long Mdict::reduce_key_info_block_items_vector(
  */
 long Mdict::reduce_record_block_offset(
     unsigned long record_start) { // non-recursive reduce implements
-  // TODO OPTIMISE
-  unsigned long left = 0l;
-  unsigned long right = this->record_header.size() - 1;
+  if (record_header.empty()) return -1;
+  size_t left = 0;
+  size_t right = record_header.size();
+  // Upper-bound search: the selected block has the greatest start <= input.
+  while (left < right) {
+    const size_t mid = left + ((right - left) >> 1);
+    if (record_start >= record_header[mid]->decompressed_size_accumulator) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+  if (left == 0) return -1;
+  if (left - 1 > static_cast<size_t>(std::numeric_limits<long>::max())) {
+    throw ResourceException(ResourceErrorCode::numericConversionOverflow);
+  }
+  return static_cast<long>(left - 1);
+#if 0
   unsigned long mid = 0;
   while (left <= right) {
     mid = left + ((right - left) >> 1);
@@ -2157,7 +2203,7 @@ long Mdict::reduce_record_block_offset(
     }
   }
   return left - 1;
-  return 0;
+#endif
 }
 
 std::string Mdict::reduce_particial_keys_vector(
