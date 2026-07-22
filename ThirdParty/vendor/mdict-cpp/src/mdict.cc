@@ -55,6 +55,7 @@ uint32_t readLittleEndianUInt32(const uint8_t *bytes) {
 namespace {
 std::atomic<uint64_t> g_input_buffer_allocations{0};
 std::atomic<uint64_t> g_key_block_info_input_buffer_allocations{0};
+std::atomic<uint64_t> g_record_block_info_input_buffer_allocations{0};
 std::atomic<uint64_t> g_output_buffer_allocations{0};
 std::atomic<uint64_t> g_uncompress_calls{0};
 std::atomic<uint64_t> g_key_items_live{0};
@@ -64,6 +65,8 @@ void resetResourceTestObserver() noexcept {
   g_input_buffer_allocations.store(0, std::memory_order_relaxed);
   g_key_block_info_input_buffer_allocations.store(0,
                                                    std::memory_order_relaxed);
+  g_record_block_info_input_buffer_allocations.store(
+      0, std::memory_order_relaxed);
   g_output_buffer_allocations.store(0, std::memory_order_relaxed);
   g_uncompress_calls.store(0, std::memory_order_relaxed);
   g_key_items_live.store(0, std::memory_order_relaxed);
@@ -72,6 +75,8 @@ void resetResourceTestObserver() noexcept {
 ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept {
   return {g_input_buffer_allocations.load(std::memory_order_relaxed),
           g_key_block_info_input_buffer_allocations.load(
+              std::memory_order_relaxed),
+          g_record_block_info_input_buffer_allocations.load(
               std::memory_order_relaxed),
           g_output_buffer_allocations.load(std::memory_order_relaxed),
           g_uncompress_calls.load(std::memory_order_relaxed),
@@ -83,6 +88,10 @@ void observeInputBufferAllocation() noexcept {
 }
 void observeKeyBlockInfoInputBufferAllocation() noexcept {
   g_key_block_info_input_buffer_allocations.fetch_add(
+      1, std::memory_order_relaxed);
+}
+void observeRecordBlockInfoInputBufferAllocation() noexcept {
+  g_record_block_info_input_buffer_allocations.fetch_add(
       1, std::memory_order_relaxed);
 }
 void observeOutputBufferAllocation() noexcept {
@@ -101,6 +110,17 @@ void observeKeyItemDestroyed() noexcept {
 
 namespace {
 uint32_t validatedKeyBlockCompressionType(const uint8_t *prefix) {
+  const uint32_t raw = static_cast<uint32_t>(prefix[0]) |
+                       (static_cast<uint32_t>(prefix[1]) << 8) |
+                       (static_cast<uint32_t>(prefix[2]) << 16) |
+                       (static_cast<uint32_t>(prefix[3]) << 24);
+  if (raw != 0 && raw != 1 && raw != 2) {
+    throw ResourceException(ResourceErrorCode::invalidCompressionType);
+  }
+  return raw;
+}
+
+uint32_t validatedRecordBlockCompressionType(const uint8_t *prefix) {
   const uint32_t raw = static_cast<uint32_t>(prefix[0]) |
                        (static_cast<uint32_t>(prefix[1]) << 8) |
                        (static_cast<uint32_t>(prefix[2]) << 16) |
@@ -1209,101 +1229,136 @@ int Mdict::read_record_block_header() {
    * [16:24/8:12] - record block info size
    * [24:32/12:16] - record block size
    */
-  if (this->version >= 2.0) {
-    record_block_info_size = 4 * 8;
-  } else {
-    record_block_info_size = 4 * 4;
+  const uint64_t summary_size = checkedMultiplyUInt64(
+      4ULL, static_cast<uint64_t>(this->number_width));
+  const uint64_t summary_end = checkedAddUInt64(record_block_info_offset,
+                                                 summary_size);
+  if (summary_end > actual_file_size_) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
   }
 
-  char *record_info_buffer =
-      (char *)calloc(record_block_info_size, sizeof(char));
+  std::vector<uint8_t> summary;
+  try {
+    summary.resize(checkedUInt64ToSizeT(summary_size));
+  } catch (const std::bad_alloc &) {
+    throw ResourceException(ResourceErrorCode::allocationFailed);
+  }
+  readfile(record_block_info_offset, summary_size,
+           reinterpret_cast<char *>(summary.data()));
 
-  this->readfile(record_block_info_offset, record_block_info_size,
-                 record_info_buffer);
+  const auto read_number = [this](const uint8_t *bytes) -> uint64_t {
+    return this->number_width == 8 ? be_bin_to_u64(bytes) : be_bin_to_u32(bytes);
+  };
+  const uint64_t parsed_block_count = read_number(summary.data());
+  const uint64_t parsed_entry_count =
+      read_number(summary.data() + static_cast<size_t>(number_width));
+  const uint64_t parsed_info_size = read_number(
+      summary.data() + static_cast<size_t>(2 * number_width));
+  const uint64_t parsed_total_compressed = read_number(
+      summary.data() + static_cast<size_t>(3 * number_width));
 
-  if (this->version >= 2.0) {
-    record_block_number = be_bin_to_u64((unsigned char *)record_info_buffer);
-    record_block_entries_number = be_bin_to_u64(
-        (unsigned char *)record_info_buffer + number_width * sizeof(char));
-    record_block_header_size = be_bin_to_u64(
-        (unsigned char *)record_info_buffer + 2 * number_width * sizeof(char));
-    record_block_size = be_bin_to_u64((unsigned char *)record_info_buffer +
-                                      3 * number_width * sizeof(char));
+  if (parsed_block_count == 0 || parsed_entry_count != entries_num) {
+    throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
+  }
+  if (parsed_block_count > limits_.maximumRecordBlockCount) {
+    throw ResourceException(ResourceErrorCode::recordBlockCountTooLarge);
+  }
+  if (parsed_info_size > limits_.maximumRecordBlockInfoBytes) {
+    throw ResourceException(ResourceErrorCode::recordBlockInfoTooLarge);
+  }
+  if (parsed_total_compressed > limits_.maximumTotalRecordBlockCompressedBytes) {
+    throw ResourceException(ResourceErrorCode::totalRecordBlockCompressedTooLarge);
   }
 
-  free(record_info_buffer);
-  assert(record_block_entries_number == entries_num);
-  /// passed
+  const uint64_t expected_shape = checkedMultiplyUInt64(
+      checkedMultiplyUInt64(parsed_block_count, 2ULL),
+      static_cast<uint64_t>(number_width));
+  if (parsed_info_size != expected_shape) {
+    throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
+  }
+  const uint64_t info_end = checkedAddUInt64(summary_end, parsed_info_size);
+  if (info_end > actual_file_size_) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
+  }
 
-  /**
-   * record_block_header_list:
-   * {
-   *     compressed size
-   *     decompressed size
-   * }
-   */
+  std::vector<uint8_t> table;
+  try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeRecordBlockInfoInputBufferAllocation();
+#endif
+    table.resize(checkedUInt64ToSizeT(parsed_info_size));
+  } catch (const std::bad_alloc &) {
+    throw ResourceException(ResourceErrorCode::allocationFailed);
+  }
+  readfile(summary_end, parsed_info_size, reinterpret_cast<char *>(table.data()));
 
-  char *record_header_buffer =
-      (char *)calloc(record_block_header_size, sizeof(char));
-
-  this->readfile(this->record_block_info_offset + record_block_info_size,
-                 record_block_header_size, record_header_buffer);
-
-  unsigned long comp_size = 0l;
-  unsigned long uncomp_size = 0l;
-  unsigned long size_counter = 0l;
-
-  unsigned long comp_accu = 0l;
-  unsigned long decomp_accu = 0l;
-
-  for (unsigned long i = 0; i < record_block_number; ++i) {
-    if (this->version >= 2.0) {
-      comp_size =
-          be_bin_to_u64((unsigned char *)(record_header_buffer + size_counter));
-      size_counter += number_width;
-      uncomp_size =
-          be_bin_to_u64((unsigned char *)(record_header_buffer + size_counter));
-      size_counter += number_width;
-
-      this->record_header.push_back(new record_header_item(
-          i, comp_size, uncomp_size, comp_accu, decomp_accu));
-      // ensure after push
-      comp_accu += comp_size;
-      decomp_accu += uncomp_size;
-    } else {
-      // TODO
+  std::vector<std::unique_ptr<record_header_item>> parsed;
+  try {
+    parsed.reserve(checkedUInt64ToSizeT(parsed_block_count));
+  } catch (const std::bad_alloc &) {
+    throw ResourceException(ResourceErrorCode::allocationFailed);
+  }
+  uint64_t comp_accumulator = 0;
+  uint64_t decomp_accumulator = 0;
+  uint64_t offset = 0;
+  for (uint64_t block_id = 0; block_id < parsed_block_count; ++block_id) {
+    const uint64_t compressed = read_number(table.data() + checkedUInt64ToSizeT(offset));
+    offset = checkedAddUInt64(offset, static_cast<uint64_t>(number_width));
+    const uint64_t decompressed = read_number(table.data() + checkedUInt64ToSizeT(offset));
+    offset = checkedAddUInt64(offset, static_cast<uint64_t>(number_width));
+    if (compressed < 8 || decompressed == 0) {
+      throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
     }
+    if (compressed > limits_.maximumSingleRecordBlockCompressedBytes) {
+      throw ResourceException(ResourceErrorCode::singleRecordBlockCompressedTooLarge);
+    }
+    if (decompressed > limits_.maximumSingleRecordBlockDecompressedBytes) {
+      throw ResourceException(ResourceErrorCode::singleRecordBlockDecompressedTooLarge);
+    }
+    const uint64_t next_comp = checkedAddUInt64(comp_accumulator, compressed);
+    const uint64_t next_decomp = checkedAddUInt64(decomp_accumulator, decompressed);
+    if (next_comp > limits_.maximumTotalRecordBlockCompressedBytes) {
+      throw ResourceException(ResourceErrorCode::totalRecordBlockCompressedTooLarge);
+    }
+    if (next_decomp > limits_.maximumTotalRecordBlockDecompressedBytes) {
+      throw ResourceException(ResourceErrorCode::totalRecordBlockDecompressedTooLarge);
+    }
+    parsed.push_back(std::make_unique<record_header_item>(
+        block_id, compressed, decompressed, comp_accumulator, decomp_accumulator));
+    comp_accumulator = next_comp;
+    decomp_accumulator = next_decomp;
+  }
+  if (offset != parsed_info_size || comp_accumulator != parsed_total_compressed) {
+    throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
   }
 
-  free(record_header_buffer);
-  assert(this->record_header.size() == this->record_block_number);
-  assert(size_counter == this->record_block_header_size);
-
-  record_block_offset = record_block_info_offset + record_block_info_size +
-                        record_block_header_size;
-  /// passed
+  std::vector<record_header_item *> committed;
+  committed.reserve(parsed.size());
+  for (const auto &item : parsed) committed.push_back(item.get());
+  for (auto *item : record_header) delete item;
+  record_header.swap(committed);
+  for (auto &item : parsed) item.release();
+  record_block_info_size = summary_size;
+  record_block_number = parsed_block_count;
+  record_block_entries_number = parsed_entry_count;
+  record_block_header_size = parsed_info_size;
+  record_block_size = parsed_total_compressed;
+  record_block_offset = info_end;
   return 0;
 }
 
 std::vector<std::pair<std::string, std::string>>
 Mdict::decode_record_block_by_rid(unsigned long rid /* record id */) {
-  // record block start offset: record_block_offset
-  uint64_t record_offset = this->record_block_offset;
-
   // key list index counter
   unsigned long i = 0l;
 
-  std::vector<uint8_t> record_block_uncompressed_v;
-  unsigned char *record_block_uncompressed_b;
-  uint64_t checksum = 0;
-  (void)checksum;  // used only in assert (compiled out with NDEBUG)
-
-  unsigned long idx = rid;
+  const uint64_t idx = rid;
+  if (idx >= record_header.size()) {
+    throw ResourceException(ResourceErrorCode::offsetOutOfBounds);
+  }
 
   //  for (int idx = 0; idx < this->record_header.size(); idx++) {
-  uint64_t comp_size = record_header[idx]->compressed_size;
   uint64_t uncomp_size = record_header[idx]->decompressed_size;
-  uint64_t comp_accu = record_header[idx]->compressed_size_accumulator;
   uint64_t decomp_accu = record_header[idx]->decompressed_size_accumulator;
   uint64_t previous_end = 0;
   uint64_t previous_uncomp_size = 0;
@@ -1312,62 +1367,10 @@ Mdict::decode_record_block_by_rid(unsigned long rid /* record id */) {
     previous_uncomp_size = record_header[idx - 1]->decompressed_size;
   }
 
-  char *record_block_cmp_buffer = (char *)calloc(comp_size, sizeof(char));
-
-  this->readfile(record_offset + comp_accu, comp_size, record_block_cmp_buffer);
-  // 4 bytes, compress type
-  char *comp_type_b = (char *)calloc(4, sizeof(char));
-  memcpy(comp_type_b, record_block_cmp_buffer, 4 * sizeof(char));
-  //    putbytes(comp_type_b, 4, true);
-  int comp_type = comp_type_b[0] & 0xff;
-  // 4 bytes adler32 checksum
-  char *checksum_b = (char *)calloc(4, sizeof(char));
-  memcpy(checksum_b, record_block_cmp_buffer + 4, 4 * sizeof(char));
-  checksum = be_bin_to_u32((unsigned char *)checksum_b);
-  free(checksum_b);
-
-  if (comp_type == 0 /* not compressed */) {
-    if (comp_size < 8 || comp_size - 8 != uncomp_size) {
-      throw std::runtime_error("invalid uncompressed record block size");
-    }
-    record_block_uncompressed_v.assign(
-        reinterpret_cast<unsigned char *>(record_block_cmp_buffer + 8),
-        reinterpret_cast<unsigned char *>(record_block_cmp_buffer + comp_size));
-    record_block_uncompressed_b = record_block_uncompressed_v.data();
-  } else {
-    char *record_block_decrypted_buff;
-    if (this->encrypt == ENCRYPT_RECORD_ENC /* record block encrypted */) {
-      // TODO
-      throw std::runtime_error("record encrypted not support yet");
-    }
-    record_block_decrypted_buff = record_block_cmp_buffer + 8 * sizeof(char);
-    // decompress
-    if (comp_type == 1 /* lzo */) {
-      throw std::runtime_error("lzo compress not support yet");
-    } else if (comp_type == 2) {
-      // zlib compress
-      record_block_uncompressed_v =
-          zlib_mem_uncompress(record_block_decrypted_buff, comp_size);
-      if (record_block_uncompressed_v.empty()) {
-        throw std::runtime_error("record block decompress failed size == 0");
-      }
-      record_block_uncompressed_b = record_block_uncompressed_v.data();
-      uint32_t adler32cs = adler32checksum(record_block_uncompressed_b,
-                                           static_cast<uint32_t>(uncomp_size));
-      assert(record_block_uncompressed_v.size() == uncomp_size);
-      assert(adler32cs == checksum);
-        (void)adler32cs; (void)checksum;
-    } else {
-      throw std::runtime_error(
-          "cannot determine the record block compress type");
-    }
-  }
-
-  free(comp_type_b);
-  free(record_block_cmp_buffer);
-  //    free(record_block_uncompressed_b); /* ensure not free twice*/
-
-  unsigned char *record_block = record_block_uncompressed_b;
+  const std::vector<uint8_t> record_block_uncompressed_v =
+      readRecordBlockBytes(idx);
+  unsigned char *record_block =
+      const_cast<unsigned char *>(record_block_uncompressed_v.data());
   /**
    * 请注意，block 是会有很多个的，而每个block都可能会被压缩
    * 而 key_list中的 record_start,
@@ -1429,6 +1432,14 @@ Mdict::decode_record_block_by_rid(unsigned long rid /* record id */) {
 // this function is used to decode the record block, it will read the record
 // block from the file, avoid use this function
 int Mdict::decode_record_block() {
+  // Legacy full-record decoding is not used by the App, but preserving this
+  // entry point must not retain an unbounded zlib path. Validate every block
+  // through the single bounded decoder before returning to legacy callers.
+  for (uint64_t idx = 0; idx < record_header.size(); ++idx) {
+    (void)readRecordBlockBytes(idx);
+  }
+  return 0;
+
   // record block start offset: record_block_offset
   uint64_t record_offset = this->record_block_offset;
 
@@ -1982,36 +1993,65 @@ uint64_t Mdict::recordStreamSize() const {
 
 std::vector<uint8_t> Mdict::readRecordBlockBytes(uint64_t block_id) {
   if (block_id >= record_header.size()) {
-    throw std::out_of_range("record block id out of range");
+    throw ResourceException(ResourceErrorCode::offsetOutOfBounds);
   }
   const auto *header = record_header[block_id];
+  if (encrypt == ENCRYPT_RECORD_ENC) {
+    throw ResourceException(ResourceErrorCode::invalidCompressionType);
+  }
   const uint64_t comp_size = header->compressed_size;
-  if (comp_size < 8) throw std::runtime_error("invalid record block size");
+  const uint64_t decomp_size = header->decompressed_size;
+  if (comp_size < 8 || decomp_size == 0) {
+    throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
+  }
+  if (comp_size > limits_.maximumSingleRecordBlockCompressedBytes) {
+    throw ResourceException(ResourceErrorCode::singleRecordBlockCompressedTooLarge);
+  }
+  if (decomp_size > limits_.maximumSingleRecordBlockDecompressedBytes) {
+    throw ResourceException(ResourceErrorCode::singleRecordBlockDecompressedTooLarge);
+  }
+  const uint64_t file_offset = checkedAddUInt64(
+      record_block_offset, header->compressed_size_accumulator);
+  const uint64_t file_end = checkedAddUInt64(file_offset, comp_size);
+  if (file_end > actual_file_size_) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
+  }
+  std::vector<uint8_t> compressed;
+  try {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeInputBufferAllocation();
+#endif
+    compressed.resize(checkedUInt64ToSizeT(comp_size));
+  } catch (const std::bad_alloc &) {
+    throw ResourceException(ResourceErrorCode::allocationFailed);
+  }
+  readfile(file_offset, comp_size, reinterpret_cast<char *>(compressed.data()));
 
-  std::vector<uint8_t> compressed(comp_size);
-  readfile(record_block_offset + header->compressed_size_accumulator,
-           comp_size, reinterpret_cast<char *>(compressed.data()));
-
-  const int comp_type = compressed[0] & 0xff;
+  const uint32_t comp_type = validatedRecordBlockCompressionType(compressed.data());
   const uint32_t expected_checksum = be_bin_to_u32(compressed.data() + 4);
+  const uint64_t payload_size = checkedSubtractUInt64(comp_size, 8ULL);
   std::vector<uint8_t> output;
   if (comp_type == 0) {
+    if (payload_size != decomp_size) {
+      throw ResourceException(ResourceErrorCode::decompressedSizeMismatch);
+    }
     output.assign(compressed.begin() + 8, compressed.end());
   } else if (comp_type == 1) {
-    throw std::runtime_error("LZO record blocks are not supported");
+    throw ResourceException(ResourceErrorCode::invalidCompressionType);
   } else if (comp_type == 2) {
-    output = zlib_mem_uncompress(compressed.data() + 8, comp_size - 8,
-                                 header->decompressed_size);
+    output = boundedExactZlibDecompress(
+        compressed.data() + 8, checkedUInt64ToSizeT(payload_size),
+        checkedUInt64ToSizeT(decomp_size));
   } else {
-    throw std::runtime_error("unknown record block compression type");
+    throw ResourceException(ResourceErrorCode::invalidCompressionType);
   }
 
-  if (output.size() != header->decompressed_size) {
-    throw std::runtime_error("record block decompressed size mismatch");
+  if (output.size() != checkedUInt64ToSizeT(decomp_size)) {
+    throw ResourceException(ResourceErrorCode::decompressedSizeMismatch);
   }
   if (adler32checksum(output.data(), static_cast<uint32_t>(output.size())) !=
       expected_checksum) {
-    throw std::runtime_error("record block checksum mismatch");
+    throw ResourceException(ResourceErrorCode::checksumMismatch);
   }
   return output;
 }

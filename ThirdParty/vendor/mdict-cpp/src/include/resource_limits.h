@@ -43,6 +43,15 @@ enum class ResourceErrorCode {
   allocationFailed,
   invalidCompressionType,
   malformedCompressedData,
+  recordBlockInfoTooLarge,
+  recordBlockCountTooLarge,
+  singleRecordBlockCompressedTooLarge,
+  singleRecordBlockDecompressedTooLarge,
+  totalRecordBlockCompressedTooLarge,
+  totalRecordBlockDecompressedTooLarge,
+  recordRangeTooLarge,
+  returnedRecordTooLarge,
+  malformedRecordBlockMetadata,
 };
 
 inline const char *resourceErrorCodeString(ResourceErrorCode code) {
@@ -68,6 +77,15 @@ inline const char *resourceErrorCodeString(ResourceErrorCode code) {
     case ResourceErrorCode::allocationFailed:               return "memory allocation failed";
     case ResourceErrorCode::invalidCompressionType:         return "invalid or unsupported compression type";
     case ResourceErrorCode::malformedCompressedData:        return "malformed compressed data or zlib error";
+    case ResourceErrorCode::recordBlockInfoTooLarge:        return "record-block metadata exceeds limit";
+    case ResourceErrorCode::recordBlockCountTooLarge:       return "record block count exceeds limit";
+    case ResourceErrorCode::singleRecordBlockCompressedTooLarge: return "single record block compressed size exceeds limit";
+    case ResourceErrorCode::singleRecordBlockDecompressedTooLarge: return "single record block decompressed size exceeds limit";
+    case ResourceErrorCode::totalRecordBlockCompressedTooLarge: return "total record block compressed size exceeds limit";
+    case ResourceErrorCode::totalRecordBlockDecompressedTooLarge: return "total record block decompressed size exceeds limit";
+    case ResourceErrorCode::recordRangeTooLarge:            return "record range exceeds limit";
+    case ResourceErrorCode::returnedRecordTooLarge:         return "returned record exceeds limit";
+    case ResourceErrorCode::malformedRecordBlockMetadata:   return "malformed record-block metadata";
   }
   return "internal error";
 }
@@ -115,7 +133,7 @@ struct ResourceLimits {
   // --- Single key (enforced in D1b-3A-2A-R1 via split_key_block) ---
   uint64_t maximumSingleKeyBytes = 0;
 
-  // --- Record blocks (model only; enforcement is scheduled for D1b-3A-2B) ---
+  // --- Record blocks ---
   uint64_t maximumRecordBlockInfoBytes = 0;
   uint64_t maximumRecordBlockCount = 0;
   uint64_t maximumSingleRecordBlockCompressedBytes = 0;
@@ -123,7 +141,7 @@ struct ResourceLimits {
   uint64_t maximumTotalRecordBlockCompressedBytes = 0;
   uint64_t maximumTotalRecordBlockDecompressedBytes = 0;
 
-  // --- Record read (model only; enforcement is scheduled for D1b-3A-2B) ---
+  // --- Record read ---
   uint64_t maximumRecordRangeBytes = 0;
   uint64_t maximumReturnedRecordBytes = 0;
 
@@ -147,14 +165,14 @@ struct ResourceLimits {
     l.maximumTotalKeyBlockCompressedBytes       = UINT64_C(67108864);     // 64 MiB
     l.maximumTotalKeyBlockDecompressedBytes     = UINT64_C(134217728);    // 128 MiB
     l.maximumSingleKeyBytes                     = UINT64_C(10240);        // 10 KiB
-    l.maximumRecordBlockInfoBytes               = UINT64_C(4194304);
-    l.maximumRecordBlockCount                   = UINT64_C(32768);
-    l.maximumSingleRecordBlockCompressedBytes   = UINT64_C(16777216);
-    l.maximumSingleRecordBlockDecompressedBytes = UINT64_C(33554432);
-    l.maximumTotalRecordBlockCompressedBytes    = UINT64_C(2147483648);
-    l.maximumTotalRecordBlockDecompressedBytes  = UINT64_C(8589934592);
-    l.maximumRecordRangeBytes                   = UINT64_C(8388608);
-    l.maximumReturnedRecordBytes                = UINT64_C(8388608);
+    l.maximumRecordBlockInfoBytes               = UINT64_C(524288);      // 512 KiB
+    l.maximumRecordBlockCount                   = UINT64_C(16384);
+    l.maximumSingleRecordBlockCompressedBytes   = UINT64_C(1048576);     // 1 MiB
+    l.maximumSingleRecordBlockDecompressedBytes = UINT64_C(8388608);     // 8 MiB
+    l.maximumTotalRecordBlockCompressedBytes    = UINT64_C(268435456);   // 256 MiB
+    l.maximumTotalRecordBlockDecompressedBytes  = UINT64_C(1073741824);  // 1 GiB
+    l.maximumRecordRangeBytes                   = UINT64_C(524288);      // 512 KiB
+    l.maximumReturnedRecordBytes                = UINT64_C(524288);      // 512 KiB
     l.indexingCancellationInterval              = UINT32_C(256);
     return l;
   }

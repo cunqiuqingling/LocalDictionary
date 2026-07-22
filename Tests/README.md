@@ -29,7 +29,12 @@ and production-limit compatibility. The test-only Header entry point calls the
 real Header parser, duplicates a small amount of initialization preflight, and
 must remain synchronized with the production initialization path.
 
-Record-block ResourceLimits remain a D1b-3A-2B task. Directory-descriptor
+`run-d1b3a2b-record-resource-limits-smoke.sh` builds a synthetic Record
+metadata and bounded-block decoder suite in Debug and Release. Its reported
+count is total runtime assertions, including fixture/setup assertions; it
+does not read private dictionaries, `local.json`, or Application Support.
+
+Directory-descriptor
 `openat`/`renameat` hardening remains a D1b-3B task.
 
 Phase 2 was exercised against the selected real Oxford MDX with the documented 20-word set. Additional checks cover ASCII case fallback, English and curly-quote cleanup, trailing punctuation cleanup, read-only index reuse, SQLite integrity, and an in-process cache hit.

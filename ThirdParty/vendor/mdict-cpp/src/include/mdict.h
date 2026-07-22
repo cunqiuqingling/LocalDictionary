@@ -209,14 +209,14 @@ class key_list_item {
 
 class record_header_item {
  public:
-  unsigned long block_id;
-  unsigned long compressed_size;
-  unsigned long decompressed_size;
-  unsigned long compressed_size_accumulator;
-  unsigned long decompressed_size_accumulator;
-  record_header_item(unsigned long bid, unsigned long comp_size,
-                     unsigned long uncomp_size, unsigned long comp_accu,
-                     unsigned long decomp_accu)
+  uint64_t block_id;
+  uint64_t compressed_size;
+  uint64_t decompressed_size;
+  uint64_t compressed_size_accumulator;
+  uint64_t decompressed_size_accumulator;
+  record_header_item(uint64_t bid, uint64_t comp_size,
+                     uint64_t uncomp_size, uint64_t comp_accu,
+                     uint64_t decomp_accu)
       : block_id(bid),
         compressed_size(comp_size),
         decompressed_size(uncomp_size),

@@ -123,6 +123,14 @@ the build; the reviewed vendored files already contain their result.
    patch file): decodes the MDX Header Adler-32 field as a little-endian
    uint32. Header length remains big-endian, and all subsequent Key/Record
    checksum fields retain their existing format-specific byte order.
+10. D1b-3A-2B Record metadata and block decoding (manually applied; no
+    standalone patch file): bounds Record summary count and metadata before
+    allocation; requires the exact `count × 2 × numberWidth` pair-table
+    shape; uses checked offsets and atomic RAII metadata commit; enforces
+    single and cumulative Record block limits; and routes the Record block
+    paths through canonical-prefix, exact-size, bounded-zlib decoding with
+    big-endian Adler-32 verification. Test observers remain entirely behind
+    `MDICT_RESOURCE_TEST_OBSERVER` and have no production state or symbols.
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
