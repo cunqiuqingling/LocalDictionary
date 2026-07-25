@@ -7,8 +7,8 @@ private struct Failure: Error { let message: String }
 
 private struct Harness {
     var assertions = 0
-    mutating func check(_ name: String, _ condition: @autoclosure () -> Bool) throws {
-        guard condition() else { throw Failure(message: name) }
+    mutating func check(_ name: String, _ condition: @autoclosure () throws -> Bool) throws {
+        guard try condition() else { throw Failure(message: name) }
         assertions += 1
     }
     mutating func expect(_ name: String, _ expected: ResourcePayloadDownloadError,
@@ -51,7 +51,7 @@ private func store(hooks: ResourcePayloadFileSystemHooks) -> ResourcePayloadStag
 private func hooks(
     writeAll: (@Sendable (Int32, Data) throws -> Void)? = nil,
     synchronize: (@Sendable (Int32) throws -> Void)? = nil,
-    renameAt: (@Sendable (Int32, String, Int32, String) throws -> Void)? = nil
+    renameNoReplaceAt: (@Sendable (Int32, String, Int32, String) throws -> Void)? = nil
 ) -> ResourcePayloadFileSystemHooks {
     let base = ResourcePayloadFileSystemHooks.production
     return ResourcePayloadFileSystemHooks(
@@ -59,11 +59,14 @@ private func hooks(
         writeAll: writeAll ?? base.writeAll,
         synchronize: synchronize ?? base.synchronize,
         close: base.close,
-        renameAt: renameAt ?? base.renameAt
+        renameNoReplaceAt: renameNoReplaceAt ?? base.renameNoReplaceAt
     )
 }
 private func partialDirectory(_ root: URL) -> URL {
     root.appendingPathComponent(".partial-\(fixedID.uuidString.lowercased())", isDirectory: true)
+}
+private func verifiedDirectory(_ root: URL) -> URL {
+    root.appendingPathComponent("verified-\(fixedID.uuidString.lowercased())", isDirectory: true)
 }
 private func statValue(_ url: URL) throws -> stat {
     var value = stat()
@@ -71,6 +74,27 @@ private func statValue(_ url: URL) throws -> stat {
     return value
 }
 private func mode(_ url: URL) throws -> mode_t { try statValue(url).st_mode & 0o777 }
+
+private func writeAll(_ descriptor: Int32, _ data: Data) throws {
+    try data.withUnsafeBytes { bytes in
+        guard let base = bytes.baseAddress else { return }
+        var offset = 0
+        while offset < bytes.count {
+            let result = Darwin.write(descriptor, base.advanced(by: offset), bytes.count - offset)
+            guard result > 0 else { throw Failure(message: "competitor write") }
+            offset += result
+        }
+    }
+}
+
+private func createCompetitorFile(parent: Int32, component: String, contents: Data) throws {
+    let descriptor = component.withCString {
+        Darwin.openat(parent, $0, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode_t(0o600))
+    }
+    guard descriptor >= 0 else { throw Failure(message: "competitor create") }
+    defer { _ = Darwin.close(descriptor) }
+    try writeAll(descriptor, contents)
+}
 
 @main
 enum ResourcePayloadStagingSecuritySmoke {
@@ -86,6 +110,8 @@ enum ResourcePayloadStagingSecuritySmoke {
         try testRootAndPrepare(&harness, root: root, payload: payload)
         try testPrepareAndStreamingFailures(&harness, root: root, payload: payload)
         try testFinishFailures(&harness, root: root, payload: payload)
+        try testAtomicPublicationConflicts(&harness, root: root, payload: payload)
+        try testDurabilityBoundary(&harness, root: root, payload: payload)
         try testIdentitySubstitution(&harness, root: root, payload: payload)
         try testDirectoryAndCleanup(&harness, root: root, payload: payload)
         try harness.check("production host remains disabled", ResourcePayloadDownloadPolicy.productionAllowedHosts.isEmpty)
@@ -238,7 +264,19 @@ enum ResourcePayloadStagingSecuritySmoke {
             }
             operation.cleanup()
         }
-        for (name, failureCall) in [("file-fsync", 1), ("operation-fsync", 2), ("root-fsync", 3)] {
+        do {
+            let child = root.appendingPathComponent("payload-mode", isDirectory: true)
+            let operation = try prepared(child, payload: payload)
+            let partial = partialDirectory(child).appendingPathComponent("payload.mdx.part")
+            guard chmod(partial.path, 0o644) == 0 else { throw Failure(message: "chmod payload") }
+            try harness.expect("tampered payload mode", .unexpectedPermissions) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            try harness.check("mode tamper has no verified directory",
+                              !FileManager.default.fileExists(atPath: verifiedDirectory(child).path))
+            operation.cleanup()
+        }
+        for (name, failureCall) in [("file-fsync", 1), ("operation-fsync", 2)] {
             let calls = OSAllocatedUnfairLock(initialState: 0)
             let failingHooks = hooks(synchronize: { descriptor in
                 let current = calls.withLock { value in
@@ -255,7 +293,7 @@ enum ResourcePayloadStagingSecuritySmoke {
             operation.cleanup()
         }
         do {
-            let crossDevice = hooks(renameAt: { _, _, _, _ in throw ResourcePayloadDownloadError.crossDevicePublication })
+            let crossDevice = hooks(renameNoReplaceAt: { _, _, _, _ in throw ResourcePayloadDownloadError.crossDevicePublication })
             let operation = try prepared(root.appendingPathComponent("cross-device", isDirectory: true), payload: payload, hooks: crossDevice)
             try harness.expect("cross-device publication", .crossDevicePublication) {
                 _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
@@ -264,8 +302,8 @@ enum ResourcePayloadStagingSecuritySmoke {
         }
         do {
             let base = ResourcePayloadFileSystemHooks.production
-            let mutateFinal = hooks(renameAt: { sourceFD, source, destinationFD, destination in
-                try base.renameAt(sourceFD, source, destinationFD, destination)
+            let mutateFinal = hooks(renameNoReplaceAt: { sourceFD, source, destinationFD, destination in
+                try base.renameNoReplaceAt(sourceFD, source, destinationFD, destination)
                 guard destination == "payload.mdx" else { return }
                 _ = destination.withCString { Darwin.unlinkat(destinationFD, $0, 0) }
                 let replacement = destination.withCString {
@@ -280,6 +318,168 @@ enum ResourcePayloadStagingSecuritySmoke {
                 _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
             }
             operation.cleanup()
+        }
+    }
+
+    private static func testAtomicPublicationConflicts(_ harness: inout Harness,
+                                                        root: URL, payload: Data) throws {
+        let competitor = Data("competitor payload".utf8)
+        do {
+            let child = root.appendingPathComponent("inner-static-file", isDirectory: true)
+            let operation = try prepared(child, payload: payload)
+            let target = partialDirectory(child).appendingPathComponent("payload.mdx")
+            try competitor.write(to: target)
+            let before = try statValue(target)
+            try harness.expect("inner static file conflict", .conflict) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            try harness.check("inner static file untouched", try Data(contentsOf: target) == competitor)
+            try harness.check("inner static file inode untouched", try statValue(target).st_ino == before.st_ino)
+            operation.cleanup()
+            try harness.check("inner static file survives cleanup", FileManager.default.fileExists(atPath: target.path))
+        }
+        do {
+            let child = root.appendingPathComponent("inner-static-directory", isDirectory: true)
+            let operation = try prepared(child, payload: payload)
+            let target = partialDirectory(child).appendingPathComponent("payload.mdx", isDirectory: true)
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+            let before = try statValue(target)
+            try harness.expect("inner static directory conflict", .conflict) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            try harness.check("inner static directory inode untouched", try statValue(target).st_ino == before.st_ino)
+            operation.cleanup()
+            try harness.check("inner static directory survives cleanup", FileManager.default.fileExists(atPath: target.path))
+        }
+        do {
+            let child = root.appendingPathComponent("inner-race", isDirectory: true)
+            let armed = OSAllocatedUnfairLock(initialState: true)
+            let base = ResourcePayloadFileSystemHooks.production
+            let racingHooks = hooks(renameNoReplaceAt: { sourceFD, source, destinationFD, destination in
+                let inject = armed.withLock { armed in
+                    guard armed, destination == "payload.mdx" else { return false }
+                    armed = false
+                    return true
+                }
+                if inject { try createCompetitorFile(parent: destinationFD, component: destination, contents: competitor) }
+                try base.renameNoReplaceAt(sourceFD, source, destinationFD, destination)
+            })
+            let operation = try prepared(child, payload: payload, hooks: racingHooks)
+            let target = partialDirectory(child).appendingPathComponent("payload.mdx")
+            try harness.expect("inner no-replace race", .conflict) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            let before = try statValue(target)
+            try harness.check("inner race content untouched", try Data(contentsOf: target) == competitor)
+            try harness.check("inner race did not publish source", try Data(contentsOf: target) != payload)
+            operation.cleanup()
+            try harness.check("inner race target survives cleanup", FileManager.default.fileExists(atPath: target.path))
+            try harness.check("inner race inode survives cleanup", try statValue(target).st_ino == before.st_ino)
+        }
+        do {
+            let child = root.appendingPathComponent("outer-static-file", isDirectory: true)
+            let operation = try prepared(child, payload: payload)
+            let target = verifiedDirectory(child)
+            try competitor.write(to: target)
+            let before = try statValue(target)
+            try harness.expect("outer static file conflict", .conflict) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            try harness.check("outer static file untouched", try Data(contentsOf: target) == competitor)
+            try harness.check("outer static file inode untouched", try statValue(target).st_ino == before.st_ino)
+            operation.cleanup()
+            try harness.check("outer static file survives cleanup", FileManager.default.fileExists(atPath: target.path))
+        }
+        do {
+            let child = root.appendingPathComponent("outer-static-directory", isDirectory: true)
+            let operation = try prepared(child, payload: payload)
+            let target = verifiedDirectory(child)
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+            let before = try statValue(target)
+            try harness.expect("outer static directory conflict", .conflict) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            try harness.check("outer static directory inode untouched", try statValue(target).st_ino == before.st_ino)
+            operation.cleanup()
+            try harness.check("outer static directory survives cleanup", FileManager.default.fileExists(atPath: target.path))
+        }
+        do {
+            let child = root.appendingPathComponent("outer-race", isDirectory: true)
+            let armed = OSAllocatedUnfairLock(initialState: true)
+            let base = ResourcePayloadFileSystemHooks.production
+            let racingHooks = hooks(renameNoReplaceAt: { sourceFD, source, destinationFD, destination in
+                let inject = armed.withLock { armed in
+                    guard armed, destination.hasPrefix("verified-") else { return false }
+                    armed = false
+                    return true
+                }
+                if inject { try createCompetitorFile(parent: destinationFD, component: destination, contents: competitor) }
+                try base.renameNoReplaceAt(sourceFD, source, destinationFD, destination)
+            })
+            let operation = try prepared(child, payload: payload, hooks: racingHooks)
+            let target = verifiedDirectory(child)
+            try harness.expect("outer no-replace race", .conflict) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            let before = try statValue(target)
+            try harness.check("outer race content untouched", try Data(contentsOf: target) == competitor)
+            try harness.check("outer race did not publish operation", try Data(contentsOf: target) != payload)
+            operation.cleanup()
+            try harness.check("outer race target survives cleanup", FileManager.default.fileExists(atPath: target.path))
+            try harness.check("outer race inode survives cleanup", try statValue(target).st_ino == before.st_ino)
+        }
+    }
+
+    private static func testDurabilityBoundary(_ harness: inout Harness,
+                                               root: URL, payload: Data) throws {
+        do {
+            let child = root.appendingPathComponent("operation-fsync-boundary", isDirectory: true)
+            let calls = OSAllocatedUnfairLock(initialState: 0)
+            let failingHooks = hooks(synchronize: { descriptor in
+                let call = calls.withLock { value in value += 1; return value }
+                if call == 2 { throw ResourcePayloadDownloadError.durabilityFailure }
+                try ResourcePayloadFileSystemHooks.production.synchronize(descriptor)
+            })
+            let operation = try prepared(child, payload: payload, hooks: failingHooks)
+            try harness.expect("operation fsync blocks outer publication", .durabilityFailure) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            try harness.check("operation fsync leaves no verified target",
+                              !FileManager.default.fileExists(atPath: verifiedDirectory(child).path))
+            operation.cleanup()
+            try harness.check("operation fsync cleanup removes operation directory",
+                              !FileManager.default.fileExists(atPath: partialDirectory(child).path))
+        }
+        do {
+            let child = root.appendingPathComponent("root-fsync-boundary", isDirectory: true)
+            let calls = OSAllocatedUnfairLock(initialState: 0)
+            let failingHooks = hooks(synchronize: { descriptor in
+                let call = calls.withLock { value in value += 1; return value }
+                if call == 3 { throw ResourcePayloadDownloadError.durabilityFailure }
+                try ResourcePayloadFileSystemHooks.production.synchronize(descriptor)
+            })
+            let operation = try prepared(child, payload: payload, hooks: failingHooks)
+            try harness.expect("root fsync reports durability failure", .durabilityFailure) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            let final = operation.verifiedFile
+            let finalMetadata = try statValue(final)
+            let directoryMetadata = try statValue(final.deletingLastPathComponent())
+            try harness.check("root fsync retains verified file", FileManager.default.fileExists(atPath: final.path))
+            try harness.check("root fsync retains verified bytes", try Data(contentsOf: final) == payload)
+            try harness.check("root fsync retains verified size", finalMetadata.st_size == payload.count)
+            try harness.check("root fsync retains streamed inode", operation.publishedFileIdentity?.inode == UInt64(finalMetadata.st_ino))
+            try harness.check("root fsync retains operation directory inode", operation.publishedDirectoryIdentity?.inode == UInt64(directoryMetadata.st_ino))
+            try harness.expect("append after uncertain publication", .writeFailure) {
+                _ = try operation.append(Data("x".utf8), maximumBytes: UInt64(payload.count), expectedBytes: UInt64(payload.count))
+            }
+            try harness.expect("finish after uncertain publication", .stagingFailure) {
+                _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+            }
+            operation.cleanup()
+            operation.cleanup()
+            try harness.check("uncertain cleanup retains verified file", FileManager.default.fileExists(atPath: final.path))
+            try harness.check("uncertain cleanup retains verified bytes", try Data(contentsOf: final) == payload)
         }
     }
 

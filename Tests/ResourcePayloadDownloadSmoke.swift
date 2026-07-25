@@ -323,11 +323,11 @@ private func hooks(
             try base.synchronize(descriptor)
         },
         close: base.close,
-        renameAt: { sourceDirectory, source, destinationDirectory, destination in
+        renameNoReplaceAt: { sourceDirectory, source, destinationDirectory, destination in
             var current = 0
             renameCount.update { $0 += 1; current = $0 }
             if current == failRenameCall { throw ResourcePayloadDownloadError.stagingFailure }
-            try base.renameAt(sourceDirectory, source, destinationDirectory, destination)
+            try base.renameNoReplaceAt(sourceDirectory, source, destinationDirectory, destination)
         }
     )
 }

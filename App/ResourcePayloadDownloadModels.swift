@@ -17,6 +17,7 @@ enum ResourcePayloadDownloadError: LocalizedError, Equatable, Sendable {
     case durabilityFailure
     case identityChanged
     case unexpectedFileType
+    case unexpectedPermissions
     case unexpectedLinkCount
     case ioFailure
     case invalidSignedSize
@@ -69,6 +70,8 @@ enum ResourcePayloadDownloadError: LocalizedError, Equatable, Sendable {
             return "资源暂存文件在校验期间发生变化。"
         case .unexpectedFileType:
             return "资源暂存对象类型无效。"
+        case .unexpectedPermissions:
+            return "资源暂存对象权限无效。"
         case .unexpectedLinkCount:
             return "资源暂存对象链接数无效。"
         case .ioFailure:

@@ -9,7 +9,7 @@ struct ResourcePayloadFileSystemHooks: Sendable {
     let writeAll: @Sendable (Int32, Data) throws -> Void
     let synchronize: @Sendable (Int32) throws -> Void
     let close: @Sendable (Int32) throws -> Void
-    let renameAt: @Sendable (Int32, String, Int32, String) throws -> Void
+    let renameNoReplaceAt: @Sendable (Int32, String, Int32, String) throws -> Void
 
     static let production = ResourcePayloadFileSystemHooks(
         availableCapacity: { root in
@@ -52,10 +52,16 @@ struct ResourcePayloadFileSystemHooks: Sendable {
                 throw ResourcePayloadDownloadError.ioFailure
             }
         },
-        renameAt: { sourceDirectory, source, destinationDirectory, destination in
+        renameNoReplaceAt: { sourceDirectory, source, destinationDirectory, destination in
             let result = source.withCString { sourceName in
                 destination.withCString { destinationName in
-                    Darwin.renameat(sourceDirectory, sourceName, destinationDirectory, destinationName)
+                    Darwin.renameatx_np(
+                        sourceDirectory,
+                        sourceName,
+                        destinationDirectory,
+                        destinationName,
+                        UInt32(RENAME_EXCL)
+                    )
                 }
             }
             guard result == 0 else {
@@ -176,6 +182,9 @@ private enum ResourcePayloadStagingPOSIX {
             throw ResourcePayloadDownloadError.unexpectedFileType
         }
         guard metadata.st_uid == geteuid() else { throw ResourcePayloadDownloadError.permissionDenied }
+        guard (metadata.st_mode & mode_t(0o777)) == mode_t(0o600) else {
+            throw ResourcePayloadDownloadError.unexpectedPermissions
+        }
         if metadata.st_nlink == 0 { throw ResourcePayloadDownloadError.identityChanged }
         guard metadata.st_nlink == 1 else { throw ResourcePayloadDownloadError.unexpectedLinkCount }
         if let expectedSize, metadata.st_size != expectedSize {
@@ -339,7 +348,10 @@ struct ResourcePayloadStagingStore: Sendable {
 /// This object is intentionally confined to the downloader's already-serialized delegate
 /// lifecycle. It is not Sendable and never escapes to the UI, Catalog, or another actor.
 final class ResourcePayloadStagingOperation {
-    private enum State { case prepared, streaming, verified, published, cancelled, failed, closed }
+    private enum State {
+        case prepared, streaming, verified, publishedButDurabilityUnconfirmed,
+             published, cancelled, failed, closed
+    }
 
     let operationID: UUID
     let verifiedFile: URL
@@ -436,7 +448,7 @@ final class ResourcePayloadStagingOperation {
             try ResourcePayloadStagingPOSIX.validatePayloadFile(partialEntry,
                                                                 expectedSize: Int64(expectedBytes))
             try ResourcePayloadStagingPOSIX.entryIsAbsent(parent: operationFD, component: finalComponent)
-            try hooks.renameAt(operationFD, partialComponent, operationFD, finalComponent)
+            try hooks.renameNoReplaceAt(operationFD, partialComponent, operationFD, finalComponent)
             let finalEntry = try ResourcePayloadStagingPOSIX.entryMetadata(parent: operationFD,
                                                                             component: finalComponent)
             guard ResourcePayloadStagingPOSIX.identitiesMatch(payloadMetadata, finalEntry) else {
@@ -458,36 +470,40 @@ final class ResourcePayloadStagingOperation {
                 throw ResourcePayloadDownloadError.identityChanged
             }
             try ResourcePayloadStagingPOSIX.entryIsAbsent(parent: rootFD, component: verifiedComponent)
-            try hooks.renameAt(rootFD, operationComponent, rootFD, verifiedComponent)
+            try hooks.renameNoReplaceAt(rootFD, operationComponent, rootFD, verifiedComponent)
             let verifiedEntry = try ResourcePayloadStagingPOSIX.entryMetadata(parent: rootFD,
                                                                                component: verifiedComponent)
             guard ResourcePayloadStagingPOSIX.identitiesMatch(operationMetadata, verifiedEntry) else {
                 throw ResourcePayloadDownloadError.identityChanged
             }
             try ResourcePayloadStagingPOSIX.validateDirectory(verifiedEntry)
-            try rootDirectory.withDescriptor { try hooks.synchronize($0) }
-
             publishedFileIdentity = PayloadFileIdentity(payloadMetadata)
             publishedDirectoryIdentity = PayloadFileIdentity(operationMetadata)
+            state = .publishedButDurabilityUnconfirmed
+            try rootDirectory.withDescriptor { try hooks.synchronize($0) }
+
             state = .published
             closeDescriptors()
             return (writtenBytes, digest)
         } catch let error as ResourcePayloadDownloadError {
-            state = .failed
+            if state != .publishedButDurabilityUnconfirmed { state = .failed }
             throw error
         } catch {
-            state = .failed
+            if state != .publishedButDurabilityUnconfirmed { state = .failed }
             throw ResourcePayloadDownloadError.ioFailure
         }
     }
 
     func cleanup() {
-        if state == .published { closeDescriptors(); return }
+        if state == .published || state == .publishedButDurabilityUnconfirmed {
+            closeDescriptors()
+            return
+        }
         let rootFD = try? rootDirectory.withDescriptor { $0 }
         let operationFD = try? operationDirectory.withDescriptor { $0 }
         if let operationFD {
-            ResourcePayloadStagingPOSIX.unlinkKnown(parent: operationFD, component: partialComponent)
-            ResourcePayloadStagingPOSIX.unlinkKnown(parent: operationFD, component: finalComponent)
+            removeOwnedPayload(parent: operationFD, component: partialComponent)
+            removeOwnedPayload(parent: operationFD, component: finalComponent)
         }
         if let rootFD,
            let operationMetadata = try? operationDirectory.withDescriptor({ try ResourcePayloadStagingPOSIX.metadata(for: $0) }),
@@ -506,6 +522,20 @@ final class ResourcePayloadStagingOperation {
         try? payload.close()
         try? operationDirectory.close()
         try? rootDirectory.close()
-        if state != .published && state != .failed && state != .cancelled { state = .closed }
+        if state != .published && state != .publishedButDurabilityUnconfirmed &&
+            state != .failed && state != .cancelled {
+            state = .closed
+        }
+    }
+
+    private func removeOwnedPayload(parent: Int32, component: String) {
+        guard let payloadMetadata = try? payload.withDescriptor({
+            try ResourcePayloadStagingPOSIX.metadata(for: $0)
+        }),
+        let entry = try? ResourcePayloadStagingPOSIX.entryMetadata(parent: parent, component: component),
+        ResourcePayloadStagingPOSIX.identitiesMatch(payloadMetadata, entry) else {
+            return
+        }
+        ResourcePayloadStagingPOSIX.unlinkKnown(parent: parent, component: component)
     }
 }

@@ -38,22 +38,29 @@ default. Directories use mode `0700` and the payload file uses `0600`:
 <injected-root>/verified-<UUID>/payload.mdx
 ```
 
-The injected root is the sole absolute-path boundary. It is opened once with
-`O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`, then every descendant operation uses a
-validated single component with `mkdirat`, `openat`, `fstatat`, `renameat`, or
-`unlinkat`. The root and operation directory are owner-owned, non-symlink directories
-without group/other write permission; the payload is a `0600`, owner-owned regular
-file with link count one.
+The injected root is the sole absolute-path boundary for descendant mutations. It is
+opened with `O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`, then every descendant operation
+uses a validated single component with `mkdirat`, `openat`, `fstatat`,
+`renameatx_np(..., RENAME_EXCL)`, or `unlinkat`. The root and operation directory are
+owner-owned, non-symlink directories without group/other write permission; the
+payload is revalidated as a `0600`, owner-owned regular file with link count one
+before publication. The capacity preflight currently queries the injected root URL;
+moving that read to an fd-bound API remains deferred hardening work.
 
 Before publication, the writer checks exact size and SHA-256, `fstat`s and `fsync`s
 the still-open payload fd, and compares its identity with the `fstatat` partial entry.
-It then renames the file within the operation directory, verifies the final entry is
-the same inode, `fsync`s that directory, renames the whole operation directory under
-the root fd, verifies its inode again, and finally `fsync`s the root fd. Thus the inode
-streamed, bounded, hashed, and fsynced is the inode atomically published. Failure or
-cancellation uses `unlinkat` only for known leaf components and never recursively
-deletes unknown entries. A crash may still leave a clearly named partial or verified
-directory; startup orphan recovery is intentionally deferred to D1b-3B-2.
+Both the inner payload publication and outer directory publication use
+`renameatx_np(..., RENAME_EXCL)`: an existing target is atomically rejected and is
+never overwritten. The final payload and verified directory are identity-checked after
+each rename. After the outer rename has succeeded and its identity check has passed,
+the operation enters a durability-unconfirmed state before `fsync` of the root fd.
+If that final `fsync` fails, the API returns a durability failure but preserves the
+verified directory and payload for deferred D1b-3B-2 reconciliation; it is not
+reported as a successful publication and cleanup does not delete it. Before that
+irreversible outer rename, failure or cancellation uses `unlinkat` only for known leaf
+components and never recursively deletes unknown entries. A crash may still leave a
+clearly named partial or verified directory; startup orphan recovery is intentionally
+deferred to D1b-3B-2.
 
 The capability boundary prevents descendant path traversal, symlink following, and
 ordinary path substitution. It does not claim to isolate an arbitrary malicious
