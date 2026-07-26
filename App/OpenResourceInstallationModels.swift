@@ -3,10 +3,17 @@ import Foundation
 enum OpenResourceInstallationError: LocalizedError, Equatable {
     case invalidIdentity
     case invalidSidecar
+    case sidecarIdentityMismatch
+    case payloadIdentityMismatch
+    case unexpectedInstallationEntry
     case unsafeVerifiedPayload
+    case resourceAlreadyInstalled
+    case dictionaryIDConflict
     case conflict
     case crossDevicePublication
     case durabilityFailure
+    case finalPublishedButDirectoryIdentityMismatch
+    case filesystemPublishedButIdentityUnconfirmed
     case catalogCommitFailedAfterFilesystemPublish
     case installationInProgress
 
@@ -14,10 +21,19 @@ enum OpenResourceInstallationError: LocalizedError, Equatable {
         switch self {
         case .invalidIdentity: return "开放词典安装身份无效。"
         case .invalidSidecar: return "开放词典安装信息无效。"
+        case .sidecarIdentityMismatch: return "开放词典安装信息与已验证身份不一致。"
+        case .payloadIdentityMismatch: return "开放词典文件与已验证身份不一致。"
+        case .unexpectedInstallationEntry: return "开放词典目录包含未预期文件。"
         case .unsafeVerifiedPayload: return "已验证词典文件未通过安全复核。"
+        case .resourceAlreadyInstalled: return "该开放词典资源已安装。"
+        case .dictionaryIDConflict: return "该开放词典安装标识已存在。"
         case .conflict: return "该开放词典已安装。"
         case .crossDevicePublication: return "词典暂存位置与安装位置不在同一磁盘上。"
         case .durabilityFailure: return "词典文件已发布，但未能确认磁盘持久化。"
+        case .finalPublishedButDirectoryIdentityMismatch:
+            return "词典目录已发布，但目录身份未通过复核。"
+        case .filesystemPublishedButIdentityUnconfirmed:
+            return "词典目录已发布，但内容身份未通过复核。"
         case .catalogCommitFailedAfterFilesystemPublish:
             return "词典文件已安装，但目录记录未能保存。"
         case .installationInProgress: return "该开放词典正在安装。"
@@ -78,7 +94,7 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
         officialPageReference = resource.officialDownloadPage
         expectedEntryCount = OpenResourceEntryCountMetadata(minimum: resource.expectedEntryCount.minimum,
                                                              maximum: resource.expectedEntryCount.maximum)
-        self.installedAt = installedAt
+        self.installedAt = Date(timeIntervalSince1970: floor(installedAt.timeIntervalSince1970))
         formatterIdentifier = DictionaryFormatterIdentifier.genericMDictV1
     }
 
@@ -92,7 +108,7 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
               OpenResourceInstallationMetadata.isSafeToken(resourceID), resourceRevision > 0,
               manifestVersion > 0, OpenResourceInstallationMetadata.isSHA256(manifestSHA256),
               OpenResourceInstallationMetadata.isSHA256(payloadSHA256), payloadBytes > 0,
-              !verifiedKeyID.isEmpty, !languages.isEmpty,
+              ResourceManifestKeyID.isValid(verifiedKeyID), !languages.isEmpty,
               expectedEntryCount.minimum <= expectedEntryCount.maximum,
               DictionaryFormatterIdentifier.supportsGenericMDictV1(formatterIdentifier) else {
             throw OpenResourceInstallationError.invalidIdentity
@@ -103,7 +119,8 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
         self.verifiedKeyID = verifiedKeyID; self.payloadSHA256 = payloadSHA256
         self.payloadBytes = payloadBytes; self.languages = languages; self.license = license
         self.sourceProject = sourceProject; self.officialPageReference = officialPageReference
-        self.expectedEntryCount = expectedEntryCount; self.installedAt = installedAt
+        self.expectedEntryCount = expectedEntryCount
+        self.installedAt = Date(timeIntervalSince1970: floor(installedAt.timeIntervalSince1970))
         self.formatterIdentifier = formatterIdentifier
     }
 
@@ -162,7 +179,8 @@ struct OpenResourceInstallationSidecar: Codable, Equatable, Sendable {
               manifestVersion > 0, payloadRelativePath == OpenResourceInstallationIdentity.payloadComponent,
               !payloadRelativePath.contains("/"), !payloadRelativePath.contains("\\"),
               payloadBytes > 0, OpenResourceInstallationMetadata.isSHA256(payloadSHA256),
-              OpenResourceInstallationMetadata.isSHA256(manifestSHA256), !verifiedKeyID.isEmpty,
+              OpenResourceInstallationMetadata.isSHA256(manifestSHA256),
+              ResourceManifestKeyID.isValid(verifiedKeyID),
               sourceKind == .openResource, storageOwnership == .appManagedOpenResource,
               DictionaryOwnershipPolicy.policy(for: sourceKind, ownership: storageOwnership) != nil,
               !languages.isEmpty, DictionaryFormatterIdentifier.supportsGenericMDictV1(formatterIdentifier),
@@ -170,7 +188,11 @@ struct OpenResourceInstallationSidecar: Codable, Equatable, Sendable {
             throw OpenResourceInstallationError.invalidSidecar
         }
         if let identity {
-            guard self == OpenResourceInstallationSidecar(identity: identity) else {
+            let expected = OpenResourceInstallationSidecar(identity: identity)
+            // Compare the decoded schema values, never the source JSON representation or its
+            // key order. `OpenResourceInstallationIdentity` normalizes installedAt to the
+            // sidecar's whole-second encoding before this comparison.
+            guard self == expected else {
                 throw OpenResourceInstallationError.invalidSidecar
             }
         }

@@ -20,59 +20,61 @@ actor OpenResourceInstallationCoordinator {
             try OpenResourceInstallationFileWorker.prepare(verified: verified)
         }.value
 
-        return try await MainActor.run {
-            try catalogStore.withMutationLock {
-                let current = catalogStore.loadResult()
-                guard let catalog = current.catalog else {
-                    throw OpenResourceInstallationError.invalidIdentity
-                }
-                guard !catalog.dictionaries.contains(where: { $0.dictionaryID == prepared.identity.dictionaryID ||
-                    $0.openResourceMetadata?.resourceID == prepared.identity.resourceID }) else {
-                    throw OpenResourceInstallationError.conflict
-                }
+        let published: OpenResourceInstallationFileWorker.PublishedDirectory
+        do {
+            published = try await Task.detached(priority: .utility) {
+                try OpenResourceInstallationFileWorker.publish(prepared: prepared, dictionariesRoot: dictionariesRoot)
+            }.value
+        } catch {
+            throw error
+        }
 
-                let published: OpenResourceInstallationFileWorker.PublishedDirectory
-                do {
-                    published = try OpenResourceInstallationFileWorker.publish(prepared: prepared,
-                                                                                dictionariesRoot: dictionariesRoot)
-                } catch let error as OpenResourceInstallationError {
-                    throw error
-                } catch {
-                    throw OpenResourceInstallationError.unsafeVerifiedPayload
+        return try await MainActor.run {
+            do {
+                let mutation = try catalogStore.mutate { catalog, _ in
+                    guard !catalog.dictionaries.contains(where: { $0.openResourceMetadata?.resourceID == prepared.identity.resourceID }) else {
+                        throw OpenResourceInstallationError.resourceAlreadyInstalled
+                    }
+                    guard !catalog.dictionaries.contains(where: { $0.dictionaryID == prepared.identity.dictionaryID }) else {
+                        throw OpenResourceInstallationError.dictionaryIDConflict
+                    }
+                    let now = Date()
+                    let descriptor = DictionaryDescriptor(
+                        dictionaryID: prepared.identity.dictionaryID,
+                        displayName: prepared.identity.resourceID,
+                        sourceKind: .openResource,
+                        queryLevel: .fallback,
+                        sortPosition: Self.nextFallbackPosition(in: catalog),
+                        enabled: true,
+                        state: .pendingIndex,
+                        indexMetadata: DictionaryIndexMetadata(schemaVersion: nil, entryCount: nil,
+                                                               indexFileSize: nil, sourceFileSize: prepared.identity.payloadBytes,
+                                                               sourceModifiedAt: nil, sourceSHA256: prepared.identity.payloadSHA256,
+                                                               indexedAt: nil),
+                        formatterIdentifier: prepared.identity.formatterIdentifier,
+                        capabilities: .unknown,
+                        relativePaths: DictionaryRelativePaths(
+                            dictionary: "Dictionaries/\(prepared.identity.dictionaryID)/\(OpenResourceInstallationIdentity.payloadComponent)",
+                            resources: [], index: nil),
+                        createdAt: now, updatedAt: now,
+                        storageOwnership: .appManagedOpenResource,
+                        openResourceMetadata: prepared.identity.catalogMetadata
+                    )
+                    catalog.dictionaries.append(descriptor)
+                    catalog.updatedAt = now
+                    return descriptor
                 }
-                let now = Date()
-                let descriptor = DictionaryDescriptor(
-                    dictionaryID: prepared.identity.dictionaryID,
-                    displayName: prepared.identity.resourceID,
-                    sourceKind: .openResource,
-                    queryLevel: .fallback,
-                    sortPosition: Self.nextFallbackPosition(in: catalog),
-                    enabled: true,
-                    state: .pendingIndex,
-                    indexMetadata: DictionaryIndexMetadata(schemaVersion: nil, entryCount: nil,
-                                                           indexFileSize: nil, sourceFileSize: prepared.identity.payloadBytes,
-                                                           sourceModifiedAt: nil, sourceSHA256: prepared.identity.payloadSHA256,
-                                                           indexedAt: nil),
-                    formatterIdentifier: prepared.identity.formatterIdentifier,
-                    capabilities: .unknown,
-                    relativePaths: DictionaryRelativePaths(
-                        dictionary: "Dictionaries/\(prepared.identity.dictionaryID)/\(OpenResourceInstallationIdentity.payloadComponent)",
-                        resources: [], index: nil),
-                    createdAt: now, updatedAt: now,
-                    storageOwnership: .appManagedOpenResource,
-                    openResourceMetadata: prepared.identity.catalogMetadata
-                )
-                var updated = catalog
-                updated.dictionaries.append(descriptor)
-                updated.updatedAt = now
-                do {
-                    try catalogStore.save(updated)
-                } catch {
-                    // The filesystem publication is now intentionally retained for 2B recovery.
-                    _ = published
+                _ = published // Final filesystem object intentionally remains if catalog commit fails; 2B reconciles it.
+                return mutation.value
+            } catch let error as OpenResourceInstallationError {
+                switch error {
+                case .resourceAlreadyInstalled, .dictionaryIDConflict:
+                    throw error
+                default:
                     throw OpenResourceInstallationError.catalogCommitFailedAfterFilesystemPublish
                 }
-                return descriptor
+            } catch {
+                throw OpenResourceInstallationError.catalogCommitFailedAfterFilesystemPublish
             }
         }
     }
@@ -81,6 +83,20 @@ actor OpenResourceInstallationCoordinator {
         (catalog.dictionaries.filter { $0.queryLevel == .fallback }.map(\.sortPosition).max() ?? -1) + 1
     }
 }
+
+#if OPEN_RESOURCE_INSTALLATION_TESTING
+extension OpenResourceInstallationCoordinator {
+    /// Test-only deterministic interlock used to exercise the name-to-fd publication race.
+    /// It is compiled out of the application target.
+    nonisolated static func setBeforeRenameForResourceTest(_ hook: @escaping @Sendable () throws -> Void) {
+        OpenResourceInstallationFileWorker.beforeRenameForResourceTest = hook
+    }
+
+    nonisolated static func clearBeforeRenameForResourceTest() {
+        OpenResourceInstallationFileWorker.beforeRenameForResourceTest = nil
+    }
+}
+#endif
 
 private enum OpenResourceInstallationFileWorker {
     struct Prepared: Sendable {
@@ -91,6 +107,13 @@ private enum OpenResourceInstallationFileWorker {
         let sidecarIdentity: PayloadFileIdentity
     }
     struct PublishedDirectory: Sendable { let directoryURL: URL }
+
+#if OPEN_RESOURCE_INSTALLATION_TESTING
+    // This process-global hook is used by a single-threaded synthetic smoke only.  It is fully
+    // compiled out of production, so it cannot add state, symbols, strings, or control flow to
+    // the App bundle.
+    nonisolated(unsafe) static var beforeRenameForResourceTest: (@Sendable () throws -> Void)?
+#endif
 
     static func prepare(verified: VerifiedPayloadStagingResult) throws -> Prepared {
         guard verified.resourceID == verified.installationIdentity.resourceID,
@@ -160,6 +183,12 @@ private enum OpenResourceInstallationFileWorker {
             throw OpenResourceInstallationError.unsafeVerifiedPayload
         }
         try component(prepared.identity.dictionaryID)
+        guard same(verifiedStat, try entryMetadata(stagingRoot, prepared.verified.verifiedDirectoryComponent)) else {
+            throw OpenResourceInstallationError.unsafeVerifiedPayload
+        }
+#if OPEN_RESOURCE_INSTALLATION_TESTING
+        try beforeRenameForResourceTest?()
+#endif
         let result = prepared.verified.verifiedDirectoryComponent.withCString { source in
             prepared.identity.dictionaryID.withCString { destination in
                 Darwin.renameatx_np(stagingRoot, source, dictionaries, destination, UInt32(RENAME_EXCL))
@@ -167,12 +196,31 @@ private enum OpenResourceInstallationFileWorker {
         }
         guard result == 0 else {
             if errno == EXDEV { throw OpenResourceInstallationError.crossDevicePublication }
-            if errno == EEXIST { throw OpenResourceInstallationError.conflict }
+            if errno == EEXIST { throw OpenResourceInstallationError.dictionaryIDConflict }
             throw OpenResourceInstallationError.unsafeVerifiedPayload
         }
         let finalEntry = try entryMetadata(dictionaries, prepared.identity.dictionaryID)
-        guard same(verifiedStat, finalEntry) else { throw OpenResourceInstallationError.unsafeVerifiedPayload }
+        guard same(verifiedStat, finalEntry) else {
+            throw OpenResourceInstallationError.finalPublishedButDirectoryIdentityMismatch
+        }
         guard Darwin.fsync(dictionaries) == 0 else { throw OpenResourceInstallationError.durabilityFailure }
+        let finalFD = try openChildDirectory(dictionaries, prepared.identity.dictionaryID)
+        defer { Darwin.close(finalFD) }
+        guard same(verifiedStat, try metadata(finalFD)) else {
+            throw OpenResourceInstallationError.finalPublishedButDirectoryIdentityMismatch
+        }
+        do {
+            try validateFinalContents(finalFD, expected: prepared.identity,
+                                      payloadIdentity: prepared.payloadIdentity,
+                                      sidecarIdentity: prepared.sidecarIdentity)
+        } catch let error as OpenResourceInstallationError {
+            switch error {
+            case .payloadIdentityMismatch, .sidecarIdentityMismatch, .invalidSidecar,
+                 .unsafeVerifiedPayload, .unexpectedInstallationEntry:
+                throw OpenResourceInstallationError.filesystemPublishedButIdentityUnconfirmed
+            default: throw error
+            }
+        }
         return PublishedDirectory(directoryURL: dictionariesRoot.standardizedFileURL
             .appendingPathComponent(prepared.identity.dictionaryID, isDirectory: true))
     }
@@ -211,12 +259,47 @@ private enum OpenResourceInstallationFileWorker {
         let copy = Darwin.dup(fd); guard copy >= 0, let directory = Darwin.fdopendir(copy) else { if copy >= 0 { Darwin.close(copy) }; throw OpenResourceInstallationError.unsafeVerifiedPayload }
         defer { Darwin.closedir(directory) }
         var names = Set<String>()
+        errno = 0
         while let entry = Darwin.readdir(directory) {
             let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
                 pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN)) { String(cString: $0) }
             }
             if name != "." && name != ".." { names.insert(name) }
         }
+        guard errno == 0 else { throw OpenResourceInstallationError.unsafeVerifiedPayload }
         return names
+    }
+
+    private static func validateFinalContents(_ directory: Int32,
+                                              expected identity: OpenResourceInstallationIdentity,
+                                              payloadIdentity: PayloadFileIdentity,
+                                              sidecarIdentity: PayloadFileIdentity) throws {
+        guard try directoryEntries(directory) == Set([OpenResourceInstallationIdentity.payloadComponent,
+                                                       OpenResourceInstallationIdentity.sidecarComponent]) else {
+            throw OpenResourceInstallationError.unexpectedInstallationEntry
+        }
+        let payload = try openRegular(directory, OpenResourceInstallationIdentity.payloadComponent)
+        defer { Darwin.close(payload) }
+        let sidecar = try openRegular(directory, OpenResourceInstallationIdentity.sidecarComponent)
+        defer { Darwin.close(sidecar) }
+        let payloadStat = try metadata(payload)
+        let sidecarStat = try metadata(sidecar)
+        try secureFile(payloadStat, size: Int64(identity.payloadBytes))
+        try secureFile(sidecarStat, size: nil)
+        guard PayloadFileIdentity(payloadStat) == payloadIdentity,
+              same(payloadStat, try entryMetadata(directory, OpenResourceInstallationIdentity.payloadComponent)),
+              try hash(payload) == identity.payloadSHA256 else {
+            throw OpenResourceInstallationError.payloadIdentityMismatch
+        }
+        guard PayloadFileIdentity(sidecarStat) == sidecarIdentity,
+              same(sidecarStat, try entryMetadata(directory, OpenResourceInstallationIdentity.sidecarComponent)) else {
+            throw OpenResourceInstallationError.sidecarIdentityMismatch
+        }
+        let data = try read(sidecar, maximum: 64 * 1024)
+        do {
+            _ = try OpenResourceInstallationSidecar.decode(data).validated(expected: identity)
+        } catch {
+            throw OpenResourceInstallationError.sidecarIdentityMismatch
+        }
     }
 }

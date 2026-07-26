@@ -180,6 +180,21 @@ pending-index. It never reads Application Support, private dictionaries, local c
 network resources. Catalog v1 files remain untouched and are migration input only; v2 becomes
 authoritative only after its first successful durable save.
 
+D1b-3B-2A-R1 also covers Catalog provenance and final-publication races with synthetic files:
+only a genuinely missing Catalog may begin from an empty value; corrupt or unsupported Catalogs
+are read-only and cannot be rewritten by import, index, ordering, removal, startup adaptation, or
+open-resource installation. A Catalog mutation takes a short lock, reloads the latest durable
+Catalog, changes only its target descriptor, and never encloses download, copying, indexing, or
+query work. The backup is the previous valid v2 primary, not the in-progress new primary.
+
+The installation smoke uses real POSIX files and `renameatx_np(RENAME_EXCL)` to verify that the
+sidecar is bounded-read and matched to its immutable identity before publication, that the source
+name is rebound to the verified directory fd immediately before rename, and that the final
+payload/sidecar are rechecked before a Catalog commit. Test-only rename interlocks are compiled
+only by the smoke runner; they are not part of the App target. Final objects that fail a
+post-publication identity check are intentionally retained without a Catalog descriptor for the
+later D1b-3B-2B reconciliation phase.
+
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.
 - Build an index, request cooperative cancellation, exercise a controlled failure and retry, and confirm pending/indexing/cancelling/ready/failed wording.

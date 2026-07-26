@@ -20,6 +20,7 @@ xcrun --sdk macosx swiftc \
   -warnings-as-errors \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/DictionaryCatalog.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/DictionaryCatalogStore.swift" \
   "$ROOT/App/DictionaryImportModels.swift" \
   "$ROOT/App/DictionaryImportService.swift" \

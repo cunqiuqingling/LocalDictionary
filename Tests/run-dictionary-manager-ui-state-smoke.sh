@@ -22,6 +22,7 @@ xcrun --sdk macosx swiftc \
   -module-cache-path "$BUILD_DIR/module-cache" \
   "$ROOT_DIR/App/AppConfig.swift" \
   "$ROOT_DIR/App/DictionaryCatalog.swift" \
+  "$ROOT_DIR/App/ResourceManifestKeyID.swift" \
   "$ROOT_DIR/App/DictionaryManagerPresentation.swift" \
   "$ROOT_DIR/Tests/DictionaryManagerUIStateSmoke.swift" \
   -o "$BUILD_DIR/DictionaryManagerUIStateSmoke"
@@ -35,6 +36,7 @@ xcrun --sdk macosx swiftc \
   -module-cache-path "$BUILD_DIR/module-cache" \
   "$ROOT_DIR/App/AppConfig.swift" \
   "$ROOT_DIR/App/DictionaryCatalog.swift" \
+  "$ROOT_DIR/App/ResourceManifestKeyID.swift" \
   "$ROOT_DIR/App/DictionaryCatalogStore.swift" \
   "$ROOT_DIR/App/DictionaryCatalogOrdering.swift" \
   "$ROOT_DIR/App/DictionaryManagerPresentation.swift" \

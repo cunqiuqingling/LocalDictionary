@@ -119,6 +119,7 @@ enum ResourcePayloadStagingSecuritySmoke {
         let payload = Data("synthetic payload only".utf8)
         try testComponents(&harness)
         try testRootAndPrepare(&harness, root: root, payload: payload)
+        try testSidecarIdentityRevalidation(&harness, root: root, payload: payload)
         try testPrepareAndStreamingFailures(&harness, root: root, payload: payload)
         try testFinishFailures(&harness, root: root, payload: payload)
         try testAtomicPublicationConflicts(&harness, root: root, payload: payload)
@@ -183,6 +184,33 @@ enum ResourcePayloadStagingSecuritySmoke {
 
     private static func finalDirectoryURL(_ root: URL) -> URL {
         verifiedDirectory(root)
+    }
+
+    private static func testSidecarIdentityRevalidation(_ harness: inout Harness,
+                                                         root: URL, payload: Data) throws {
+        let child = root.appendingPathComponent("sidecar-in-place-tamper", isDirectory: true)
+        let operation = try prepared(child, payload: payload)
+        let sidecarURL = partialDirectory(child).appendingPathComponent("resource-installation.json")
+        let before = try statValue(sidecarURL)
+        var text = try String(contentsOf: sidecarURL, encoding: .utf8)
+        guard text.contains("test-key") else { throw Failure(message: "synthetic sidecar key missing") }
+        text = text.replacingOccurrences(of: "test-key", with: "best-key", options: [], range: text.range(of: "test-key"))
+        let replacement = Data(text.utf8)
+        try harness.check("sidecar same-size replacement", replacement.count == Int(before.st_size))
+        let descriptor = sidecarURL.path.withCString { Darwin.open($0, O_WRONLY | O_CLOEXEC) }
+        guard descriptor >= 0 else { throw Failure(message: "open sidecar") }
+        defer { Darwin.close(descriptor) }
+        let written = replacement.withUnsafeBytes { Darwin.pwrite(descriptor, $0.baseAddress, replacement.count, 0) }
+        guard written == replacement.count else { throw Failure(message: "overwrite sidecar") }
+        let after = try statValue(sidecarURL)
+        try harness.check("sidecar inode retained", before.st_ino == after.st_ino)
+        try harness.check("sidecar size retained", before.st_size == after.st_size)
+        try harness.expect("sidecar identity mismatch before verified publish", .sidecarIdentityMismatch) {
+            _ = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
+        }
+        try harness.check("sidecar tamper has no verified directory",
+                          !FileManager.default.fileExists(atPath: verifiedDirectory(child).path))
+        operation.cleanup()
     }
 
     private static func prepared(_ root: URL, payload: Data,

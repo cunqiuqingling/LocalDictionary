@@ -197,6 +197,30 @@ private enum ResourcePayloadStagingPOSIX {
             (left.st_mode & mode_t(S_IFMT)) == (right.st_mode & mode_t(S_IFMT))
     }
 
+    static func readBoundedExactly(_ descriptor: Int32, maximum: Int) throws -> Data {
+        let metadata = try metadata(for: descriptor)
+        guard metadata.st_size >= 0, metadata.st_size <= Int64(maximum) else {
+            throw ResourcePayloadDownloadError.sidecarIdentityMismatch
+        }
+        let expected = Int(metadata.st_size)
+        var output = Data(count: expected)
+        var offset = 0
+        while offset < expected {
+            let count = output.withUnsafeMutableBytes { buffer in
+                Darwin.pread(descriptor, buffer.baseAddress!.advanced(by: offset),
+                             expected - offset, off_t(offset))
+            }
+            if count > 0 { offset += count }
+            else if count < 0, errno == EINTR { continue }
+            else { throw ResourcePayloadDownloadError.sidecarIdentityMismatch }
+        }
+        var after = stat()
+        guard Darwin.fstat(descriptor, &after) == 0, after.st_size == metadata.st_size else {
+            throw ResourcePayloadDownloadError.sidecarIdentityMismatch
+        }
+        return output
+    }
+
     static func unlinkKnown(parent: Int32, component: String, directory: Bool = false) {
         guard (try? requireSingleComponent(component)) != nil else { return }
         let flags: Int32 = directory ? AT_REMOVEDIR : 0
@@ -294,7 +318,7 @@ struct ResourcePayloadStagingStore: Sendable {
                 let sidecarRaw = try operationDirectory!.withDescriptor { operationFD in
                     sidecarComponent.withCString {
                         Darwin.openat(operationFD, $0,
-                                     O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                                     O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
                                      mode_t(0o600))
                     }
                 }
@@ -503,6 +527,15 @@ final class ResourcePayloadStagingOperation {
             }
             try ResourcePayloadStagingPOSIX.validatePayloadFile(sidecarEntry,
                                                                 expectedSize: Int64(sidecarMetadata.st_size))
+            let sidecarData = try sidecar.withDescriptor {
+                try ResourcePayloadStagingPOSIX.readBoundedExactly($0, maximum: 64 * 1024)
+            }
+            do {
+                _ = try OpenResourceInstallationSidecar.decode(sidecarData)
+                    .validated(expected: installationIdentity)
+            } catch {
+                throw ResourcePayloadDownloadError.sidecarIdentityMismatch
+            }
             try ResourcePayloadStagingPOSIX.entryIsAbsent(parent: operationFD, component: finalComponent)
             try hooks.renameNoReplaceAt(operationFD, partialComponent, operationFD, finalComponent)
             let finalEntry = try ResourcePayloadStagingPOSIX.entryMetadata(parent: operationFD,

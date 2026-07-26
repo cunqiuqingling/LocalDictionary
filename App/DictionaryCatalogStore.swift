@@ -16,6 +16,8 @@ struct DictionaryCatalogLoadResult: Sendable {
 }
 
 enum DictionaryCatalogStoreError: LocalizedError {
+    case catalogCorrupt
+    case unsupportedCatalogVersion
     case corrupt
     case unsupportedVersion
     case unsupportedLegacyOpenResource
@@ -25,6 +27,8 @@ enum DictionaryCatalogStoreError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .catalogCorrupt: return "词典目录文件已损坏，已禁止写入。"
+        case .unsupportedCatalogVersion: return "词典目录版本不受支持，已禁止写入。"
         case .corrupt: return "词典目录文件已损坏。"
         case .unsupportedVersion: return "词典目录版本不受支持。"
         case .unsupportedLegacyOpenResource: return "旧开放词典缺少可验证的安装身份。"
@@ -76,8 +80,8 @@ final class DictionaryCatalogStore {
         return support.appendingPathComponent("LocalDictionary/Catalog", isDirectory: true)
     }
 
-    /// Compatibility entry point for the existing application startup.  Callers that need to
-    /// distinguish a genuinely empty catalog from corruption use `loadResult()`.
+    /// Read-only compatibility entry point. Mutation paths must use `mutate` so corruption and
+    /// unsupported-version provenance can never be silently written back as an empty catalog.
     func load() -> DictionaryCatalog { loadResult().catalog ?? .empty() }
 
     func loadResult() -> DictionaryCatalogLoadResult {
@@ -110,25 +114,30 @@ final class DictionaryCatalogStore {
                                            ? .unsupportedVersion : .corrupt)
     }
 
-    func save(_ catalog: DictionaryCatalog) throws {
-        let validated = try catalog.validated()
-        let data = try encoder.encode(validated)
-        try ensureDirectory()
-        let directoryFD = try openDirectory()
-        defer { Darwin.close(directoryFD) }
-        let operation = UUID().uuidString.lowercased()
-        let temporaryBackup = ".\(Self.backupFileName).\(operation).tmp"
-        let temporaryCatalog = ".\(Self.catalogFileName).\(operation).tmp"
-        defer {
-            unlinkAt(directoryFD, temporaryBackup)
-            unlinkAt(directoryFD, temporaryCatalog)
+    /// Applies a short, durable read-modify-write transaction.  The closure runs while the
+    /// process lock is held and therefore must not perform download, copying, indexing, or query
+    /// work.  It always starts from the latest durable Catalog.
+    @discardableResult
+    func mutate<T>(_ body: (inout DictionaryCatalog, DictionaryCatalogLoadProvenance) throws -> T)
+        throws -> (catalog: DictionaryCatalog, value: T) {
+        try withMutationLock {
+            let loaded = loadResult()
+            let current = try mutableCatalog(from: loaded)
+            var updated = current
+            let value = try body(&updated, loaded.provenance)
+            if updated != current {
+                try saveLocked(updated, previous: current, provenance: loaded.provenance)
+            }
+            return (updated, value)
         }
-        try writeExclusive(data, directoryFD: directoryFD, component: temporaryBackup)
-        try writeExclusive(data, directoryFD: directoryFD, component: temporaryCatalog)
-        try replace(directoryFD: directoryFD, source: temporaryBackup, destination: Self.backupFileName)
-        try synchronize(directoryFD)
-        try replace(directoryFD: directoryFD, source: temporaryCatalog, destination: Self.catalogFileName)
-        try synchronize(directoryFD)
+    }
+
+    /// Compatibility save for callers not yet able to express a delta.  It still obtains the
+    /// same lock and refuses corrupt or unsupported state; new code should prefer `mutate`.
+    func save(_ catalog: DictionaryCatalog) throws {
+        _ = try mutate { current, _ in
+            current = catalog
+        }
     }
 
     /// A short cross-process critical section.  It is intentionally separate from loading so the
@@ -162,6 +171,50 @@ final class DictionaryCatalogStore {
             _ = Darwin.fcntl(lockFD, F_SETLK, &unlock)
         }
         return try body()
+    }
+
+    private func mutableCatalog(from result: DictionaryCatalogLoadResult) throws -> DictionaryCatalog {
+        guard let catalog = result.catalog else {
+            switch result.provenance {
+            case .corrupt: throw DictionaryCatalogStoreError.catalogCorrupt
+            case .unsupportedVersion: throw DictionaryCatalogStoreError.unsupportedCatalogVersion
+            default: throw DictionaryCatalogStoreError.ioFailure
+            }
+        }
+        return catalog
+    }
+
+    /// Writes a new primary while preserving the immediately preceding valid v2 primary as the
+    /// backup.  A v1/missing first commit intentionally has no synthetic backup; a loaded v2
+    /// backup remains untouched while it serves as the previous valid state.
+    private func saveLocked(_ catalog: DictionaryCatalog,
+                            previous: DictionaryCatalog,
+                            provenance: DictionaryCatalogLoadProvenance) throws {
+        let validated = try catalog.validated()
+        let newData = try encoder.encode(validated)
+        try ensureDirectory()
+        let directoryFD = try openDirectory()
+        defer { Darwin.close(directoryFD) }
+        let operation = UUID().uuidString.lowercased()
+        let temporaryPrimary = ".\(Self.catalogFileName).\(operation).tmp"
+        let temporaryBackup = ".\(Self.backupFileName).\(operation).tmp"
+        defer {
+            unlinkAt(directoryFD, temporaryPrimary)
+            unlinkAt(directoryFD, temporaryBackup)
+        }
+
+        if provenance == .loadedPrimary {
+            let previousData = try encoder.encode(previous.validated())
+            try writeExclusive(previousData, directoryFD: directoryFD, component: temporaryBackup)
+            try replace(directoryFD: directoryFD, source: temporaryBackup,
+                        destination: Self.backupFileName)
+            try synchronize(directoryFD)
+        }
+
+        try writeExclusive(newData, directoryFD: directoryFD, component: temporaryPrimary)
+        try replace(directoryFD: directoryFD, source: temporaryPrimary,
+                    destination: Self.catalogFileName)
+        try synchronize(directoryFD)
     }
 
     private enum Decoded<T: Equatable>: Equatable {

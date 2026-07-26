@@ -22,6 +22,7 @@ xcrun --sdk macosx swiftc -parse-as-library -strict-concurrency=complete -warnin
   "$ROOT/App/StrictJSON.swift" \
   "$ROOT/App/StrictResourceManifestDecoder.swift" \
   "$ROOT/App/ResourceManifestValidator.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/ResourceManifestSignature.swift" \
   "$ROOT/App/ResourceManifestVerifier.swift" \
   "$ROOT/App/VerifiedManifestStateStore.swift" \
@@ -42,6 +43,7 @@ xcrun --sdk macosx swiftc -parse-as-library -strict-concurrency=complete -warnin
   "$ROOT/App/StrictJSON.swift" \
   "$ROOT/App/StrictResourceManifestDecoder.swift" \
   "$ROOT/App/ResourceManifestValidator.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/ResourceManifestSignature.swift" \
   "$ROOT/App/ResourceManifestVerifier.swift" \
   "$ROOT/App/VerifiedManifestStateStore.swift" \

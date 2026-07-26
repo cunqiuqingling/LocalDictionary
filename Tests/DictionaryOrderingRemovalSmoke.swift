@@ -42,7 +42,7 @@ private func descriptor(
             sourceFileSize: 11, sourceModifiedAt: fixedDate,
             sourceSHA256: String(repeating: "a", count: 64), indexedAt: fixedDate
         ),
-        formatterIdentifier: sourceKind == .managedLocal
+        formatterIdentifier: sourceKind == .managedLocal || sourceKind == .openResource
             ? DictionaryFormatterIdentifier.genericMDictV1 : "legacy.v1",
         capabilities: .unknown,
         relativePaths: sourceKind == .managedLocal
@@ -50,7 +50,11 @@ private func descriptor(
                 dictionary: "Dictionaries/\(id)/dictionary.mdx",
                 resources: [],
                 index: "Dictionaries/\(id)/index/dictionary.sqlite"
-            ) : .empty,
+            ) : sourceKind == .openResource
+                ? DictionaryRelativePaths(
+                    dictionary: "Dictionaries/\(id)/payload.mdx",
+                    resources: [], index: nil
+                ) : .empty,
         createdAt: createdAt,
         updatedAt: fixedDate,
         storageOwnership: ownership,

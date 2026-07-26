@@ -25,6 +25,9 @@ enum DictionaryCatalogSmoke {
         try testAtomicSaveAndReload(root: root)
         try testBackupRecovery(root: root)
         try testDoubleCorruption(root: root)
+        try testMutationsRejectUnavailableCatalog(root: root)
+        try testLoadedBackupMutationPreservesPreviousBackup(root: root)
+        try testTwoStoreMutationsMergeLatestCatalog(root: root)
         try testExplicitV1Migration(root: root)
         try testMissingLegacyConfiguration(root: root)
         try testLegacyAdaptationAndIdempotence(root: root)
@@ -47,14 +50,17 @@ enum DictionaryCatalogSmoke {
         try expect(store.load() == catalog, "catalog save/reload mismatch")
         try expect(FileManager.default.fileExists(atPath: store.catalogURL.path),
                    "primary catalog missing")
-        try expect(FileManager.default.fileExists(atPath: store.backupURL.path),
-                   "backup catalog missing")
+        try expect(!FileManager.default.fileExists(atPath: store.backupURL.path),
+                   "first v2 commit fabricated a previous backup")
     }
 
     private static func testBackupRecovery(root: URL) throws {
         let store = makeStore(root: root, name: "backup")
         let catalog = sampleCatalog()
         try store.save(catalog)
+        var updated = catalog
+        updated.updatedAt = catalog.updatedAt.addingTimeInterval(1)
+        try store.save(updated)
         try Data("not-json".utf8).write(to: store.catalogURL)
         try expect(store.load() == catalog, "valid backup was not recovered")
     }
@@ -68,6 +74,83 @@ enum DictionaryCatalogSmoke {
         let loaded = store.loadResult()
         try expect(loaded.catalog == nil && loaded.provenance == .corrupt,
                    "double corruption was silently treated as an empty catalog")
+    }
+
+    private static func testMutationsRejectUnavailableCatalog(root: URL) throws {
+        let corrupt = makeStore(root: root, name: "mutation-corrupt")
+        try FileManager.default.createDirectory(at: corrupt.directoryURL, withIntermediateDirectories: true)
+        let primary = Data("broken-primary".utf8)
+        let backup = Data("broken-backup".utf8)
+        try primary.write(to: corrupt.catalogURL)
+        try backup.write(to: corrupt.backupURL)
+        let primaryBefore = try Data(contentsOf: corrupt.catalogURL)
+        let backupBefore = try Data(contentsOf: corrupt.backupURL)
+        do {
+            _ = try corrupt.mutate { catalog, _ in catalog.updatedAt = Date() }
+            throw SmokeFailure.failed("corrupt catalog mutation unexpectedly succeeded")
+        } catch DictionaryCatalogStoreError.catalogCorrupt {
+            // Expected: mutation cannot transform a damaged catalog into an empty one.
+        }
+        let primaryAfter = try Data(contentsOf: corrupt.catalogURL)
+        let backupAfter = try Data(contentsOf: corrupt.backupURL)
+        try expect(primaryAfter == primaryBefore && backupAfter == backupBefore,
+                   "corrupt catalog evidence changed during rejected mutation")
+
+        let unsupported = makeStore(root: root, name: "mutation-unsupported")
+        try FileManager.default.createDirectory(at: unsupported.directoryURL, withIntermediateDirectories: true)
+        let encoded = try JSONEncoder().encode(sampleCatalog())
+        var object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        object["schemaVersion"] = 999
+        let unsupportedData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try unsupportedData.write(to: unsupported.catalogURL)
+        do {
+            _ = try unsupported.mutate { catalog, _ in catalog.updatedAt = Date() }
+            throw SmokeFailure.failed("unsupported catalog mutation unexpectedly succeeded")
+        } catch DictionaryCatalogStoreError.unsupportedCatalogVersion {
+            // Expected.
+        }
+        let unsupportedAfter = try Data(contentsOf: unsupported.catalogURL)
+        try expect(unsupportedAfter == unsupportedData,
+                   "unsupported catalog was rewritten")
+    }
+
+    private static func testLoadedBackupMutationPreservesPreviousBackup(root: URL) throws {
+        let store = makeStore(root: root, name: "backup-mutation")
+        let original = sampleCatalog()
+        try store.save(original)
+        var second = original
+        second.updatedAt = original.updatedAt.addingTimeInterval(1)
+        try store.save(second)
+        let previousBackup = try Data(contentsOf: store.backupURL)
+        try Data("damaged-primary".utf8).write(to: store.catalogURL)
+        let mutation = try store.mutate { catalog, provenance in
+            try expect(provenance == .loadedBackup, "mutation did not use valid backup")
+            catalog.updatedAt = catalog.updatedAt.addingTimeInterval(1)
+        }
+        try expect(mutation.catalog.updatedAt == original.updatedAt.addingTimeInterval(1),
+                   "loaded backup mutation did not update the recovered catalog")
+        let backupAfter = try Data(contentsOf: store.backupURL)
+        try expect(backupAfter == previousBackup,
+                   "loaded backup mutation overwrote previous valid backup")
+        try expect(store.loadResult().provenance == .loadedPrimary,
+                   "loaded backup mutation did not safely republish primary")
+    }
+
+    private static func testTwoStoreMutationsMergeLatestCatalog(root: URL) throws {
+        let directory = root.appendingPathComponent("two-store", isDirectory: true)
+        let first = DictionaryCatalogStore(directoryURL: directory)
+        let second = DictionaryCatalogStore(directoryURL: directory)
+        try first.save(sampleCatalog())
+        _ = try first.mutate { catalog, _ in
+            catalog.dictionaries.append(descriptor(id: "first", level: .normal, position: 11,
+                                                    now: catalog.updatedAt))
+        }
+        _ = try second.mutate { catalog, _ in
+            catalog.dictionaries.append(descriptor(id: "second", level: .normal, position: 12,
+                                                    now: catalog.updatedAt))
+        }
+        try expect(Set(first.load().dictionaries.map(\.dictionaryID)) == Set(["sample", "first", "second"]),
+                   "two store mutations lost a latest durable descriptor")
     }
 
     private static func testMissingLegacyConfiguration(root: URL) throws {

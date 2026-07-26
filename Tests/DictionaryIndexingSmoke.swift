@@ -142,6 +142,9 @@ private struct Fixture {
             updatedAt: now
         )
         catalogStore = DictionaryCatalogStore(directoryURL: root.appendingPathComponent("Catalog"))
+        // R1 writers always reload the latest durable Catalog inside the mutation lock.
+        // A fixture therefore establishes its initial synthetic Catalog before indexing starts.
+        try catalogStore.save(catalog)
     }
 
     var catalog: DictionaryCatalog {

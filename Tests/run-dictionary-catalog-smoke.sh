@@ -19,6 +19,7 @@ xcrun --sdk macosx swiftc \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/AppConfig.swift" \
   "$ROOT/App/DictionaryCatalog.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/DictionaryCatalogStore.swift" \
   "$ROOT/App/LegacyDictionaryConfigAdapter.swift" \
   "$ROOT/Tests/DictionaryCatalogSmoke.swift" \

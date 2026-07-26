@@ -80,6 +80,7 @@
 		A10000000000000000000062 /* StrictResourceManifestDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000062 /* StrictResourceManifestDecoder.swift */; };
 		A10000000000000000000063 /* ResourceManifestValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000063 /* ResourceManifestValidator.swift */; };
 		A10000000000000000000064 /* ResourceManifestSignature.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000064 /* ResourceManifestSignature.swift */; };
+		A10000000000000000000071 /* ResourceManifestKeyID.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000071 /* ResourceManifestKeyID.swift */; };
 		A10000000000000000000065 /* ResourceManifestVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000065 /* ResourceManifestVerifier.swift */; };
 		A10000000000000000000066 /* VerifiedManifestStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000066 /* VerifiedManifestStateStore.swift */; };
 		A10000000000000000000067 /* ResourceNetworkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000067 /* ResourceNetworkModels.swift */; };
@@ -179,6 +180,7 @@
 		B10000000000000000000062 /* StrictResourceManifestDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrictResourceManifestDecoder.swift; sourceTree = "<group>"; };
 		B10000000000000000000063 /* ResourceManifestValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestValidator.swift; sourceTree = "<group>"; };
 		B10000000000000000000064 /* ResourceManifestSignature.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestSignature.swift; sourceTree = "<group>"; };
+		B10000000000000000000071 /* ResourceManifestKeyID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestKeyID.swift; sourceTree = "<group>"; };
 		B10000000000000000000065 /* ResourceManifestVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestVerifier.swift; sourceTree = "<group>"; };
 		B10000000000000000000066 /* VerifiedManifestStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifiedManifestStateStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000067 /* ResourceNetworkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceNetworkModels.swift; sourceTree = "<group>"; };
@@ -283,6 +285,7 @@
 				B10000000000000000000062 /* StrictResourceManifestDecoder.swift */,
 				B10000000000000000000063 /* ResourceManifestValidator.swift */,
 				B10000000000000000000064 /* ResourceManifestSignature.swift */,
+				B10000000000000000000071 /* ResourceManifestKeyID.swift */,
 				B10000000000000000000065 /* ResourceManifestVerifier.swift */,
 				B10000000000000000000066 /* VerifiedManifestStateStore.swift */,
 				B10000000000000000000067 /* ResourceNetworkModels.swift */,
@@ -502,6 +505,7 @@
 				A10000000000000000000062 /* StrictResourceManifestDecoder.swift in Sources */,
 				A10000000000000000000063 /* ResourceManifestValidator.swift in Sources */,
 				A10000000000000000000064 /* ResourceManifestSignature.swift in Sources */,
+				A10000000000000000000071 /* ResourceManifestKeyID.swift in Sources */,
 				A10000000000000000000065 /* ResourceManifestVerifier.swift in Sources */,
 				A10000000000000000000066 /* VerifiedManifestStateStore.swift in Sources */,
 				A10000000000000000000067 /* ResourceNetworkModels.swift in Sources */,

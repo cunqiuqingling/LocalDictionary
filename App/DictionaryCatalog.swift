@@ -140,7 +140,7 @@ struct OpenResourceInstallationMetadata: Codable, Equatable, Sendable {
               payloadBytes > 0,
               OpenResourceInstallationMetadata.isSHA256(manifestSHA256),
               OpenResourceInstallationMetadata.isSHA256(payloadSHA256),
-              !verifiedKeyID.isEmpty,
+              ResourceManifestKeyID.isValid(verifiedKeyID),
               sidecarRelativePath == "Dictionaries/\(dictionaryID)/resource-installation.json",
               !languages.isEmpty,
               expectedEntryCount.minimum <= expectedEntryCount.maximum else {
@@ -149,12 +149,15 @@ struct OpenResourceInstallationMetadata: Codable, Equatable, Sendable {
     }
 
     static func isSHA256(_ value: String) -> Bool {
-        value.count == 64 && value.allSatisfy { $0.isNumber || ("a"..."f").contains($0) }
+        let bytes = Array(value.utf8)
+        return bytes.count == 64 && bytes.allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
     }
 
     static func isCanonicalUUID(_ value: String) -> Bool {
         guard let uuid = UUID(uuidString: value) else { return false }
-        return uuid.uuidString.lowercased() == value.lowercased()
+        return uuid.uuidString.lowercased() == value
     }
 
     static func isSafeToken(_ value: String) -> Bool {
@@ -294,6 +297,9 @@ struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
                 throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
             }
             try openResourceMetadata.validate(dictionaryID: dictionaryID)
+            guard relativePaths.dictionary == "Dictionaries/\(dictionaryID)/payload.mdx" else {
+                throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
+            }
         } else if openResourceMetadata != nil {
             throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
         }

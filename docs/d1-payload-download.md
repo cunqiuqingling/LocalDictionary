@@ -76,3 +76,13 @@ exact size, and SHA-256 passed. It does not write the Catalog, build an index, e
 or query a dictionary, accept a license, or install the file. D1b-3B owns installation
 and lifecycle integration. C++ Record resource limits remain a D1b-3A-2B prerequisite
 before any real resource is opened.
+
+## D1b-3B-2A-R1 installation boundary
+
+Before an open-resource directory can leave verified staging, its receipt is read again from the
+still-open sidecar descriptor with a bounded `pread` loop and is strictly matched to the immutable
+installation identity. The source directory name is rebound to the opened verified descriptor
+immediately before `renameatx_np(RENAME_EXCL)`. After the rename and parent-directory durability
+step, the final directory, payload hash, receipt identity, and exact two-entry layout are checked
+again before any Catalog mutation. A failed post-publication check preserves the final object and
+does not write a descriptor; reconciliation remains deferred to D1b-3B-2B.

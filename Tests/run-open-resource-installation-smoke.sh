@@ -13,6 +13,7 @@ if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   fi
 fi
 xcrun --sdk macosx swiftc -parse-as-library -strict-concurrency=complete -warnings-as-errors \
+  -D OPEN_RESOURCE_INSTALLATION_TESTING \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/DictionaryCatalog.swift" \
   "$ROOT/App/DictionaryCatalogStore.swift" \
@@ -20,6 +21,7 @@ xcrun --sdk macosx swiftc -parse-as-library -strict-concurrency=complete -warnin
   "$ROOT/App/StrictJSON.swift" \
   "$ROOT/App/StrictResourceManifestDecoder.swift" \
   "$ROOT/App/ResourceManifestValidator.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/ResourceManifestSignature.swift" \
   "$ROOT/App/ResourceManifestVerifier.swift" \
   "$ROOT/App/VerifiedManifestStateStore.swift" \

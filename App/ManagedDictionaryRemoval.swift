@@ -366,7 +366,8 @@ final class ManagedDictionaryRemovalCoordinator {
     var onCatalogChanged: CatalogObserver?
     var beforeRemoval: BeforeRemoval?
 
-    private let saveCatalog: SaveCatalog
+    private let saveCatalog: SaveCatalog?
+    private let catalogStore: DictionaryCatalogStore?
     private let queryService: ManagedDictionaryQueryService
     private let isIndexing: IsIndexing
     private let worker: ManagedDictionaryRemovalWorker
@@ -381,7 +382,8 @@ final class ManagedDictionaryRemovalCoordinator {
          hooks: ManagedDictionaryRemovalHooks = .live,
          saveCatalog: SaveCatalog? = nil) {
         self.catalog = catalog
-        self.saveCatalog = saveCatalog ?? { try catalogStore.save($0) }
+        self.catalogStore = saveCatalog == nil ? catalogStore : nil
+        self.saveCatalog = saveCatalog
         self.queryService = queryService
         self.isIndexing = isIndexing
         worker = ManagedDictionaryRemovalWorker(
@@ -462,10 +464,21 @@ final class ManagedDictionaryRemovalCoordinator {
 
         let updated: DictionaryCatalog
         do {
-            updated = try DictionaryCatalogOrdering.removingAndCompacting(
-                dictionaryID, from: catalog
-            )
-            try saveCatalog(updated)
+            if let catalogStore {
+                let mutation = try catalogStore.mutate { latest, _ in
+                    guard latest.dictionaries.contains(where: { $0.dictionaryID == dictionaryID }) else {
+                        throw ManagedDictionaryRemovalError.dictionaryNotFound
+                    }
+                    latest = try DictionaryCatalogOrdering.removingAndCompacting(dictionaryID, from: latest)
+                }
+                updated = mutation.catalog
+            } else {
+                updated = try DictionaryCatalogOrdering.removingAndCompacting(
+                    dictionaryID, from: catalog
+                )
+                guard let saveCatalog else { throw ManagedDictionaryRemovalError.catalogWriteFailed }
+                try saveCatalog(updated)
+            }
         } catch {
             do {
                 try await Task.detached(priority: .userInitiated) {

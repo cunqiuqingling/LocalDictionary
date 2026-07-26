@@ -172,13 +172,15 @@ final class DictionaryCatalogOrderCoordinator {
     typealias SaveCatalog = (DictionaryCatalog) throws -> Void
 
     private(set) var catalog: DictionaryCatalog
-    private let saveCatalog: SaveCatalog
+    private let saveCatalog: SaveCatalog?
+    private let catalogStore: DictionaryCatalogStore?
 
     init(catalog: DictionaryCatalog,
          catalogStore: DictionaryCatalogStore,
          saveCatalog: SaveCatalog? = nil) {
         self.catalog = catalog
-        self.saveCatalog = saveCatalog ?? { try catalogStore.save($0) }
+        self.catalogStore = saveCatalog == nil ? catalogStore : nil
+        self.saveCatalog = saveCatalog
     }
 
     func synchronize(catalog: DictionaryCatalog) {
@@ -188,6 +190,28 @@ final class DictionaryCatalogOrderCoordinator {
     @discardableResult
     func save(_ proposed: DictionaryCatalog) throws -> DictionaryCatalog {
         guard proposed != catalog else { return catalog }
+        if let catalogStore {
+            let requestedPositions = Dictionary(uniqueKeysWithValues: proposed.dictionaries.map {
+                ($0.dictionaryID, $0.sortPosition)
+            })
+            guard Set(requestedPositions.keys) == Set(catalog.dictionaries.map(\.dictionaryID)) else {
+                throw DictionaryCatalogOrderingError.dictionaryNotFound
+            }
+            let mutation = try catalogStore.mutate { latest, _ in
+                guard Set(requestedPositions.keys) == Set(latest.dictionaries.map(\.dictionaryID)) else {
+                    throw DictionaryCatalogOrderingError.dictionaryNotFound
+                }
+                for index in latest.dictionaries.indices {
+                    guard let position = requestedPositions[latest.dictionaries[index].dictionaryID] else { continue }
+                    latest.dictionaries[index].sortPosition = position
+                    latest.dictionaries[index].updatedAt = proposed.updatedAt
+                }
+                latest.updatedAt = proposed.updatedAt
+            }
+            catalog = mutation.catalog
+            return mutation.catalog
+        }
+        guard let saveCatalog else { throw DictionaryCatalogOrderingError.dictionaryNotFound }
         try saveCatalog(proposed)
         catalog = proposed
         return proposed

@@ -237,19 +237,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureDictionary() {
-        var catalog = dictionaryCatalogStore.load()
+        let catalogLoad = dictionaryCatalogStore.loadResult()
+        var catalog = catalogLoad.catalog ?? .empty()
+        let catalogIsWritable = catalogLoad.catalog != nil
         let config = AppConfig.loadIfPresent()
-        if let config {
-            let adapted = LegacyDictionaryConfigAdapter().adapt(config, into: catalog)
-            if adapted != catalog {
-                try? dictionaryCatalogStore.save(adapted)
-                catalog = adapted
+        if let config, catalogIsWritable {
+            do {
+                let mutation = try dictionaryCatalogStore.mutate { latest, _ in
+                    let adapted = LegacyDictionaryConfigAdapter().adapt(config, into: latest)
+                    latest = adapted
+                }
+                catalog = mutation.catalog
+            } catch {
+                // Preserve the last readable in-memory catalog.  A corrupt or unsupported
+                // on-disk catalog is never replaced during startup.
             }
-        } else {
+        } else if catalogIsWritable {
             catalog = LegacyDictionaryConfigAdapter()
                 .markingUnresolvableLegacyReferencesUnavailable(in: catalog)
         }
-        catalog = dictionaryIndexCoordinator.recoverInterruptedTasks(in: catalog)
+        if catalogIsWritable {
+            catalog = dictionaryIndexCoordinator.recoverInterruptedTasks(in: catalog)
+        }
         dictionaryCatalog = catalog
 
         let managedService = ManagedDictionaryQueryService(

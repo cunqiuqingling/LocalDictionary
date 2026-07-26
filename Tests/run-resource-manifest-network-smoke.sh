@@ -25,6 +25,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/StrictJSON.swift" \
   "$ROOT/App/StrictResourceManifestDecoder.swift" \
   "$ROOT/App/ResourceManifestValidator.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/ResourceManifestSignature.swift" \
   "$ROOT/App/ResourceManifestVerifier.swift" \
   "$ROOT/App/VerifiedManifestStateStore.swift" \

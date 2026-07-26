@@ -281,12 +281,17 @@ final class DictionaryImportService {
                 throw DictionaryImportError.cancelled
             }
 
-            var updated = catalog
-            updated.updatedAt = now
-            updated.dictionaries.append(contentsOf: executionResult.descriptors)
             do {
-                try catalogStore.save(updated)
-                return updated
+                let mutation = try catalogStore.mutate { latest, _ in
+                    for descriptor in executionResult.descriptors {
+                        guard !latest.dictionaries.contains(where: { $0.dictionaryID == descriptor.dictionaryID }) else {
+                            throw DictionaryImportError.publicationFailed
+                        }
+                    }
+                    latest.dictionaries.append(contentsOf: executionResult.descriptors)
+                    latest.updatedAt = now
+                }
+                return mutation.catalog
             } catch {
                 await Task.detached(priority: .utility) {
                     worker.rollbackPublished(executionResult)

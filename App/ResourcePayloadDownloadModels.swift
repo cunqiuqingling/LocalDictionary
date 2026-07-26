@@ -16,6 +16,7 @@ enum ResourcePayloadDownloadError: LocalizedError, Equatable, Sendable {
     case crossDevicePublication
     case durabilityFailure
     case identityChanged
+    case sidecarIdentityMismatch
     case unexpectedFileType
     case unexpectedPermissions
     case unexpectedLinkCount
@@ -68,6 +69,8 @@ enum ResourcePayloadDownloadError: LocalizedError, Equatable, Sendable {
             return "资源暂存内容无法安全持久化。"
         case .identityChanged:
             return "资源暂存文件在校验期间发生变化。"
+        case .sidecarIdentityMismatch:
+            return "资源安装信息与已验证身份不一致。"
         case .unexpectedFileType:
             return "资源暂存对象类型无效。"
         case .unexpectedPermissions:

@@ -248,12 +248,25 @@ final class ManagedDictionaryIndexCoordinator {
             updated.dictionaries[index].updatedAt = now
             changed = true
         }
-        if changed {
-            updated.updatedAt = now
-            try? catalogStore.save(updated)
+        guard changed else { self.catalog = updated; return updated }
+        do {
+            let mutation = try catalogStore.mutate { latest, _ in
+                for index in latest.dictionaries.indices where
+                    latest.dictionaries[index].sourceKind == .managedLocal &&
+                    latest.dictionaries[index].state == .indexing {
+                    latest.dictionaries[index].state = .pendingIndex
+                    latest.dictionaries[index].relativePaths.index = nil
+                    clearPublishedMetadata(&latest.dictionaries[index])
+                    latest.dictionaries[index].updatedAt = now
+                }
+                latest.updatedAt = now
+            }
+            self.catalog = mutation.catalog
+            return mutation.catalog
+        } catch {
+            self.catalog = catalog
+            return catalog
         }
-        self.catalog = updated
-        return updated
     }
 
     func synchronize(catalog: DictionaryCatalog) {
@@ -279,15 +292,23 @@ final class ManagedDictionaryIndexCoordinator {
             return .unavailable("无法创建安全的索引计划。")
         }
 
-        var updated = catalog
         let now = Date()
-        updated.dictionaries[index].state = .indexing
-        updated.dictionaries[index].relativePaths.index = nil
-        clearPublishedMetadata(&updated.dictionaries[index])
-        updated.dictionaries[index].updatedAt = now
-        updated.updatedAt = now
+        let updated: DictionaryCatalog
         do {
-            try catalogStore.save(updated)
+            let mutation = try catalogStore.mutate { latest, _ in
+                guard let latestIndex = latest.dictionaries.firstIndex(where: {
+                    $0.dictionaryID == dictionaryID && $0.sourceKind == .managedLocal
+                }), (latest.dictionaries[latestIndex].state == .pendingIndex ||
+                    latest.dictionaries[latestIndex].state == .failed) else {
+                    throw DictionaryIndexError.catalogWriteFailed
+                }
+                latest.dictionaries[latestIndex].state = .indexing
+                latest.dictionaries[latestIndex].relativePaths.index = nil
+                clearPublishedMetadata(&latest.dictionaries[latestIndex])
+                latest.dictionaries[latestIndex].updatedAt = now
+                latest.updatedAt = now
+            }
+            updated = mutation.catalog
         } catch {
             return .unavailable(DictionaryIndexError.catalogWriteFailed.localizedDescription)
         }
@@ -395,10 +416,20 @@ final class ManagedDictionaryIndexCoordinator {
         updated.dictionaries[index].updatedAt = now
         updated.updatedAt = now
         do {
-            try catalogStore.save(updated)
+            let target = updated.dictionaries[index]
+            let mutation = try catalogStore.mutate { latest, _ in
+                guard let latestIndex = latest.dictionaries.firstIndex(where: {
+                    $0.dictionaryID == dictionaryID && $0.sourceKind == .managedLocal
+                }) else { throw DictionaryIndexError.catalogWriteFailed }
+                latest.dictionaries[latestIndex].state = target.state
+                latest.dictionaries[latestIndex].relativePaths.index = target.relativePaths.index
+                latest.dictionaries[latestIndex].indexMetadata = target.indexMetadata
+                latest.dictionaries[latestIndex].updatedAt = now
+                latest.updatedAt = now
+            }
             if let publication { commit(publication) }
-            catalog = updated
-            onCatalogChanged?(updated)
+            catalog = mutation.catalog
+            onCatalogChanged?(mutation.catalog)
         } catch {
             if let publication { rollback(publication) }
             failureMessages[dictionaryID] = DictionaryIndexError.catalogWriteFailed.localizedDescription
