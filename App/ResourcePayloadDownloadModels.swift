@@ -157,6 +157,9 @@ struct ResourcePayloadDownloadPlan: Equatable, Sendable {
     let allowedHosts: [String]
     let stagingRoot: URL
     let policy: ResourcePayloadDownloadPolicy
+    /// Generated before the first staging write so payload and immutable receipt share one
+    /// directory publication boundary.
+    let installationIdentity: OpenResourceInstallationIdentity
 }
 
 enum ResourcePayloadDownloadPlanBuilder {
@@ -164,7 +167,9 @@ enum ResourcePayloadDownloadPlanBuilder {
                       resourceID: String,
                       applicationAllowedHosts: [String],
                       stagingRoot: URL,
-                      policy: ResourcePayloadDownloadPolicy) throws
+                      policy: ResourcePayloadDownloadPolicy,
+                      dictionaryID: String = UUID().uuidString.lowercased(),
+                      installedAt: Date = Date()) throws
         -> ResourcePayloadDownloadPlan {
         guard policy.applicationAllowedHosts == applicationAllowedHosts,
               !applicationAllowedHosts.isEmpty,
@@ -236,6 +241,13 @@ enum ResourcePayloadDownloadPlanBuilder {
             throw ResourcePayloadDownloadError.disallowedHost
         }
 
+        let identity = try OpenResourceInstallationIdentity(verifiedManifest: verifiedManifest,
+                                                             resourceID: resourceID,
+                                                             dictionaryID: dictionaryID,
+                                                             installedAt: installedAt)
+        guard identity.payloadBytes == expectedBytes, identity.payloadSHA256 == expectedSHA256 else {
+            throw ResourcePayloadDownloadError.invalidVerifiedManifest
+        }
         return ResourcePayloadDownloadPlan(
             resourceID: resource.resourceID,
             resourceRevision: resource.resourceRevision,
@@ -246,7 +258,8 @@ enum ResourcePayloadDownloadPlanBuilder {
             expectedSHA256: expectedSHA256,
             allowedHosts: intersectionPolicy.pinnedAllowedHosts,
             stagingRoot: stagingRoot.standardizedFileURL,
-            policy: policy
+            policy: policy,
+            installationIdentity: identity
         )
     }
 
@@ -294,4 +307,9 @@ struct VerifiedPayloadStagingResult: Equatable, Sendable {
     let signedFileName: String
     let actualByteCount: UInt64
     let verifiedSHA256: String
+    let stagingRootURL: URL
+    let verifiedDirectoryComponent: String
+    let payloadComponent: String
+    let sidecarComponent: String
+    let installationIdentity: OpenResourceInstallationIdentity
 }

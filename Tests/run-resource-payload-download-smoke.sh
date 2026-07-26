@@ -30,6 +30,8 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/VerifiedManifestStateStore.swift" \
   "$ROOT/App/ResourceNetworkModels.swift" \
   "$ROOT/App/ResourceNetworkURLPolicy.swift" \
+  "$ROOT/App/DictionaryCatalog.swift" \
+  "$ROOT/App/OpenResourceInstallationModels.swift" \
   "$ROOT/App/ResourcePayloadDownloadModels.swift" \
   "$ROOT/App/ResourcePayloadStagingStore.swift" \
   "$ROOT/App/ResourcePayloadFileDownloader.swift" \

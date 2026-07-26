@@ -171,6 +171,15 @@ The repository is currently source-only and targets macOS 15.0+ on arm64. A clea
 
 ## C1 manual acceptance checklist
 
+## D1b-3B-2A synthetic installation smoke
+
+`Tests/run-open-resource-installation-smoke.sh` constructs only a synthetic signed-payload
+identity, publishes `payload.mdx` and the immutable `resource-installation.json` receipt into an
+isolated temporary root, then verifies the Catalog v2 `openResource` descriptor is fallback /
+pending-index. It never reads Application Support, private dictionaries, local configuration, or
+network resources. Catalog v1 files remain untouched and are migration input only; v2 becomes
+authoritative only after its first successful durable save.
+
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.
 - Build an index, request cooperative cancellation, exercise a controlled failure and retry, and confirm pending/indexing/cancelling/ready/failed wording.

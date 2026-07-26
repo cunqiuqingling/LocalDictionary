@@ -25,17 +25,18 @@ enum DictionaryCatalogSmoke {
         try testAtomicSaveAndReload(root: root)
         try testBackupRecovery(root: root)
         try testDoubleCorruption(root: root)
+        try testExplicitV1Migration(root: root)
         try testMissingLegacyConfiguration(root: root)
         try testLegacyAdaptationAndIdempotence(root: root)
         try testStableSort()
         try testAbsolutePathRejection(root: root)
-        print("DictionaryCatalogSmoke PASS (12/12)")
+        print("DictionaryCatalogSmoke PASS")
     }
 
     private static func testEmptyCatalog(root: URL) throws {
         let store = makeStore(root: root, name: "empty")
         let loaded = store.load()
-        try expect(loaded.schemaVersion == 1 && loaded.dictionaries.isEmpty,
+        try expect(loaded.schemaVersion == DictionaryCatalog.currentSchemaVersion && loaded.dictionaries.isEmpty,
                    "empty catalog did not load")
     }
 
@@ -64,15 +65,38 @@ enum DictionaryCatalogSmoke {
                                                 withIntermediateDirectories: true)
         try Data("broken-primary".utf8).write(to: store.catalogURL)
         try Data("broken-backup".utf8).write(to: store.backupURL)
-        let loaded = store.load()
-        try expect(loaded.schemaVersion == 1 && loaded.dictionaries.isEmpty,
-                   "double corruption did not fall back to empty catalog")
+        let loaded = store.loadResult()
+        try expect(loaded.catalog == nil && loaded.provenance == .corrupt,
+                   "double corruption was silently treated as an empty catalog")
     }
 
     private static func testMissingLegacyConfiguration(root: URL) throws {
         let missing = root.appendingPathComponent("does-not-exist/local.json")
         try expect(AppConfig.loadIfPresent(at: missing) == nil,
                    "missing local.json was not treated as optional")
+    }
+
+    private static func testExplicitV1Migration(root: URL) throws {
+        let store = makeStore(root: root, name: "v1-migration")
+        let v2 = sampleCatalog()
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        var object = try JSONSerialization.jsonObject(with: encoder.encode(v2)) as! [String: Any]
+        object["schemaVersion"] = 1
+        var values = object["dictionaries"] as! [[String: Any]]
+        values[0].removeValue(forKey: "storageOwnership")
+        values[0].removeValue(forKey: "openResourceMetadata")
+        object["dictionaries"] = values
+        try FileManager.default.createDirectory(at: store.directoryURL, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: store.legacyCatalogURL)
+        let loaded = store.loadResult()
+        try expect(loaded.provenance == .migratedFromV1,
+                   "v1 catalog was not explicitly migrated")
+        try expect(loaded.catalog?.dictionaries.first?.storageOwnership == .appManagedImported,
+                   "managed local v1 ownership was not migrated")
+        try expect(FileManager.default.fileExists(atPath: store.legacyCatalogURL.path) &&
+                   !FileManager.default.fileExists(atPath: store.catalogURL.path),
+                   "v1 migration modified legacy input before v2 save")
     }
 
     private static func testLegacyAdaptationAndIdempotence(root: URL) throws {
@@ -182,7 +206,7 @@ enum DictionaryCatalogSmoke {
         ]
         let expected = ["a", "b", "z", "c"]
         for input in [values, Array(values.reversed()), Array(values.dropFirst()) + [values[0]]] {
-            let catalog = DictionaryCatalog(schemaVersion: 1, createdAt: now,
+            let catalog = DictionaryCatalog(schemaVersion: DictionaryCatalog.currentSchemaVersion, createdAt: now,
                                             updatedAt: now, dictionaries: input)
             try expect(catalog.sortedDictionaries.map(\.dictionaryID) == expected,
                        "stable sort key changed with input order")
@@ -195,7 +219,7 @@ enum DictionaryCatalogSmoke {
         var unsafe = descriptor(id: "unsafe", level: .normal, position: 1, now: now)
         unsafe.relativePaths = DictionaryRelativePaths(dictionary: "/private/dictionary.mdx",
                                                        resources: [], index: nil)
-        let catalog = DictionaryCatalog(schemaVersion: 1, createdAt: now,
+        let catalog = DictionaryCatalog(schemaVersion: DictionaryCatalog.currentSchemaVersion, createdAt: now,
                                         updatedAt: now, dictionaries: [unsafe])
         do {
             try store.save(catalog)
@@ -209,7 +233,7 @@ enum DictionaryCatalogSmoke {
 
     private static func sampleCatalog() -> DictionaryCatalog {
         let now = Date(timeIntervalSince1970: 1_750_000_000.123_456)
-        return DictionaryCatalog(schemaVersion: 1, createdAt: now, updatedAt: now,
+        return DictionaryCatalog(schemaVersion: DictionaryCatalog.currentSchemaVersion, createdAt: now, updatedAt: now,
                                  dictionaries: [
                                     descriptor(id: "sample", level: .normal,
                                                position: 10, now: now)

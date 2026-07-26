@@ -32,12 +32,23 @@ private func plan(root: URL, payload: Data) throws -> ResourcePayloadDownloadPla
         applicationAllowedHosts: ["example.test"], applicationHardLimit: 4_096,
         diskSafetyMargin: 0, maximumRedirects: 0, requestTimeout: 1, resourceTimeout: 1
     )
+    let identity = try OpenResourceInstallationIdentity(
+        dictionaryID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", resourceID: "synthetic",
+        resourceRevision: 1, resourceVersion: "1.0", manifestVersion: 1,
+        manifestSHA256: String(repeating: "a", count: 64), verifiedKeyID: "test-key",
+        payloadSHA256: digest(payload), payloadBytes: UInt64(payload.count), languages: ["en"],
+        license: OpenResourceLicenseMetadata(name: "Synthetic", version: "1", url: "https://example.test/license", attribution: "Synthetic"),
+        sourceProject: "https://example.test/project", officialPageReference: "https://example.test/page",
+        expectedEntryCount: OpenResourceEntryCountMetadata(minimum: 1, maximum: 1),
+        installedAt: Date(timeIntervalSince1970: 1)
+    )
     return ResourcePayloadDownloadPlan(
         resourceID: "synthetic", resourceRevision: 1,
         downloadURL: URL(string: "https://example.test/synthetic.mdx")!,
         signedFileName: "synthetic.mdx", expectedBytes: UInt64(payload.count),
         maximumBytes: UInt64(payload.count), expectedSHA256: digest(payload),
-        allowedHosts: ["example.test"], stagingRoot: root, policy: policy
+        allowedHosts: ["example.test"], stagingRoot: root, policy: policy,
+        installationIdentity: identity
     )
 }
 private func store() -> ResourcePayloadStagingStore {
@@ -149,9 +160,11 @@ enum ResourcePayloadStagingSecuritySmoke {
         let rootMode = try mode(normalRoot)
         let operationMode = try mode(partialDirectory(normalRoot))
         let payloadMode = try mode(partialDirectory(normalRoot).appendingPathComponent("payload.mdx.part"))
+        let sidecarMode = try mode(partialDirectory(normalRoot).appendingPathComponent("resource-installation.json"))
         try harness.check("root 0700", rootMode == 0o700)
         try harness.check("operation 0700", operationMode == 0o700)
         try harness.check("new payload 0600", payloadMode == 0o600)
+        try harness.check("immutable sidecar 0600", sidecarMode == 0o600)
         _ = try operation.append(payload, maximumBytes: UInt64(payload.count), expectedBytes: UInt64(payload.count))
         let completed = try operation.finish(expectedBytes: UInt64(payload.count), expectedSHA256: digest(payload))
         try harness.check("finish byte count", completed.bytes == UInt64(payload.count))
@@ -161,9 +174,15 @@ enum ResourcePayloadStagingSecuritySmoke {
         try harness.check("published file inode retained", operation.publishedFileIdentity?.inode == UInt64(finalMetadata.st_ino))
         try harness.check("published directory inode retained", operation.publishedDirectoryIdentity?.inode == UInt64(finalDirectory.st_ino))
         try harness.check("published file link count one", finalMetadata.st_nlink == 1)
+        try harness.check("published immutable sidecar", FileManager.default.fileExists(
+            atPath: finalDirectoryURL(normalRoot).appendingPathComponent("resource-installation.json").path))
         operation.cleanup()
         try harness.check("published cleanup preserves verified file",
                           FileManager.default.fileExists(atPath: operation.verifiedFile.path))
+    }
+
+    private static func finalDirectoryURL(_ root: URL) -> URL {
+        verifiedDirectory(root)
     }
 
     private static func prepared(_ root: URL, payload: Data,

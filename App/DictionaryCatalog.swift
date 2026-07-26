@@ -56,6 +56,116 @@ enum DictionarySourceKind: String, Codable, Sendable {
     }
 }
 
+/// Filesystem ownership is deliberately independent from lookup precedence and lifecycle state.
+/// It is persisted because the lifecycle code must never infer deletion authority from a display
+/// source kind or from a path.
+enum DictionaryStorageOwnership: String, Codable, Sendable {
+    case externalReference
+    case appManagedImported
+    case appManagedOpenResource
+    case bundledReadOnly
+}
+
+struct DictionaryOwnershipPolicy: Sendable {
+    let isAppManaged: Bool
+    let isRecoverable: Bool
+    let isRemovable: Bool
+    let isIndexable: Bool
+
+    static func policy(for sourceKind: DictionarySourceKind,
+                       ownership: DictionaryStorageOwnership) -> DictionaryOwnershipPolicy? {
+        switch (sourceKind, ownership) {
+        case (.legacyReference, .externalReference),
+             (.externalReference, .externalReference):
+            return DictionaryOwnershipPolicy(isAppManaged: false, isRecoverable: false,
+                                             isRemovable: false, isIndexable: false)
+        case (.managedLocal, .appManagedImported):
+            return DictionaryOwnershipPolicy(isAppManaged: true, isRecoverable: true,
+                                             isRemovable: true, isIndexable: true)
+        case (.openResource, .appManagedOpenResource):
+            return DictionaryOwnershipPolicy(isAppManaged: true, isRecoverable: true,
+                                             isRemovable: true, isIndexable: true)
+        default:
+            // A bundled descriptor does not exist yet.  Keeping it out of the current matrix
+            // fails closed instead of accidentally granting a future source kind deletion rights.
+            return nil
+        }
+    }
+
+    static func defaultOwnership(for sourceKind: DictionarySourceKind) -> DictionaryStorageOwnership? {
+        switch sourceKind {
+        case .legacyReference, .externalReference: return .externalReference
+        case .managedLocal: return .appManagedImported
+        case .openResource: return .appManagedOpenResource
+        }
+    }
+}
+
+struct OpenResourceLicenseMetadata: Codable, Equatable, Sendable {
+    var name: String
+    var version: String
+    var url: String
+    var attribution: String
+}
+
+struct OpenResourceEntryCountMetadata: Codable, Equatable, Sendable {
+    var minimum: UInt64
+    var maximum: UInt64
+}
+
+/// Immutable identity copied from a verified manifest/sidecar.  Mutable installation state stays
+/// in `DictionaryDescriptor`, never in this structure.
+struct OpenResourceInstallationMetadata: Codable, Equatable, Sendable {
+    var resourceID: String
+    var resourceRevision: UInt64
+    var resourceVersion: String
+    var manifestVersion: UInt64
+    var manifestSHA256: String
+    var verifiedKeyID: String
+    var payloadSHA256: String
+    var payloadBytes: UInt64
+    var sidecarRelativePath: String
+    var languages: [String]
+    var license: OpenResourceLicenseMetadata
+    var sourceProject: String
+    var officialPageReference: String
+    var expectedEntryCount: OpenResourceEntryCountMetadata
+    var installedAt: Date
+
+    fileprivate func validate(dictionaryID: String) throws {
+        guard OpenResourceInstallationMetadata.isCanonicalUUID(dictionaryID),
+              OpenResourceInstallationMetadata.isSafeToken(resourceID),
+              resourceRevision > 0,
+              manifestVersion > 0,
+              payloadBytes > 0,
+              OpenResourceInstallationMetadata.isSHA256(manifestSHA256),
+              OpenResourceInstallationMetadata.isSHA256(payloadSHA256),
+              !verifiedKeyID.isEmpty,
+              sidecarRelativePath == "Dictionaries/\(dictionaryID)/resource-installation.json",
+              !languages.isEmpty,
+              expectedEntryCount.minimum <= expectedEntryCount.maximum else {
+            throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
+        }
+    }
+
+    static func isSHA256(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { $0.isNumber || ("a"..."f").contains($0) }
+    }
+
+    static func isCanonicalUUID(_ value: String) -> Bool {
+        guard let uuid = UUID(uuidString: value) else { return false }
+        return uuid.uuidString.lowercased() == value.lowercased()
+    }
+
+    static func isSafeToken(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        return (1...128).contains(bytes.count) && bytes.allSatisfy {
+            ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) ||
+                ($0 >= 48 && $0 <= 57) || $0 == 45 || $0 == 46 || $0 == 95
+        }
+    }
+}
+
 enum DictionaryState: String, Codable, Sendable {
     case waitingForImport
     case copying
@@ -164,6 +274,8 @@ struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
     var relativePaths: DictionaryRelativePaths
     var createdAt: Date
     var updatedAt: Date
+    var storageOwnership: DictionaryStorageOwnership = .appManagedImported
+    var openResourceMetadata: OpenResourceInstallationMetadata?
 
     var id: String { dictionaryID }
 
@@ -174,11 +286,22 @@ struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
             throw DictionaryCatalogValidationError.missingRequiredValue
         }
         try relativePaths.validate()
+        guard DictionaryOwnershipPolicy.policy(for: sourceKind, ownership: storageOwnership) != nil else {
+            throw DictionaryCatalogValidationError.invalidStorageOwnership
+        }
+        if sourceKind == .openResource {
+            guard let openResourceMetadata else {
+                throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
+            }
+            try openResourceMetadata.validate(dictionaryID: dictionaryID)
+        } else if openResourceMetadata != nil {
+            throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
+        }
     }
 }
 
 struct DictionaryCatalog: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    static let currentSchemaVersion = 2
 
     var schemaVersion: Int
     var createdAt: Date
@@ -209,10 +332,15 @@ struct DictionaryCatalog: Codable, Equatable, Sendable {
             throw DictionaryCatalogValidationError.unsupportedSchemaVersion
         }
         var identifiers: Set<String> = []
+        var openResourceIDs: Set<String> = []
         for dictionary in dictionaries {
             try dictionary.validate()
             guard identifiers.insert(dictionary.dictionaryID).inserted else {
                 throw DictionaryCatalogValidationError.duplicateDictionaryID
+            }
+            if let resourceID = dictionary.openResourceMetadata?.resourceID,
+               !openResourceIDs.insert(resourceID).inserted {
+                throw DictionaryCatalogValidationError.duplicateOpenResourceID
             }
         }
         return self
@@ -224,6 +352,9 @@ enum DictionaryCatalogValidationError: LocalizedError {
     case duplicateDictionaryID
     case missingRequiredValue
     case absoluteOrUnsafePath
+    case invalidStorageOwnership
+    case invalidOpenResourceMetadata
+    case duplicateOpenResourceID
 
     var errorDescription: String? {
         switch self {
@@ -231,6 +362,9 @@ enum DictionaryCatalogValidationError: LocalizedError {
         case .duplicateDictionaryID: return "词典目录包含重复标识。"
         case .missingRequiredValue: return "词典目录缺少必要字段。"
         case .absoluteOrUnsafePath: return "词典目录包含绝对路径或不安全路径。"
+        case .invalidStorageOwnership: return "词典目录包含不兼容的存储所有权。"
+        case .invalidOpenResourceMetadata: return "开放词典安装身份无效。"
+        case .duplicateOpenResourceID: return "开放词典资源已存在安装实例。"
         }
     }
 }

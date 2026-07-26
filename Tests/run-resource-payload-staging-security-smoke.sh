@@ -27,6 +27,8 @@ xcrun --sdk macosx swiftc -parse-as-library -strict-concurrency=complete -warnin
   "$ROOT/App/VerifiedManifestStateStore.swift" \
   "$ROOT/App/ResourceNetworkModels.swift" \
   "$ROOT/App/ResourceNetworkURLPolicy.swift" \
+  "$ROOT/App/DictionaryCatalog.swift" \
+  "$ROOT/App/OpenResourceInstallationModels.swift" \
   "$ROOT/App/ResourcePayloadDownloadModels.swift" \
   "$ROOT/App/ResourcePayloadStagingStore.swift" \
   "$ROOT/Tests/ResourcePayloadStagingSecuritySmoke.swift" \
@@ -45,6 +47,8 @@ xcrun --sdk macosx swiftc -parse-as-library -strict-concurrency=complete -warnin
   "$ROOT/App/VerifiedManifestStateStore.swift" \
   "$ROOT/App/ResourceNetworkModels.swift" \
   "$ROOT/App/ResourceNetworkURLPolicy.swift" \
+  "$ROOT/App/DictionaryCatalog.swift" \
+  "$ROOT/App/OpenResourceInstallationModels.swift" \
   "$ROOT/App/ResourcePayloadDownloadModels.swift" \
   "$ROOT/App/ResourcePayloadStagingStore.swift" \
   "$ROOT/Tests/ResourcePayloadStagingSecuritySmoke.swift" \

@@ -245,14 +245,18 @@ struct ResourcePayloadStagingStore: Sendable {
             try ResourcePayloadStagingPOSIX.requireSingleComponent(verifiedComponent)
             let partialComponent = "payload.mdx.part"
             let finalComponent = "payload.mdx"
+            let sidecarComponent = OpenResourceInstallationIdentity.sidecarComponent
+            let sidecarData = try OpenResourceInstallationSidecar(identity: plan.installationIdentity).encodedData()
             try ResourcePayloadStagingPOSIX.requireSingleComponent(partialComponent)
             try ResourcePayloadStagingPOSIX.requireSingleComponent(finalComponent)
+            try ResourcePayloadStagingPOSIX.requireSingleComponent(sidecarComponent)
 
             let rootFD = try root.withDescriptor { $0 }
             let mkdirResult = operationComponent.withCString { Darwin.mkdirat(rootFD, $0, 0o700) }
             guard mkdirResult == 0 else { throw ResourcePayloadStagingPOSIX.error() }
             var operationDirectory: OwnedFileDescriptor?
             var payload: OwnedFileDescriptor?
+            var sidecar: OwnedFileDescriptor?
             do {
                 let operationRaw = operationComponent.withCString {
                     Darwin.openat(rootFD, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -287,6 +291,26 @@ struct ResourcePayloadStagingStore: Sendable {
                 }
                 try ResourcePayloadStagingPOSIX.validatePayloadFile(payloadMetadata, expectedSize: 0)
 
+                let sidecarRaw = try operationDirectory!.withDescriptor { operationFD in
+                    sidecarComponent.withCString {
+                        Darwin.openat(operationFD, $0,
+                                     O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                                     mode_t(0o600))
+                    }
+                }
+                guard sidecarRaw >= 0 else { throw ResourcePayloadStagingPOSIX.error() }
+                sidecar = OwnedFileDescriptor(sidecarRaw, closeAction: hooks.close)
+                guard Darwin.fchmod(sidecarRaw, mode_t(0o600)) == 0 else {
+                    throw ResourcePayloadStagingPOSIX.error()
+                }
+                // Hooks model streamed payload I/O only.  The immutable receipt is written once
+                // with the production checked-write primitive before streaming starts, so legacy
+                // payload write-failure tests retain their intended boundary.
+                try sidecar!.withDescriptor { try ResourcePayloadFileSystemHooks.production.writeAll($0, sidecarData) }
+                let sidecarMetadata = try sidecar!.withDescriptor { try ResourcePayloadStagingPOSIX.metadata(for: $0) }
+                try ResourcePayloadStagingPOSIX.validatePayloadFile(sidecarMetadata,
+                                                                    expectedSize: Int64(sidecarData.count))
+
                 return ResourcePayloadStagingOperation(
                     operationID: operationID,
                     rootURL: rootURL,
@@ -296,12 +320,16 @@ struct ResourcePayloadStagingStore: Sendable {
                     verifiedComponent: verifiedComponent,
                     partialComponent: partialComponent,
                     finalComponent: finalComponent,
+                    sidecarComponent: sidecarComponent,
+                    sidecar: sidecar!,
+                    installationIdentity: plan.installationIdentity,
                     rootDirectory: root,
                     operationDirectory: operationDirectory!,
                     payload: payload!,
                     hooks: hooks
                 )
             } catch {
+                if let sidecar { try? sidecar.close() }
                 if let payload { try? payload.close() }
                 if let operationDirectory {
                     try? operationDirectory.close()
@@ -355,13 +383,21 @@ final class ResourcePayloadStagingOperation {
 
     let operationID: UUID
     let verifiedFile: URL
+    let stagingRootURL: URL
+    let verifiedDirectoryComponent: String
+    let publishedPayloadComponent: String
+    let publishedSidecarComponent: String
+    let publishedInstallationIdentity: OpenResourceInstallationIdentity
     private let operationComponent: String
     private let verifiedComponent: String
     private let partialComponent: String
     private let finalComponent: String
+    private let sidecarComponent: String
     private let rootDirectory: OwnedFileDescriptor
     private let operationDirectory: OwnedFileDescriptor
     private let payload: OwnedFileDescriptor
+    private let sidecar: OwnedFileDescriptor
+    private let installationIdentity: OpenResourceInstallationIdentity
     private let hooks: ResourcePayloadFileSystemHooks
     private var state: State = .prepared
     private var hasher = SHA256()
@@ -376,19 +412,30 @@ final class ResourcePayloadStagingOperation {
          verifiedComponent: String,
          partialComponent: String,
          finalComponent: String,
+         sidecarComponent: String,
+         sidecar: OwnedFileDescriptor,
+         installationIdentity: OpenResourceInstallationIdentity,
          rootDirectory: OwnedFileDescriptor,
          operationDirectory: OwnedFileDescriptor,
          payload: OwnedFileDescriptor,
          hooks: ResourcePayloadFileSystemHooks) {
         self.operationID = operationID
         self.verifiedFile = verifiedFile
+        stagingRootURL = rootURL
+        verifiedDirectoryComponent = verifiedComponent
+        publishedPayloadComponent = finalComponent
+        publishedSidecarComponent = sidecarComponent
+        publishedInstallationIdentity = installationIdentity
         self.operationComponent = operationComponent
         self.verifiedComponent = verifiedComponent
         self.partialComponent = partialComponent
         self.finalComponent = finalComponent
+        self.sidecarComponent = sidecarComponent
         self.rootDirectory = rootDirectory
         self.operationDirectory = operationDirectory
         self.payload = payload
+        self.sidecar = sidecar
+        self.installationIdentity = installationIdentity
         self.hooks = hooks
         _ = rootURL // Retain the initializer's explicit absolute-boundary acknowledgement only.
     }
@@ -438,6 +485,7 @@ final class ResourcePayloadStagingOperation {
             try ResourcePayloadStagingPOSIX.validatePayloadFile(payloadMetadata,
                                                                 expectedSize: Int64(expectedBytes))
             try payload.withDescriptor { try hooks.synchronize($0) }
+            try sidecar.withDescriptor { try ResourcePayloadFileSystemHooks.production.synchronize($0) }
             let operationFD = try operationDirectory.withDescriptor { $0 }
             let partialEntry = try ResourcePayloadStagingPOSIX.entryMetadata(
                 parent: operationFD, component: partialComponent
@@ -447,6 +495,14 @@ final class ResourcePayloadStagingOperation {
             }
             try ResourcePayloadStagingPOSIX.validatePayloadFile(partialEntry,
                                                                 expectedSize: Int64(expectedBytes))
+            let sidecarMetadata = try sidecar.withDescriptor { try ResourcePayloadStagingPOSIX.metadata(for: $0) }
+            let sidecarEntry = try ResourcePayloadStagingPOSIX.entryMetadata(parent: operationFD,
+                                                                              component: sidecarComponent)
+            guard ResourcePayloadStagingPOSIX.identitiesMatch(sidecarMetadata, sidecarEntry) else {
+                throw ResourcePayloadDownloadError.identityChanged
+            }
+            try ResourcePayloadStagingPOSIX.validatePayloadFile(sidecarEntry,
+                                                                expectedSize: Int64(sidecarMetadata.st_size))
             try ResourcePayloadStagingPOSIX.entryIsAbsent(parent: operationFD, component: finalComponent)
             try hooks.renameNoReplaceAt(operationFD, partialComponent, operationFD, finalComponent)
             let finalEntry = try ResourcePayloadStagingPOSIX.entryMetadata(parent: operationFD,
@@ -504,6 +560,7 @@ final class ResourcePayloadStagingOperation {
         if let operationFD {
             removeOwnedPayload(parent: operationFD, component: partialComponent)
             removeOwnedPayload(parent: operationFD, component: finalComponent)
+            removeOwnedSidecar(parent: operationFD)
         }
         if let rootFD,
            let operationMetadata = try? operationDirectory.withDescriptor({ try ResourcePayloadStagingPOSIX.metadata(for: $0) }),
@@ -520,6 +577,7 @@ final class ResourcePayloadStagingOperation {
 
     private func closeDescriptors() {
         try? payload.close()
+        try? sidecar.close()
         try? operationDirectory.close()
         try? rootDirectory.close()
         if state != .published && state != .publishedButDurabilityUnconfirmed &&
@@ -537,5 +595,12 @@ final class ResourcePayloadStagingOperation {
             return
         }
         ResourcePayloadStagingPOSIX.unlinkKnown(parent: parent, component: component)
+    }
+
+    private func removeOwnedSidecar(parent: Int32) {
+        guard let metadata = try? sidecar.withDescriptor({ try ResourcePayloadStagingPOSIX.metadata(for: $0) }),
+              let entry = try? ResourcePayloadStagingPOSIX.entryMetadata(parent: parent, component: sidecarComponent),
+              ResourcePayloadStagingPOSIX.identitiesMatch(metadata, entry) else { return }
+        ResourcePayloadStagingPOSIX.unlinkKnown(parent: parent, component: sidecarComponent)
     }
 }

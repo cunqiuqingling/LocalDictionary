@@ -371,7 +371,12 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                 verifiedFileURL: operation.verifiedFile,
                 signedFileName: plan.signedFileName,
                 actualByteCount: completed.bytes,
-                verifiedSHA256: completed.digest
+                verifiedSHA256: completed.digest,
+                stagingRootURL: operation.stagingRootURL,
+                verifiedDirectoryComponent: operation.verifiedDirectoryComponent,
+                payloadComponent: operation.publishedPayloadComponent,
+                sidecarComponent: operation.publishedSidecarComponent,
+                installationIdentity: operation.publishedInstallationIdentity
             )
             progress(ResourcePayloadDownloadProgress(
                 operationID: operation.operationID,

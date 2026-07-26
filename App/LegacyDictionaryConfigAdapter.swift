@@ -56,7 +56,9 @@ struct LegacyDictionaryConfigAdapter {
                 capabilities: definition.capabilities,
                 relativePaths: .empty,
                 createdAt: now,
-                updatedAt: now
+                updatedAt: now,
+                storageOwnership: .externalReference,
+                openResourceMetadata: nil
             )
             changed = true
         }

@@ -17,7 +17,19 @@ private func descriptor(
     state: DictionaryState = .ready,
     createdAt: Date = fixedDate
 ) -> DictionaryDescriptor {
-    DictionaryDescriptor(
+    let ownership = DictionaryOwnershipPolicy.defaultOwnership(for: sourceKind)!
+    let metadata: OpenResourceInstallationMetadata? = sourceKind == .openResource ?
+        OpenResourceInstallationMetadata(
+            resourceID: "synthetic-\(id.replacingOccurrences(of: "-", with: ""))",
+            resourceRevision: 1, resourceVersion: "1", manifestVersion: 1,
+            manifestSHA256: String(repeating: "a", count: 64), verifiedKeyID: "test",
+            payloadSHA256: String(repeating: "b", count: 64), payloadBytes: 1,
+            sidecarRelativePath: "Dictionaries/\(id)/resource-installation.json", languages: ["en"],
+            license: OpenResourceLicenseMetadata(name: "Synthetic", version: "1", url: "https://example.test", attribution: "Synthetic"),
+            sourceProject: "https://example.test", officialPageReference: "https://example.test/page",
+            expectedEntryCount: OpenResourceEntryCountMetadata(minimum: 1, maximum: 1), installedAt: fixedDate
+        ) : nil
+    return DictionaryDescriptor(
         dictionaryID: id,
         displayName: "Dictionary \(id)",
         sourceKind: sourceKind,
@@ -40,7 +52,9 @@ private func descriptor(
                 index: "Dictionaries/\(id)/index/dictionary.sqlite"
             ) : .empty,
         createdAt: createdAt,
-        updatedAt: fixedDate
+        updatedAt: fixedDate,
+        storageOwnership: ownership,
+        openResourceMetadata: metadata
     )
 }
 
@@ -68,9 +82,9 @@ private func testOrderingAndPersistence(root: URL) throws {
         descriptor(id: "00000000-0000-0000-0000-000000000001", position: 1)
     ]
     let fallback = [
-        descriptor(id: "f2", sourceKind: .openResource,
+        descriptor(id: "00000000-0000-4000-8000-0000000000f2", sourceKind: .openResource,
                    level: .fallback, position: 2),
-        descriptor(id: "f1", sourceKind: .openResource,
+        descriptor(id: "00000000-0000-4000-8000-0000000000f1", sourceKind: .openResource,
                    level: .fallback, position: 1)
     ]
     let initial = catalog(preferred + normal + fallback)
@@ -86,7 +100,7 @@ private func testOrderingAndPersistence(root: URL) throws {
                                                    direction: .up,
                                                    in: coordinator.catalog)
     _ = try coordinator.save(updated)
-    updated = try DictionaryCatalogOrdering.moving("f2", direction: .up,
+    updated = try DictionaryCatalogOrdering.moving("00000000-0000-4000-8000-0000000000f2", direction: .up,
                                                    in: coordinator.catalog)
     _ = try coordinator.save(updated)
     let reloaded = store.load()
@@ -94,7 +108,7 @@ private func testOrderingAndPersistence(root: URL) throws {
                "preferred order should persist")
     try expect(orderedIDs(reloaded, level: .normal) == normal.map(\.dictionaryID),
                "normal order should persist")
-    try expect(orderedIDs(reloaded, level: .fallback) == ["f2", "f1"],
+    try expect(orderedIDs(reloaded, level: .fallback) == ["00000000-0000-4000-8000-0000000000f2", "00000000-0000-4000-8000-0000000000f1"],
                "fallback order should persist")
 
     do {
