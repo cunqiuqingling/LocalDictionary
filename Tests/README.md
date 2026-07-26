@@ -187,6 +187,13 @@ open-resource installation. A Catalog mutation takes a short lock, reloads the l
 Catalog, changes only its target descriptor, and never encloses download, copying, indexing, or
 query work. The backup is the previous valid v2 primary, not the in-progress new primary.
 
+D1b-3B-2A-R2 decodes both primary/backup peers of the authoritative generation before selecting a
+writable Catalog. An unsupported peer blocks a valid peer in the same generation, while a corrupt
+peer still permits recovery from its valid counterpart. Existing valid v2 data remains
+authoritative over stale v1 files. Synthetic mixed-version tests verify exact write rejection plus
+unchanged file contents and inodes; the other deferred 2A test-matrix improvements remain outside
+R2.
+
 The installation smoke uses real POSIX files and `renameatx_np(RENAME_EXCL)` to verify that the
 sidecar is bounded-read and matched to its immutable identity before publication, that the source
 name is rebound to the verified directory fd immediately before rename, and that the final

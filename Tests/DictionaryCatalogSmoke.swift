@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SQLite3
 
@@ -14,6 +15,8 @@ private enum SmokeFailure: Error, CustomStringConvertible {
 @main
 @MainActor
 enum DictionaryCatalogSmoke {
+    private static var assertions = 0
+
     static func main() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LocalDictionary-CatalogSmoke-\(UUID().uuidString)",
@@ -26,6 +29,8 @@ enum DictionaryCatalogSmoke {
         try testBackupRecovery(root: root)
         try testDoubleCorruption(root: root)
         try testMutationsRejectUnavailableCatalog(root: root)
+        try testMixedVersionMutationBlocking(root: root)
+        try testPeerSelectionRegressions(root: root)
         try testLoadedBackupMutationPreservesPreviousBackup(root: root)
         try testTwoStoreMutationsMergeLatestCatalog(root: root)
         try testExplicitV1Migration(root: root)
@@ -33,7 +38,7 @@ enum DictionaryCatalogSmoke {
         try testLegacyAdaptationAndIdempotence(root: root)
         try testStableSort()
         try testAbsolutePathRejection(root: root)
-        print("DictionaryCatalogSmoke PASS")
+        print("DictionaryCatalogSmoke PASS (\(assertions) total runtime assertions)")
     }
 
     private static func testEmptyCatalog(root: URL) throws {
@@ -114,6 +119,98 @@ enum DictionaryCatalogSmoke {
                    "unsupported catalog was rewritten")
     }
 
+    private static func testMixedVersionMutationBlocking(root: URL) throws {
+        try assertMixedVersionBlocked(
+            store: makeStore(root: root, name: "v2-unsupported-primary"),
+            primaryData: encodedV2(schemaVersion: 999),
+            backupData: encodedV2(schemaVersion: DictionaryCatalog.currentSchemaVersion),
+            legacy: false,
+            name: "v2 unsupported primary"
+        )
+        try assertMixedVersionBlocked(
+            store: makeStore(root: root, name: "v2-unsupported-backup"),
+            primaryData: encodedV2(schemaVersion: DictionaryCatalog.currentSchemaVersion),
+            backupData: encodedV2(schemaVersion: 999),
+            legacy: false,
+            name: "v2 unsupported backup"
+        )
+        try assertMixedVersionBlocked(
+            store: makeStore(root: root, name: "v1-unsupported-primary"),
+            primaryData: encodedV1(schemaVersion: 999),
+            backupData: encodedV1(schemaVersion: 1),
+            legacy: true,
+            name: "v1 unsupported primary"
+        )
+        try assertMixedVersionBlocked(
+            store: makeStore(root: root, name: "v1-unsupported-backup"),
+            primaryData: encodedV1(schemaVersion: 1),
+            backupData: encodedV1(schemaVersion: 999),
+            legacy: true,
+            name: "v1 unsupported backup"
+        )
+    }
+
+    private static func testPeerSelectionRegressions(root: URL) throws {
+        let currentV2 = try encodedV2(schemaVersion: DictionaryCatalog.currentSchemaVersion)
+
+        let validPrimary = makeStore(root: root, name: "valid-primary-corrupt-backup")
+        try createPeers(store: validPrimary, primaryData: currentV2,
+                        backupData: Data("corrupt-backup".utf8), legacy: false)
+        let validPrimaryResult = validPrimary.loadResult()
+        try expect(validPrimaryResult.provenance == .loadedPrimary &&
+                   validPrimaryResult.catalog == sampleCatalog(),
+                   "valid v2 primary was masked by corrupt backup")
+
+        let validBackup = makeStore(root: root, name: "corrupt-primary-valid-backup")
+        try createPeers(store: validBackup, primaryData: Data("corrupt-primary".utf8),
+                        backupData: currentV2, legacy: false)
+        let validBackupResult = validBackup.loadResult()
+        try expect(validBackupResult.provenance == .loadedBackup &&
+                   validBackupResult.catalog == sampleCatalog(),
+                   "valid v2 backup did not recover corrupt primary")
+
+        let primaryOnly = makeStore(root: root, name: "valid-primary-only")
+        try createPeers(store: primaryOnly, primaryData: currentV2,
+                        backupData: nil, legacy: false)
+        try expect(primaryOnly.loadResult().provenance == .loadedPrimary,
+                   "valid v2 primary with missing backup did not load")
+
+        let backupOnly = makeStore(root: root, name: "valid-backup-only")
+        try createPeers(store: backupOnly, primaryData: nil,
+                        backupData: currentV2, legacy: false)
+        try expect(backupOnly.loadResult().provenance == .loadedBackup,
+                   "valid v2 backup with missing primary did not load")
+
+        let legacyBackup = makeStore(root: root, name: "v1-corrupt-primary-valid-backup")
+        try createPeers(store: legacyBackup, primaryData: Data("corrupt-primary".utf8),
+                        backupData: encodedV1(schemaVersion: 1), legacy: true)
+        try expect(legacyBackup.loadResult().provenance == .migratedFromV1,
+                   "valid v1 backup did not recover corrupt primary")
+
+        let missing = makeStore(root: root, name: "all-missing-first-create")
+        try expect(missing.loadResult().provenance == .missing,
+                   "all-missing Catalog did not report missing")
+        var missingMutationExecuted = false
+        _ = try missing.mutate { catalog, provenance in
+            missingMutationExecuted = true
+            try expect(provenance == .missing, "first mutation lost missing provenance")
+            catalog.updatedAt = catalog.updatedAt.addingTimeInterval(1)
+        }
+        try expect(missingMutationExecuted &&
+                   FileManager.default.fileExists(atPath: missing.catalogURL.path) &&
+                   !FileManager.default.fileExists(atPath: missing.backupURL.path),
+                   "all-missing Catalog did not allow first v2 commit")
+
+        let authoritativeV2 = makeStore(root: root, name: "valid-v2-unsupported-v1")
+        try createPeers(store: authoritativeV2, primaryData: currentV2,
+                        backupData: nil, legacy: false)
+        try encodedV1(schemaVersion: 999).write(to: authoritativeV2.legacyCatalogURL)
+        let authoritativeResult = authoritativeV2.loadResult()
+        try expect(authoritativeResult.provenance == .loadedPrimary &&
+                   authoritativeResult.catalog == sampleCatalog(),
+                   "unsupported stale v1 incorrectly blocked authoritative v2")
+    }
+
     private static func testLoadedBackupMutationPreservesPreviousBackup(root: URL) throws {
         let store = makeStore(root: root, name: "backup-mutation")
         let original = sampleCatalog()
@@ -161,17 +258,8 @@ enum DictionaryCatalogSmoke {
 
     private static func testExplicitV1Migration(root: URL) throws {
         let store = makeStore(root: root, name: "v1-migration")
-        let v2 = sampleCatalog()
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        var object = try JSONSerialization.jsonObject(with: encoder.encode(v2)) as! [String: Any]
-        object["schemaVersion"] = 1
-        var values = object["dictionaries"] as! [[String: Any]]
-        values[0].removeValue(forKey: "storageOwnership")
-        values[0].removeValue(forKey: "openResourceMetadata")
-        object["dictionaries"] = values
         try FileManager.default.createDirectory(at: store.directoryURL, withIntermediateDirectories: true)
-        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: store.legacyCatalogURL)
+        try encodedV1(schemaVersion: 1).write(to: store.legacyCatalogURL)
         let loaded = store.loadResult()
         try expect(loaded.provenance == .migratedFromV1,
                    "v1 catalog was not explicitly migrated")
@@ -351,6 +439,124 @@ enum DictionaryCatalogSmoke {
                                                                           isDirectory: true))
     }
 
+    private struct FileSnapshot {
+        let bytes: Data
+        let device: UInt64
+        let inode: UInt64
+    }
+
+    private static func assertMixedVersionBlocked(store: DictionaryCatalogStore,
+                                                  primaryData: Data,
+                                                  backupData: Data,
+                                                  legacy: Bool,
+                                                  name: String) throws {
+        try createPeers(store: store, primaryData: primaryData,
+                        backupData: backupData, legacy: legacy)
+        let primaryURL = legacy ? store.legacyCatalogURL : store.catalogURL
+        let backupURL = legacy ? store.legacyBackupURL : store.backupURL
+        let primaryBefore = try snapshot(of: primaryURL)
+        let backupBefore = try snapshot(of: backupURL)
+
+        let loaded = store.loadResult()
+        try expect(loaded.catalog == nil && loaded.provenance == .unsupportedVersion,
+                   "\(name) did not take unsupported precedence")
+
+        var mutationExecuted = false
+        var exactError = false
+        do {
+            _ = try store.mutate { catalog, _ in
+                mutationExecuted = true
+                catalog.updatedAt = Date()
+            }
+        } catch DictionaryCatalogStoreError.unsupportedCatalogVersion {
+            exactError = true
+        } catch {
+            throw SmokeFailure.failed("\(name) returned non-specific error: \(error)")
+        }
+        try expect(exactError, "\(name) did not return unsupportedCatalogVersion")
+        try expect(!mutationExecuted, "\(name) executed mutation closure")
+
+        let primaryAfter = try snapshot(of: primaryURL)
+        let backupAfter = try snapshot(of: backupURL)
+        try assertUnchanged(primaryBefore, primaryAfter, name: "\(name) primary")
+        try assertUnchanged(backupBefore, backupAfter, name: "\(name) backup")
+
+        let names = try Set(FileManager.default.contentsOfDirectory(atPath: store.directoryURL.path))
+        try expect(!names.contains(where: { $0.hasSuffix(".tmp") || $0.hasSuffix(".building") }),
+                   "\(name) left temporary files")
+        let expectedPeers = legacy
+            ? Set([DictionaryCatalogStore.legacyCatalogFileName,
+                   DictionaryCatalogStore.legacyBackupFileName,
+                   "catalog-mutation.lock"])
+            : Set([DictionaryCatalogStore.catalogFileName,
+                   DictionaryCatalogStore.backupFileName,
+                   "catalog-mutation.lock"])
+        try expect(names.isSubset(of: expectedPeers), "\(name) created unexpected Catalog files")
+        if legacy {
+            try expect(!FileManager.default.fileExists(atPath: store.catalogURL.path) &&
+                       !FileManager.default.fileExists(atPath: store.backupURL.path),
+                       "\(name) created v2 files during blocked migration")
+        } else {
+            try expect(!FileManager.default.fileExists(atPath: store.legacyCatalogURL.path) &&
+                       !FileManager.default.fileExists(atPath: store.legacyBackupURL.path),
+                       "\(name) modified the legacy generation")
+        }
+    }
+
+    private static func assertUnchanged(_ before: FileSnapshot,
+                                        _ after: FileSnapshot,
+                                        name: String) throws {
+        try expect(after.bytes == before.bytes, "\(name) bytes changed")
+        try expect(after.device == before.device, "\(name) device changed")
+        try expect(after.inode == before.inode, "\(name) inode changed")
+    }
+
+    private static func snapshot(of url: URL) throws -> FileSnapshot {
+        let bytes = try Data(contentsOf: url)
+        var metadata = stat()
+        guard url.path.withCString({ Darwin.lstat($0, &metadata) }) == 0 else {
+            throw SmokeFailure.failed("cannot stat Catalog fixture")
+        }
+        return FileSnapshot(bytes: bytes,
+                            device: UInt64(metadata.st_dev),
+                            inode: UInt64(metadata.st_ino))
+    }
+
+    private static func createPeers(store: DictionaryCatalogStore,
+                                    primaryData: Data?,
+                                    backupData: Data?,
+                                    legacy: Bool) throws {
+        try FileManager.default.createDirectory(at: store.directoryURL,
+                                                withIntermediateDirectories: true)
+        let primaryURL = legacy ? store.legacyCatalogURL : store.catalogURL
+        let backupURL = legacy ? store.legacyBackupURL : store.backupURL
+        if let primaryData { try primaryData.write(to: primaryURL) }
+        if let backupData { try backupData.write(to: backupURL) }
+    }
+
+    private static func encodedV2(schemaVersion: Int) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        var object = try JSONSerialization.jsonObject(
+            with: encoder.encode(sampleCatalog())
+        ) as! [String: Any]
+        object["schemaVersion"] = schemaVersion
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private static func encodedV1(schemaVersion: Int) throws -> Data {
+        var object = try JSONSerialization.jsonObject(
+            with: encodedV2(schemaVersion: schemaVersion)
+        ) as! [String: Any]
+        var values = object["dictionaries"] as! [[String: Any]]
+        for index in values.indices {
+            values[index].removeValue(forKey: "storageOwnership")
+            values[index].removeValue(forKey: "openResourceMetadata")
+        }
+        object["dictionaries"] = values
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
     private static func createIndex(at url: URL, entries: UInt64) throws {
         var database: OpaquePointer?
         guard sqlite3_open(url.path, &database) == SQLITE_OK, let database else {
@@ -378,5 +584,6 @@ enum DictionaryCatalogSmoke {
     private static func expect(_ condition: @autoclosure () -> Bool,
                                _ message: String) throws {
         guard condition() else { throw SmokeFailure.failed(message) }
+        assertions += 1
     }
 }

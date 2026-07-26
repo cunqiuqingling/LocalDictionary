@@ -86,32 +86,30 @@ final class DictionaryCatalogStore {
 
     func loadResult() -> DictionaryCatalogLoadResult {
         let primary = decodeV2(at: catalogURL)
-        if case let .valid(catalog) = primary {
-            return DictionaryCatalogLoadResult(catalog: catalog, provenance: .loadedPrimary)
-        }
         let backup = decodeV2(at: backupURL)
-        if case let .valid(catalog) = backup {
+        switch selectPeer(primary: primary, backup: backup) {
+        case .primary(let catalog):
+            return DictionaryCatalogLoadResult(catalog: catalog, provenance: .loadedPrimary)
+        case .backup(let catalog):
             return DictionaryCatalogLoadResult(catalog: catalog, provenance: .loadedBackup)
-        }
-        if primary == .missing && backup == .missing {
+        case .unsupported:
+            return DictionaryCatalogLoadResult(catalog: nil, provenance: .unsupportedVersion)
+        case .corrupt:
+            return DictionaryCatalogLoadResult(catalog: nil, provenance: .corrupt)
+        case .missing:
             let legacyPrimary = decodeV1(at: legacyCatalogURL)
-            if case let .valid(catalog) = legacyPrimary {
-                return migrationResult(for: catalog)
-            }
             let legacyBackup = decodeV1(at: legacyBackupURL)
-            if case let .valid(catalog) = legacyBackup {
+            switch selectPeer(primary: legacyPrimary, backup: legacyBackup) {
+            case .primary(let catalog), .backup(let catalog):
                 return migrationResult(for: catalog)
-            }
-            if legacyPrimary == .missing && legacyBackup == .missing {
+            case .missing:
                 return DictionaryCatalogLoadResult(catalog: .empty(), provenance: .missing)
+            case .unsupported:
+                return DictionaryCatalogLoadResult(catalog: nil, provenance: .unsupportedVersion)
+            case .corrupt:
+                return DictionaryCatalogLoadResult(catalog: nil, provenance: .corrupt)
             }
-            return DictionaryCatalogLoadResult(catalog: nil,
-                                               provenance: hasUnsupported(legacyPrimary, legacyBackup)
-                                               ? .unsupportedVersion : .corrupt)
         }
-        return DictionaryCatalogLoadResult(catalog: nil,
-                                           provenance: hasUnsupported(primary, backup)
-                                           ? .unsupportedVersion : .corrupt)
     }
 
     /// Applies a short, durable read-modify-write transaction.  The closure runs while the
@@ -222,6 +220,26 @@ final class DictionaryCatalogStore {
         case valid(T)
         case corrupt
         case unsupported
+    }
+
+    private enum PeerSelection<T> {
+        case missing
+        case primary(T)
+        case backup(T)
+        case corrupt
+        case unsupported
+    }
+
+    /// A future schema in either same-generation peer blocks every writable fallback.  Selection
+    /// between generations remains at the caller so an authoritative v2 Catalog never inspects
+    /// stale v1 files.
+    private func selectPeer<T: Equatable>(primary: Decoded<T>,
+                                          backup: Decoded<T>) -> PeerSelection<T> {
+        if hasUnsupported(primary, backup) { return .unsupported }
+        if case let .valid(value) = primary { return .primary(value) }
+        if case let .valid(value) = backup { return .backup(value) }
+        if primary == .missing && backup == .missing { return .missing }
+        return .corrupt
     }
 
     private func decodeV2(at url: URL) -> Decoded<DictionaryCatalog> {
