@@ -38,6 +38,14 @@ xcrun --sdk macosx swiftc \
   "$ROOT_DIR/App/DictionaryCatalog.swift" \
   "$ROOT_DIR/App/ResourceManifestKeyID.swift" \
   "$ROOT_DIR/App/DictionaryCatalogStore.swift" \
+  "$ROOT_DIR/App/ResourceManifestModels.swift" \
+  "$ROOT_DIR/App/StrictJSON.swift" \
+  "$ROOT_DIR/App/StrictResourceManifestDecoder.swift" \
+  "$ROOT_DIR/App/ResourceManifestValidator.swift" \
+  "$ROOT_DIR/App/ResourceManifestSignature.swift" \
+  "$ROOT_DIR/App/ResourceManifestVerifier.swift" \
+  "$ROOT_DIR/App/VerifiedManifestStateStore.swift" \
+  "$ROOT_DIR/App/OpenResourceInstallationModels.swift" \
   "$ROOT_DIR/App/DictionaryCatalogOrdering.swift" \
   "$ROOT_DIR/App/DictionaryManagerPresentation.swift" \
   "$ROOT_DIR/App/DictionaryImportModels.swift" \

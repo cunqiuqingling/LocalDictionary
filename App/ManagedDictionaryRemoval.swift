@@ -33,6 +33,7 @@ enum ManagedDictionaryRemovalError: LocalizedError, Equatable, Sendable {
 
 struct ManagedDictionaryRemovalPlan: Sendable {
     let dictionaryID: String
+    let descriptor: DictionaryDescriptor
     let managedDirectoryURL: URL
     let pendingDeletionRootURL: URL
     let pendingDirectoryURL: URL
@@ -48,7 +49,9 @@ struct ManagedDictionaryRemovalHooks: Sendable {
     let removeItem: @Sendable (URL) throws -> Void
 
     static let live = ManagedDictionaryRemovalHooks(
-        removeItem: { try FileManager().removeItem(at: $0) }
+        // A fault-injection gate only. Production deletion is descriptor-relative and
+        // inventories every allowed entry before unlinking anything.
+        removeItem: { _ in }
     )
 }
 
@@ -66,7 +69,9 @@ struct ManagedDictionaryRemovalWorker: Sendable {
 
     func makePlan(for descriptor: DictionaryDescriptor) throws
         -> ManagedDictionaryRemovalPlan {
-        guard descriptor.sourceKind == .managedLocal else {
+        guard DictionaryOwnershipPolicy.policy(
+            for: descriptor.sourceKind, ownership: descriptor.storageOwnership
+        )?.isRemovable == true else {
             throw ManagedDictionaryRemovalError.notManagedLocal
         }
         let dictionaryID = try canonicalUUID(descriptor.dictionaryID)
@@ -98,9 +103,15 @@ struct ManagedDictionaryRemovalWorker: Sendable {
                 throw ManagedDictionaryRemovalError.unsafeManagedPath
             }
         }
+        try validateOwnedIdentity(
+            descriptor,
+            parentURL: roots.dictionariesRoot,
+            component: dictionaryID
+        )
 
         return ManagedDictionaryRemovalPlan(
             dictionaryID: dictionaryID,
+            descriptor: descriptor,
             managedDirectoryURL: roots.managedDirectory,
             pendingDeletionRootURL: roots.pendingDeletionRoot,
             pendingDirectoryURL: roots.pendingDirectory
@@ -127,10 +138,15 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             throw ManagedDictionaryRemovalError.stagingConflict
         }
         do {
-            try renameAtomically(source: plan.managedDirectoryURL,
-                                 destination: plan.pendingDirectoryURL)
-            synchronizeDirectory(plan.managedDirectoryURL.deletingLastPathComponent())
-            synchronizeDirectory(plan.pendingDeletionRootURL)
+            try validateOwnedIdentity(
+                plan.descriptor,
+                parentURL: plan.managedDirectoryURL.deletingLastPathComponent(),
+                component: plan.dictionaryID
+            )
+            try renameNoReplace(source: plan.managedDirectoryURL,
+                                destination: plan.pendingDirectoryURL)
+            try synchronizeDirectory(plan.managedDirectoryURL.deletingLastPathComponent())
+            try synchronizeDirectory(plan.pendingDeletionRootURL)
         } catch let error as ManagedDictionaryRemovalError {
             throw error
         } catch {
@@ -145,10 +161,15 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             throw ManagedDictionaryRemovalError.rollbackFailed
         }
         do {
-            try renameAtomically(source: plan.pendingDirectoryURL,
-                                 destination: plan.managedDirectoryURL)
-            synchronizeDirectory(plan.managedDirectoryURL.deletingLastPathComponent())
-            synchronizeDirectory(plan.pendingDeletionRootURL)
+            try validateOwnedIdentity(
+                plan.descriptor,
+                parentURL: plan.pendingDeletionRootURL,
+                component: plan.dictionaryID
+            )
+            try renameNoReplace(source: plan.pendingDirectoryURL,
+                                destination: plan.managedDirectoryURL)
+            try synchronizeDirectory(plan.managedDirectoryURL.deletingLastPathComponent())
+            try synchronizeDirectory(plan.pendingDeletionRootURL)
         } catch {
             throw ManagedDictionaryRemovalError.rollbackFailed
         }
@@ -156,7 +177,15 @@ struct ManagedDictionaryRemovalWorker: Sendable {
 
     func finalize(_ plan: ManagedDictionaryRemovalPlan) throws {
         try hooks.removeItem(plan.pendingDirectoryURL)
-        synchronizeDirectory(plan.pendingDeletionRootURL)
+        try validateOwnedIdentity(
+            plan.descriptor,
+            parentURL: plan.pendingDeletionRootURL,
+            component: plan.dictionaryID
+        )
+        try safelyDeleteOwnedDirectory(
+            plan.pendingDirectoryURL, descriptor: plan.descriptor
+        )
+        try synchronizeDirectory(plan.pendingDeletionRootURL)
     }
 
     func recoverPendingDeletions(catalog: DictionaryCatalog)
@@ -178,9 +207,16 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             options: [.skipsHiddenFiles]
         ) else { return report }
 
-        let managedIDs = Set(catalog.dictionaries.filter {
-            $0.sourceKind == .managedLocal
-        }.map(\.dictionaryID))
+        let managedDescriptors: [String: DictionaryDescriptor] = Dictionary(
+            uniqueKeysWithValues:
+            catalog.dictionaries.compactMap { descriptor in
+                guard DictionaryOwnershipPolicy.policy(
+                    for: descriptor.sourceKind,
+                    ownership: descriptor.storageOwnership
+                )?.isRemovable == true else { return nil }
+                return (descriptor.dictionaryID, descriptor)
+            }
+        )
         for child in children {
             let dictionaryID: String
             do { dictionaryID = try canonicalUUID(child.lastPathComponent) }
@@ -196,16 +232,24 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             let managedDirectory = roots.dictionariesRoot
                 .appendingPathComponent(dictionaryID, isDirectory: true)
             do {
-                if managedIDs.contains(dictionaryID),
+                if let descriptor = managedDescriptors[dictionaryID],
                    !fileManager.fileExists(atPath: managedDirectory.path) {
-                    try renameAtomically(source: child, destination: managedDirectory)
-                    synchronizeDirectory(roots.dictionariesRoot)
-                    synchronizeDirectory(roots.pendingDeletionRoot)
+                    try validateOwnedIdentity(
+                        descriptor,
+                        parentURL: roots.pendingDeletionRoot,
+                        component: dictionaryID
+                    )
+                    try renameNoReplace(source: child, destination: managedDirectory)
+                    try synchronizeDirectory(roots.dictionariesRoot)
+                    try synchronizeDirectory(roots.pendingDeletionRoot)
                     report.restoredDictionaryIDs.append(dictionaryID)
-                } else {
+                } else if managedDescriptors[dictionaryID] == nil {
                     try hooks.removeItem(child)
-                    synchronizeDirectory(roots.pendingDeletionRoot)
+                    try safelyDeleteOwnedDirectory(child, descriptor: nil)
+                    try synchronizeDirectory(roots.pendingDeletionRoot)
                     report.cleanedDictionaryIDs.append(dictionaryID)
+                } else {
+                    report.deferredDictionaryIDs.append(dictionaryID)
                 }
             } catch {
                 report.deferredDictionaryIDs.append(dictionaryID)
@@ -319,20 +363,512 @@ struct ManagedDictionaryRemovalWorker: Sendable {
         return value
     }
 
-    private func renameAtomically(source: URL, destination: URL) throws {
-        let result = source.path.withCString { sourcePath in
-            destination.path.withCString { destinationPath in
-                Darwin.rename(sourcePath, destinationPath)
+    private func renameNoReplace(source: URL, destination: URL) throws {
+        let sourceParent = Darwin.open(
+            source.deletingLastPathComponent().path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard sourceParent >= 0 else { throw ManagedDictionaryRemovalError.stagingFailed }
+        defer { Darwin.close(sourceParent) }
+        let destinationParent = Darwin.open(
+            destination.deletingLastPathComponent().path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard destinationParent >= 0 else {
+            throw ManagedDictionaryRemovalError.stagingFailed
+        }
+        defer { Darwin.close(destinationParent) }
+        var before = stat()
+        guard source.lastPathComponent.withCString({
+            Darwin.fstatat(sourceParent, $0, &before, AT_SYMLINK_NOFOLLOW)
+        }) == 0, (before.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
+        before.st_uid == geteuid() else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        let result = source.lastPathComponent.withCString { sourceName in
+            destination.lastPathComponent.withCString { destinationName in
+                Darwin.renameatx_np(
+                    sourceParent, sourceName, destinationParent, destinationName,
+                    UInt32(RENAME_EXCL)
+                )
             }
         }
-        guard result == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
+        guard result == 0 else {
+            if errno == EEXIST { throw ManagedDictionaryRemovalError.stagingConflict }
+            throw ManagedDictionaryRemovalError.stagingFailed
+        }
+        var after = stat()
+        guard destination.lastPathComponent.withCString({
+            Darwin.fstatat(destinationParent, $0, &after, AT_SYMLINK_NOFOLLOW)
+        }) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino else {
+            throw ManagedDictionaryRemovalError.stagingFailed
+        }
     }
 
-    private func synchronizeDirectory(_ url: URL) {
-        let descriptor = Darwin.open(url.path, O_RDONLY)
-        guard descriptor >= 0 else { return }
+    private func synchronizeDirectory(_ url: URL) throws {
+        let descriptor = Darwin.open(
+            url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard descriptor >= 0 else { throw ManagedDictionaryRemovalError.stagingFailed }
         defer { Darwin.close(descriptor) }
-        _ = Darwin.fsync(descriptor)
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw ManagedDictionaryRemovalError.stagingFailed
+        }
+    }
+
+    private func validateOwnedIdentity(_ descriptor: DictionaryDescriptor,
+                                       parentURL: URL,
+                                       component: String) throws {
+        guard component == descriptor.dictionaryID else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        let parent = Darwin.open(
+            parentURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard parent >= 0 else { throw ManagedDictionaryRemovalError.unsafeManagedPath }
+        defer { Darwin.close(parent) }
+        let directory = component.withCString {
+            Darwin.openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard directory >= 0 else { throw ManagedDictionaryRemovalError.unsafeManagedPath }
+        defer { Darwin.close(directory) }
+        var opened = stat()
+        var named = stat()
+        guard Darwin.fstat(directory, &opened) == 0,
+              component.withCString({
+                  Darwin.fstatat(parent, $0, &named, AT_SYMLINK_NOFOLLOW)
+              }) == 0,
+              sameDirectoryIdentity(opened, named),
+              opened.st_uid == geteuid(),
+              (opened.st_mode & mode_t(0o022)) == 0 else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        switch descriptor.storageOwnership {
+        case .appManagedOpenResource:
+            try validateOpenResourceIdentity(descriptor, directory: directory)
+        case .appManagedImported:
+            try validateManagedImportedIdentity(descriptor, directory: directory)
+        case .externalReference, .bundledReadOnly:
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+    }
+
+    private func validateOpenResourceIdentity(_ descriptor: DictionaryDescriptor,
+                                              directory: Int32) throws {
+        guard descriptor.sourceKind == .openResource,
+              descriptor.storageOwnership == .appManagedOpenResource,
+              let expected = descriptor.openResourceMetadata,
+              descriptor.relativePaths.dictionary ==
+                "Dictionaries/\(descriptor.dictionaryID)/payload.mdx" else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        let entries = try directoryEntries(directory)
+        guard entries.isSubset(of: [
+            OpenResourceInstallationIdentity.payloadComponent,
+            OpenResourceInstallationIdentity.sidecarComponent,
+            "index"
+        ]) else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        let sidecarFD = try openRegular(
+            parent: directory,
+            component: OpenResourceInstallationIdentity.sidecarComponent,
+            exactMode: 0o600
+        )
+        defer { Darwin.close(sidecarFD) }
+        let sidecarData = try readBounded(sidecarFD, maximum: 64 * 1024)
+        guard let sidecar = try? OpenResourceInstallationSidecar.decode(sidecarData),
+              sidecar.dictionaryID == descriptor.dictionaryID,
+              sidecar.sourceKind == .openResource,
+              sidecar.storageOwnership == .appManagedOpenResource,
+              sidecar.payloadRelativePath ==
+                OpenResourceInstallationIdentity.payloadComponent,
+              sidecar.formatterIdentifier == descriptor.formatterIdentifier,
+              metadata(from: sidecar) == expected else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        let payloadFD = try openRegular(
+            parent: directory,
+            component: OpenResourceInstallationIdentity.payloadComponent,
+            exactMode: 0o600
+        )
+        defer { Darwin.close(payloadFD) }
+        var payload = stat()
+        guard Darwin.fstat(payloadFD, &payload) == 0,
+              payload.st_size >= 0,
+              UInt64(payload.st_size) == sidecar.payloadBytes else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+    }
+
+    private func metadata(from sidecar: OpenResourceInstallationSidecar)
+        -> OpenResourceInstallationMetadata {
+        OpenResourceInstallationMetadata(
+            resourceID: sidecar.resourceID,
+            resourceRevision: sidecar.resourceRevision,
+            resourceVersion: sidecar.resourceVersion,
+            manifestVersion: sidecar.manifestVersion,
+            manifestSHA256: sidecar.manifestSHA256,
+            verifiedKeyID: sidecar.verifiedKeyID,
+            payloadSHA256: sidecar.payloadSHA256,
+            payloadBytes: sidecar.payloadBytes,
+            sidecarRelativePath:
+                "Dictionaries/\(sidecar.dictionaryID)/\(OpenResourceInstallationIdentity.sidecarComponent)",
+            languages: sidecar.languages,
+            license: sidecar.license,
+            sourceProject: sidecar.sourceProject,
+            officialPageReference: sidecar.officialPageReference,
+            expectedEntryCount: sidecar.expectedEntryCount,
+            installedAt: sidecar.installedAt
+        )
+    }
+
+    private func openRegular(parent: Int32,
+                             component: String,
+                             exactMode: mode_t) throws -> Int32 {
+        let descriptor = component.withCString {
+            Darwin.openat(parent, $0, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { throw ManagedDictionaryRemovalError.unsafeManagedPath }
+        var opened = stat()
+        var named = stat()
+        guard Darwin.fstat(descriptor, &opened) == 0,
+              component.withCString({
+                  Darwin.fstatat(parent, $0, &named, AT_SYMLINK_NOFOLLOW)
+              }) == 0,
+              (opened.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              opened.st_uid == geteuid(), opened.st_nlink == 1,
+              (opened.st_mode & mode_t(0o777)) == exactMode,
+              opened.st_dev == named.st_dev, opened.st_ino == named.st_ino else {
+            Darwin.close(descriptor)
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        return descriptor
+    }
+
+    private func readBounded(_ descriptor: Int32, maximum: Int) throws -> Data {
+        var before = stat()
+        guard Darwin.fstat(descriptor, &before) == 0,
+              before.st_size > 0, before.st_size <= Int64(maximum) else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        var data = Data(count: Int(before.st_size))
+        var offset = 0
+        let byteCount = data.count
+        while offset < byteCount {
+            let count = data.withUnsafeMutableBytes {
+                Darwin.pread(
+                    descriptor,
+                    $0.baseAddress!.advanced(by: offset),
+                    byteCount - offset,
+                    off_t(offset)
+                )
+            }
+            if count > 0 {
+                offset += count
+            } else if count < 0, errno == EINTR {
+                continue
+            } else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+        }
+        var after = stat()
+        guard Darwin.fstat(descriptor, &after) == 0,
+              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+              before.st_size == after.st_size else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        return data
+    }
+
+    private func sameDirectoryIdentity(_ lhs: stat, _ rhs: stat) -> Bool {
+        lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino &&
+            (lhs.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) &&
+            (rhs.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+    }
+
+    private func validateManagedImportedIdentity(
+        _ descriptor: DictionaryDescriptor,
+        directory: Int32
+    ) throws {
+        guard descriptor.sourceKind == .managedLocal,
+              descriptor.storageOwnership == .appManagedImported,
+              let sourcePath = descriptor.relativePaths.dictionary,
+              let sourceComponents = relativeComponents(
+                sourcePath, dictionaryID: descriptor.dictionaryID
+              ) else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        let ownedSource = Array(sourceComponents.dropFirst(2))
+        guard ownedSource.count == 1 ||
+                (ownedSource.count == 2 && ownedSource[0] == "source") else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        let entries = try directoryEntries(directory)
+        var rootFiles = Set<String>()
+        var sourceFiles = Set<String>()
+        for path in [descriptor.relativePaths.dictionary].compactMap({ $0 }) +
+            descriptor.relativePaths.resources {
+            guard let components = relativeComponents(
+                path, dictionaryID: descriptor.dictionaryID
+            ) else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+            let tail = Array(components.dropFirst(2))
+            if tail.count == 1 {
+                rootFiles.insert(tail[0])
+            } else if tail.count == 2, tail[0] == "source" {
+                sourceFiles.insert(tail[1])
+            } else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+        }
+        var allowed = rootFiles
+        if !sourceFiles.isEmpty { allowed.insert("source") }
+        allowed.insert("index")
+        guard entries.isSubset(of: allowed),
+              rootFiles.isSubset(of: entries),
+              sourceFiles.isEmpty || entries.contains("source") else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        for file in rootFiles.intersection(entries) {
+            let descriptor = try openRegular(parent: directory,
+                                             component: file,
+                                             exactMode: fileMode(directory, file))
+            Darwin.close(descriptor)
+        }
+        if entries.contains("source") {
+            let sourceDirectory = try openChildDirectory(
+                parent: directory, component: "source"
+            )
+            defer { Darwin.close(sourceDirectory) }
+            let children = try directoryEntries(sourceDirectory)
+            guard children == sourceFiles else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+            for file in children {
+                let descriptor = try openRegular(
+                    parent: sourceDirectory,
+                    component: file,
+                    exactMode: fileMode(sourceDirectory, file)
+                )
+                Darwin.close(descriptor)
+            }
+        }
+        if entries.contains("index") {
+            try validateIndexInventory(directory)
+        }
+    }
+
+    private func safelyDeleteOwnedDirectory(
+        _ directoryURL: URL,
+        descriptor expectedDescriptor: DictionaryDescriptor?
+    ) throws {
+        var directory = Darwin.open(
+            directoryURL.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard directory >= 0 else { throw ManagedDictionaryRemovalError.stagingFailed }
+        defer {
+            if directory >= 0 { Darwin.close(directory) }
+        }
+        if let expectedDescriptor {
+            switch expectedDescriptor.storageOwnership {
+            case .appManagedOpenResource:
+                try validateOpenResourceIdentity(expectedDescriptor, directory: directory)
+            case .appManagedImported:
+                try validateManagedImportedIdentity(expectedDescriptor, directory: directory)
+            case .externalReference, .bundledReadOnly:
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+        }
+        let entries = try directoryEntries(directory)
+        let openResource = entries.contains(OpenResourceInstallationIdentity.sidecarComponent)
+        let allowedRootFiles: Set<String>
+        var allowedDirectories = Set(["index"])
+        if openResource {
+            allowedRootFiles = [
+                OpenResourceInstallationIdentity.payloadComponent,
+                OpenResourceInstallationIdentity.sidecarComponent
+            ]
+        } else {
+            allowedRootFiles = Set(entries.filter {
+                let ext = URL(fileURLWithPath: $0).pathExtension.lowercased()
+                return ext == "mdx" || ext == "mdd"
+            })
+            allowedDirectories.insert("source")
+        }
+        guard entries.isSubset(of: allowedRootFiles.union(allowedDirectories)) else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        var childInventories: [(String, Int32, Set<String>)] = []
+        defer { childInventories.forEach { Darwin.close($0.1) } }
+        for entry in entries {
+            var metadata = stat()
+            guard entry.withCString({
+                Darwin.fstatat(directory, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+            }) == 0, metadata.st_uid == geteuid() else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+            if allowedRootFiles.contains(entry) {
+                guard (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+                      metadata.st_nlink == 1 else {
+                    throw ManagedDictionaryRemovalError.unsafeManagedPath
+                }
+            } else {
+                guard (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else {
+                    throw ManagedDictionaryRemovalError.unsafeManagedPath
+                }
+                let child = entry.withCString {
+                    Darwin.openat(directory, $0,
+                                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                }
+                guard child >= 0 else {
+                    throw ManagedDictionaryRemovalError.unsafeManagedPath
+                }
+                let childEntries = try directoryEntries(child)
+                let allowed: Set<String>
+                if entry == "index" {
+                    allowed = [
+                        "dictionary.sqlite", "dictionary.sqlite.building",
+                        "dictionary.sqlite.previous", "dictionary.sqlite-wal",
+                        "dictionary.sqlite-shm"
+                    ]
+                } else {
+                    allowed = Set(childEntries.filter {
+                        let ext = URL(fileURLWithPath: $0).pathExtension.lowercased()
+                        return ext == "mdx" || ext == "mdd"
+                    })
+                }
+                guard childEntries.isSubset(of: allowed) else {
+                    Darwin.close(child)
+                    throw ManagedDictionaryRemovalError.unsafeManagedPath
+                }
+                for childEntry in childEntries {
+                    var childMetadata = stat()
+                    guard childEntry.withCString({
+                        Darwin.fstatat(child, $0, &childMetadata, AT_SYMLINK_NOFOLLOW)
+                    }) == 0,
+                    (childMetadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+                    childMetadata.st_uid == geteuid(), childMetadata.st_nlink == 1 else {
+                        Darwin.close(child)
+                        throw ManagedDictionaryRemovalError.unsafeManagedPath
+                    }
+                }
+                childInventories.append((entry, child, childEntries))
+            }
+        }
+        for (entry, child, childEntries) in childInventories {
+            for childEntry in childEntries {
+                guard childEntry.withCString({ Darwin.unlinkat(child, $0, 0) }) == 0 else {
+                    throw ManagedDictionaryRemovalError.stagingFailed
+                }
+            }
+            guard Darwin.fsync(child) == 0,
+                  entry.withCString({ Darwin.unlinkat(directory, $0, AT_REMOVEDIR) }) == 0 else {
+                throw ManagedDictionaryRemovalError.stagingFailed
+            }
+        }
+        // macOS may keep a removed child directory busy until its descriptor is
+        // closed; release all child descriptors before removing the empty root.
+        childInventories.forEach { Darwin.close($0.1) }
+        childInventories.removeAll()
+        for entry in allowedRootFiles.intersection(entries) {
+            guard entry.withCString({ Darwin.unlinkat(directory, $0, 0) }) == 0 else {
+                throw ManagedDictionaryRemovalError.stagingFailed
+            }
+        }
+        guard Darwin.fsync(directory) == 0 else {
+            throw ManagedDictionaryRemovalError.stagingFailed
+        }
+        guard Darwin.close(directory) == 0 else {
+            throw ManagedDictionaryRemovalError.stagingFailed
+        }
+        directory = -1
+        let parent = Darwin.open(
+            directoryURL.deletingLastPathComponent().path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard parent >= 0 else { throw ManagedDictionaryRemovalError.stagingFailed }
+        defer { Darwin.close(parent) }
+        guard directoryURL.lastPathComponent.withCString({
+            Darwin.unlinkat(parent, $0, AT_REMOVEDIR)
+        }) == 0 else { throw ManagedDictionaryRemovalError.stagingFailed }
+    }
+
+    private func directoryEntries(_ descriptor: Int32) throws -> Set<String> {
+        let copy = Darwin.openat(
+            descriptor, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard copy >= 0, let stream = Darwin.fdopendir(copy) else {
+            if copy >= 0 { Darwin.close(copy) }
+            throw ManagedDictionaryRemovalError.stagingFailed
+        }
+        defer { Darwin.closedir(stream) }
+        var result = Set<String>()
+        errno = 0
+        while let entry = Darwin.readdir(stream) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN)) {
+                    String(cString: $0)
+                }
+            }
+            if name != "." && name != ".." { result.insert(name) }
+        }
+        guard errno == 0 else { throw ManagedDictionaryRemovalError.stagingFailed }
+        return result
+    }
+
+    private func openChildDirectory(parent: Int32, component: String) throws -> Int32 {
+        let descriptor = component.withCString {
+            Darwin.openat(parent, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { throw ManagedDictionaryRemovalError.unsafeManagedPath }
+        var opened = stat()
+        var named = stat()
+        guard Darwin.fstat(descriptor, &opened) == 0,
+              component.withCString({
+                  Darwin.fstatat(parent, $0, &named, AT_SYMLINK_NOFOLLOW)
+              }) == 0,
+              sameDirectoryIdentity(opened, named),
+              opened.st_uid == geteuid(),
+              (opened.st_mode & mode_t(0o022)) == 0 else {
+            Darwin.close(descriptor)
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        return descriptor
+    }
+
+    private func fileMode(_ parent: Int32, _ component: String) throws -> mode_t {
+        var metadata = stat()
+        guard component.withCString({
+            Darwin.fstatat(parent, $0, &metadata, AT_SYMLINK_NOFOLLOW)
+        }) == 0,
+        (metadata.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+        metadata.st_uid == geteuid(), metadata.st_nlink == 1 else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        return metadata.st_mode & mode_t(0o777)
+    }
+
+    private func validateIndexInventory(_ dictionaryDirectory: Int32) throws {
+        let index = try openChildDirectory(parent: dictionaryDirectory, component: "index")
+        defer { Darwin.close(index) }
+        let entries = try directoryEntries(index)
+        let allowed: Set<String> = [
+            "dictionary.sqlite", "dictionary.sqlite.building",
+            "dictionary.sqlite.previous", "dictionary.sqlite-wal",
+            "dictionary.sqlite-shm"
+        ]
+        guard entries.isSubset(of: allowed) else {
+            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }
+        for entry in entries {
+            let descriptor = try openRegular(
+                parent: index, component: entry, exactMode: fileMode(index, entry)
+            )
+            Darwin.close(descriptor)
+        }
     }
 
     private static func isDirectDescendant(_ candidate: URL, of directory: URL) -> Bool {
@@ -423,7 +959,9 @@ final class ManagedDictionaryRemovalCoordinator {
         guard let descriptor = catalog.dictionaries.first(where: {
             $0.dictionaryID == dictionaryID
         }) else { return .failed(.dictionaryNotFound) }
-        guard descriptor.sourceKind == .managedLocal else { return .failed(.notManagedLocal) }
+        guard DictionaryOwnershipPolicy.policy(
+            for: descriptor.sourceKind, ownership: descriptor.storageOwnership
+        )?.isRemovable == true else { return .failed(.notManagedLocal) }
         guard descriptor.state != .indexing,
               !isIndexing(dictionaryID) else {
             return .failed(.indexingInProgress)
@@ -466,7 +1004,9 @@ final class ManagedDictionaryRemovalCoordinator {
         do {
             if let catalogStore {
                 let mutation = try catalogStore.mutate { latest, _ in
-                    guard latest.dictionaries.contains(where: { $0.dictionaryID == dictionaryID }) else {
+                    guard latest.dictionaries.contains(where: {
+                        $0.dictionaryID == dictionaryID && $0 == descriptor
+                    }) else {
                         throw ManagedDictionaryRemovalError.dictionaryNotFound
                     }
                     latest = try DictionaryCatalogOrdering.removingAndCompacting(dictionaryID, from: latest)

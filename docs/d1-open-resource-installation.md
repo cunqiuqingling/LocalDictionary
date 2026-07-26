@@ -18,7 +18,8 @@ publishes the already-verified directory with `renameatx_np(RENAME_EXCL)` to
 
 The Catalog is saved only after the final directory and its parent are durable. If that Catalog
 save fails, the final directory and receipt remain intact and the operation reports a recoverable
-post-publication error; later startup reconciliation is intentionally outside D1b-3B-2A.
+post-publication error. D1b-3B-2B startup reconciliation now revalidates and registers that final
+orphan as disabled / fallback / pending-index when its full payload identity remains valid.
 
 Catalog v2 uses `catalog-v2.json` and `catalog-v2.backup.json`. It preserves v1 files without
 rewriting them, explicitly migrates legacy and locally imported descriptors in memory, and rejects
@@ -42,5 +43,6 @@ installation identity before publication. The source name is rebound to the veri
 immediately before `renameatx_np(RENAME_EXCL)`. After publication, the final directory identity,
 payload hash, receipt identity, modes, link counts, and exact two-entry layout are revalidated
 before Catalog commit. A final object that fails post-publication verification remains on disk
-without a Catalog descriptor and is intentionally deferred to D1b-3B-2B reconciliation. This
-stage still implements neither recovery, open-resource removal, indexing, nor query eligibility.
+without a Catalog descriptor for conservative startup reconciliation. Open resources are now
+eligible for the existing explicit indexing workflow and owned removal, but they remain excluded
+from query fallback. Query leases and SQLite fd-identity/publish hardening remain later stages.

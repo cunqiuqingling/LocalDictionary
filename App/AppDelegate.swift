@@ -7,6 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictionaryManagerController: DictionaryManagerWindowController?
     private var dictionaryCatalog = DictionaryCatalog.empty()
     private let dictionaryCatalogStore = DictionaryCatalogStore()
+    private lazy var ownedDictionaryLifecycleReconciler =
+        OwnedDictionaryLifecycleReconciler(catalogStore: dictionaryCatalogStore)
     private var managedDictionaryQueryService: ManagedDictionaryQueryService?
     private var dictionaryRemovalCoordinator: ManagedDictionaryRemovalCoordinator?
     private lazy var dictionaryIndexCoordinator = ManagedDictionaryIndexCoordinator(
@@ -45,11 +47,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         configureMainMenu()
         configureStatusItem()
-        configureDictionary()
-        hotKey = GlobalHotKey { [weak self] in self?.handleGlobalHotKey() }
-        if hotKey?.isRegistered != true {
-            DispatchQueue.main.async { [weak self] in
-                self?.showHotKeyRegistrationFailure()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await configureDictionary()
+            hotKey = GlobalHotKey { [weak self] in self?.handleGlobalHotKey() }
+            if hotKey?.isRegistered != true {
+                DispatchQueue.main.async { [weak self] in
+                    self?.showHotKeyRegistrationFailure()
+                }
             }
         }
     }
@@ -236,10 +241,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.runModal()
     }
 
-    private func configureDictionary() {
-        let catalogLoad = dictionaryCatalogStore.loadResult()
-        var catalog = catalogLoad.catalog ?? .empty()
-        let catalogIsWritable = catalogLoad.catalog != nil
+    private func configureDictionary() async {
+        // Reconcile App-owned storage before publishing any Catalog to query,
+        // indexing, removal, manager, or panel runtime state.
+        let lifecycle = await ownedDictionaryLifecycleReconciler.reconcile()
+        var catalog = lifecycle.catalog
+        let catalogIsWritable = !lifecycle.report.blocked
+#if DEBUG
+        if !lifecycle.report.issues.isEmpty {
+            let codes = lifecycle.report.issues.map(\.code.rawValue).joined(separator: ",")
+            NSLog("LocalDictionary lifecycle issues=%ld codes=%@",
+                  lifecycle.report.issues.count, codes)
+        }
+#endif
         let config = AppConfig.loadIfPresent()
         if let config, catalogIsWritable {
             do {
@@ -256,10 +270,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             catalog = LegacyDictionaryConfigAdapter()
                 .markingUnresolvableLegacyReferencesUnavailable(in: catalog)
         }
-        if catalogIsWritable {
-            catalog = dictionaryIndexCoordinator.recoverInterruptedTasks(in: catalog)
-        }
         dictionaryCatalog = catalog
+        dictionaryIndexCoordinator.synchronize(catalog: catalog)
 
         let managedService = ManagedDictionaryQueryService(
             catalog: catalog,
@@ -320,15 +332,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.applyCatalogChange(updated, replaceManagedCatalog: false)
         }
         dictionaryRemovalCoordinator = removalCoordinator
-        Task { [removalCoordinator] in
-            let report = await removalCoordinator.recoverPendingDeletions()
-            #if DEBUG
-            if !report.deferredDictionaryIDs.isEmpty {
-                NSLog("LocalDictionary pending deletion cleanup deferred=%ld",
-                      report.deferredDictionaryIDs.count)
-            }
-            #endif
-        }
 
         dictionaryIndexCoordinator.onCatalogChanged = { [weak self] updated in
             self?.applyCatalogChange(updated)

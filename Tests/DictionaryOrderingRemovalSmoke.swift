@@ -348,7 +348,10 @@ private func testSuccessfulRemoval(base: URL) async throws {
     let runtime = MockRuntime()
     let value = coordinator(for: fixture, runtime: runtime)
     let result = await value.remove(dictionaryID: fixture.descriptor.dictionaryID)
-    try expect(result == .removed(cleanupDeferred: false), "managed removal should succeed")
+    try expect(
+        result == .removed(cleanupDeferred: false),
+        "managed removal should succeed, got \(String(describing: result))"
+    )
     try expect(!FileManager.default.fileExists(atPath: fixture.managedDirectory.path) &&
                !FileManager.default.fileExists(atPath: fixture.pendingDirectory.path),
                "managed files and staging should be removed")

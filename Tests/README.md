@@ -200,7 +200,24 @@ name is rebound to the verified directory fd immediately before rename, and that
 payload/sidecar are rechecked before a Catalog commit. Test-only rename interlocks are compiled
 only by the smoke runner; they are not part of the App target. Final objects that fail a
 post-publication identity check are intentionally retained without a Catalog descriptor for the
-later D1b-3B-2B reconciliation phase.
+startup reconciliation phase.
+
+## D1b-3B-2B owned lifecycle reconciliation smoke
+
+`Tests/run-owned-dictionary-lifecycle-reconciliation-smoke.sh` runs the same synthetic lifecycle
+matrix in Debug with ASan/UBSan and in optimized Release. It verifies Catalog-provenance blocking,
+known partial cleanup, verified-to-final no-replace recovery, full-SHA orphan registration,
+identity/conflict preservation, interrupted index downgrade, OpenResource index eligibility,
+descriptor-relative owned removal, PendingDeletion restore/cleanup, rollback, cancellation,
+durability uncertainty, idempotence, and the startup publication barrier. It uses isolated
+temporary roots and synthetic payloads only; it never reads Application Support, private
+dictionaries, `local.json`, the network, or Keychain.
+
+The reported number is **total runtime assertions**, not a count of independent security
+behaviours. The runner also reports assertion categories for real POSIX filesystem operations,
+real `renameatx_np`, Catalog transactions, SHA-256, injected failures, publication barriers, and
+helper-only checks. Conflicting or structurally unknown owned directories are preserved in place;
+2B does not recursively delete them or introduce a general quarantine/journal framework.
 
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.

@@ -357,6 +357,116 @@ private func testInterruptedRecovery() throws {
 }
 
 @MainActor
+private func testOwnershipPolicyEligibility() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("LocalDictionary-B2-OpenResource-\(UUID().uuidString)",
+                                isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let dictionaryID = UUID().uuidString.lowercased()
+    let relativeSource = "Dictionaries/\(dictionaryID)/payload.mdx"
+    let source = root.appendingPathComponent(relativeSource)
+    try FileManager.default.createDirectory(
+        at: source.deletingLastPathComponent(), withIntermediateDirectories: true
+    )
+    let bytes = Data("synthetic-open-resource-index".utf8)
+    try bytes.write(to: source)
+    let checksum = sha256(bytes)
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let metadata = OpenResourceInstallationMetadata(
+        resourceID: "synthetic-index-resource",
+        resourceRevision: 1,
+        resourceVersion: "1.0",
+        manifestVersion: 1,
+        manifestSHA256: String(repeating: "a", count: 64),
+        verifiedKeyID: "test-key",
+        payloadSHA256: checksum,
+        payloadBytes: UInt64(bytes.count),
+        sidecarRelativePath:
+            "Dictionaries/\(dictionaryID)/resource-installation.json",
+        languages: ["en"],
+        license: OpenResourceLicenseMetadata(
+            name: "Synthetic", version: "1",
+            url: "https://example.test/license", attribution: "Synthetic"
+        ),
+        sourceProject: "https://example.test/project",
+        officialPageReference: "https://example.test/page",
+        expectedEntryCount: OpenResourceEntryCountMetadata(minimum: 1, maximum: 2),
+        installedAt: now
+    )
+    let descriptor = DictionaryDescriptor(
+        dictionaryID: dictionaryID,
+        displayName: "Synthetic Open Resource",
+        sourceKind: .openResource,
+        queryLevel: .fallback,
+        sortPosition: 1,
+        enabled: false,
+        state: .pendingIndex,
+        indexMetadata: DictionaryIndexMetadata(
+            schemaVersion: nil, entryCount: nil, indexFileSize: nil,
+            sourceFileSize: UInt64(bytes.count), sourceModifiedAt: now,
+            sourceSHA256: checksum, indexedAt: nil
+        ),
+        formatterIdentifier: DictionaryFormatterIdentifier.genericMDictV1,
+        capabilities: .unknown,
+        relativePaths: DictionaryRelativePaths(
+            dictionary: relativeSource, resources: [], index: nil
+        ),
+        createdAt: now,
+        updatedAt: now,
+        storageOwnership: .appManagedOpenResource,
+        openResourceMetadata: metadata
+    )
+    let catalog = DictionaryCatalog(
+        schemaVersion: DictionaryCatalog.currentSchemaVersion,
+        createdAt: now,
+        updatedAt: now,
+        dictionaries: [descriptor]
+    )
+    let store = DictionaryCatalogStore(
+        directoryURL: root.appendingPathComponent("Catalog")
+    )
+    try store.save(catalog)
+    let coordinator = ManagedDictionaryIndexCoordinator(
+        catalog: catalog,
+        catalogStore: store,
+        applicationSupportRootURL: root,
+        buildIndex: validBuilder(entries: 2),
+        expectedSchemaVersion: 1,
+        hooks: DictionaryIndexingHooks(
+            availableCapacity: { _ in UInt64.max }, beforePublish: {}
+        )
+    )
+    try expect(coordinator.start(dictionaryID: dictionaryID) == .started,
+               "appManagedOpenResource should enter managed indexing")
+    try await waitUntilIdle(coordinator)
+    try expect(coordinator.catalog.dictionaries.first?.state == .ready,
+               "appManagedOpenResource index should become ready")
+
+    var external = descriptor
+    external.sourceKind = .externalReference
+    external.storageOwnership = .externalReference
+    external.openResourceMetadata = nil
+    let externalCatalog = DictionaryCatalog(
+        schemaVersion: DictionaryCatalog.currentSchemaVersion,
+        createdAt: now,
+        updatedAt: now,
+        dictionaries: [external]
+    )
+    let externalCoordinator = ManagedDictionaryIndexCoordinator(
+        catalog: externalCatalog,
+        catalogStore: store,
+        applicationSupportRootURL: root,
+        buildIndex: validBuilder(entries: 2),
+        expectedSchemaVersion: 1
+    )
+    if case .unavailable = externalCoordinator.start(dictionaryID: dictionaryID) {
+        // Expected.
+    } else {
+        throw SmokeFailure.assertion("externalReference entered managed indexing")
+    }
+}
+
+@MainActor
 private func testB1B2B3Compatibility() async throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("LocalDictionary-B1-B2-B3-\(UUID().uuidString)",
@@ -441,6 +551,7 @@ struct DictionaryIndexingSmoke {
         try await testValidationFailures()
         try await testFailurePreservesExistingIndex()
         try testInterruptedRecovery()
+        try await testOwnershipPolicyEligibility()
         try await testB1B2B3Compatibility()
         print("Dictionary indexing smoke: PASS")
     }

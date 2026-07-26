@@ -92,6 +92,7 @@
 		A1000000000000000000006D /* ResourcePayloadFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */; };
 		A1000000000000000000006F /* OpenResourceInstallationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006F /* OpenResourceInstallationModels.swift */; };
 		A10000000000000000000070 /* OpenResourceInstallationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000070 /* OpenResourceInstallationCoordinator.swift */; };
+		A10000000000000000000072 /* OwnedDictionaryLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */; };
 		A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */; };
 /* End PBXBuildFile section */
 
@@ -192,6 +193,7 @@
 		B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadFileDownloader.swift; sourceTree = "<group>"; };
 		B1000000000000000000006F /* OpenResourceInstallationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenResourceInstallationModels.swift; sourceTree = "<group>"; };
 		B10000000000000000000070 /* OpenResourceInstallationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenResourceInstallationCoordinator.swift; sourceTree = "<group>"; };
+		B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnedDictionaryLifecycle.swift; sourceTree = "<group>"; };
 		B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadDownloadCoordinator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -297,6 +299,7 @@
 				B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */,
 				B1000000000000000000006F /* OpenResourceInstallationModels.swift */,
 				B10000000000000000000070 /* OpenResourceInstallationCoordinator.swift */,
+				B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */,
 				B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
@@ -517,6 +520,7 @@
 				A1000000000000000000006D /* ResourcePayloadFileDownloader.swift in Sources */,
 				A1000000000000000000006F /* OpenResourceInstallationModels.swift in Sources */,
 				A10000000000000000000070 /* OpenResourceInstallationCoordinator.swift in Sources */,
+				A10000000000000000000072 /* OwnedDictionaryLifecycle.swift in Sources */,
 				A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,

@@ -240,7 +240,7 @@ final class ManagedDictionaryIndexCoordinator {
         var changed = false
         let now = Date()
         for index in updated.dictionaries.indices
-        where updated.dictionaries[index].sourceKind == .managedLocal &&
+        where isIndexable(updated.dictionaries[index]) &&
               updated.dictionaries[index].state == .indexing {
             updated.dictionaries[index].state = .pendingIndex
             updated.dictionaries[index].relativePaths.index = nil
@@ -252,7 +252,7 @@ final class ManagedDictionaryIndexCoordinator {
         do {
             let mutation = try catalogStore.mutate { latest, _ in
                 for index in latest.dictionaries.indices where
-                    latest.dictionaries[index].sourceKind == .managedLocal &&
+                    isIndexable(latest.dictionaries[index]) &&
                     latest.dictionaries[index].state == .indexing {
                     latest.dictionaries[index].state = .pendingIndex
                     latest.dictionaries[index].relativePaths.index = nil
@@ -276,7 +276,7 @@ final class ManagedDictionaryIndexCoordinator {
     func start(dictionaryID: String) -> DictionaryIndexStartResult {
         guard currentTask == nil else { return .busy }
         guard let index = catalog.dictionaries.firstIndex(where: {
-            $0.dictionaryID == dictionaryID && $0.sourceKind == .managedLocal
+            $0.dictionaryID == dictionaryID && isIndexable($0)
         }) else { return .unavailable("找不到可建立索引的托管词典。") }
         guard catalog.dictionaries[index].state == .pendingIndex ||
               catalog.dictionaries[index].state == .failed else {
@@ -297,7 +297,7 @@ final class ManagedDictionaryIndexCoordinator {
         do {
             let mutation = try catalogStore.mutate { latest, _ in
                 guard let latestIndex = latest.dictionaries.firstIndex(where: {
-                    $0.dictionaryID == dictionaryID && $0.sourceKind == .managedLocal
+                    $0.dictionaryID == dictionaryID && isIndexable($0)
                 }), (latest.dictionaries[latestIndex].state == .pendingIndex ||
                     latest.dictionaries[latestIndex].state == .failed) else {
                     throw DictionaryIndexError.catalogWriteFailed
@@ -357,7 +357,7 @@ final class ManagedDictionaryIndexCoordinator {
             currentTask = nil
         }
         guard let index = catalog.dictionaries.firstIndex(where: {
-            $0.dictionaryID == dictionaryID && $0.sourceKind == .managedLocal
+            $0.dictionaryID == dictionaryID && isIndexable($0)
         }) else {
             if case .prepared(let prepared) = outcome {
                 let worker = self.worker
@@ -419,7 +419,7 @@ final class ManagedDictionaryIndexCoordinator {
             let target = updated.dictionaries[index]
             let mutation = try catalogStore.mutate { latest, _ in
                 guard let latestIndex = latest.dictionaries.firstIndex(where: {
-                    $0.dictionaryID == dictionaryID && $0.sourceKind == .managedLocal
+                    $0.dictionaryID == dictionaryID && isIndexable($0)
                 }) else { throw DictionaryIndexError.catalogWriteFailed }
                 latest.dictionaries[latestIndex].state = target.state
                 latest.dictionaries[latestIndex].relativePaths.index = target.relativePaths.index
@@ -481,6 +481,13 @@ final class ManagedDictionaryIndexCoordinator {
         return components.count >= 3 && components[0] == "Dictionaries" &&
             components[1] == dictionaryID && !components.contains("..") &&
             !components.contains(".")
+    }
+
+    private func isIndexable(_ descriptor: DictionaryDescriptor) -> Bool {
+        DictionaryOwnershipPolicy.policy(
+            for: descriptor.sourceKind,
+            ownership: descriptor.storageOwnership
+        )?.isIndexable == true
     }
 
     private struct IndexPublication {
