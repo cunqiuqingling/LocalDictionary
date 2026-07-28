@@ -64,10 +64,12 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-managed-dictionary-query-smoke.sh` exercises the B3 preferred-to-managed fallback policy, canonical and legacy generic formatter identifiers, B1 root-level and future `source/` managed MDX layouts, path/symlink escape rejection, stable Catalog ordering, state filtering, isolated failures, source SHA-256 and read-only SQLite validation, and safe managed dictionary snapshots for Markdown. It uses generated placeholder bytes, a temporary SQLite metadata table, and a mock managed runtime; it never opens a commercial MDX or accesses the network.
 
-`run-managed-dictionary-lifecycle-coordination-smoke.sh` covers D1b-3B-2C-R1 with synthetic
-Catalogs and runtimes: leaseID/generation accounting across pending identity transitions,
-descriptor deletion drain/retirement, permit-first index publication, removal early-return retry,
-FIFO and cancellation/shutdown waiter cleanup, current-Catalog result rechecks, and OpenResource
+`run-managed-dictionary-lifecycle-coordination-smoke.sh` covers D1b-3B-2C-R2 with synthetic
+Catalogs and runtimes: leaseID/generation accounting, latest-wins pending transitions (including
+delete and disable), permit-first index planning/publication, removal early-return retry, FIFO
+queue-head and late-cancellation cleanup, no-await final Catalog rechecks, and generation-scoped
+runtime eviction after the final old lease. It compiles its lifecycle-only validation hook only in
+the smoke binaries; application Release builds do not define that test macro. OpenResource
 final publication while the shared keyed install permit is held. It uses deterministic actor
 barriers and isolated temporary roots only. These process-local leases do not provide the fd-bound
 SQLite identity guarantee deferred to D1b-3B-3; production manifest endpoints and payload hosts
@@ -252,8 +254,9 @@ helper-only checks. Conflicting or structurally unknown owned directories are pr
 `Tests/run-managed-dictionary-lifecycle-coordination-smoke.sh` uses only synthetic Catalog
 descriptors and runtimes. It runs Debug ASan/UBSan and optimized Release with the same lease
 error contract. The coordinator is process-local and keyed by dictionary UUID: it verifies
-multiple leases, deterministic drain before an exclusive operation, generation rejection,
-retirement, throw/cancellation release, a real isolated `DictionaryCatalogStore` mutation, and
+multiple leases, latest-wins A→B→C/delete/disable transitions, deterministic drain before an
+exclusive operation, generation rejection, retirement, throw/cancellation release, final Catalog
+validation reentrancy, generation-scoped runtime eviction, a real isolated `DictionaryCatalogStore` mutation, and
 the priority chain `preferred → managedLocal → openResource → offline miss`. Its category output
 separates actor state, query-runtime service, Catalog transaction, deterministic barriers,
 cancellation, and ordering/eligibility assertions; it is not a count of independent product

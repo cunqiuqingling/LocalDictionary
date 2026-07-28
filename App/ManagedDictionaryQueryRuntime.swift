@@ -45,7 +45,15 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
 
     func reset() { runtimes.removeAll() }
 
-    func remove(dictionaryID: String) {
+    /// Legacy broad removal is retained only for callers that have already drained every
+    /// generation, such as explicit lifecycle invalidation.
+    func remove(dictionaryID: String) { removeAll(dictionaryID: dictionaryID) }
+
+    func remove(dictionaryID: String, generation: UInt64) {
+        runtimes[RuntimeKey(dictionaryID: dictionaryID, generation: generation)] = nil
+    }
+
+    func removeAll(dictionaryID: String) {
         runtimes = runtimes.filter { $0.key.dictionaryID != dictionaryID }
     }
 

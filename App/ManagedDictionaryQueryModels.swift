@@ -89,7 +89,22 @@ protocol ManagedDictionaryQueryRuntime: Sendable {
                 generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome
     func remove(dictionaryID: String) async
+    func remove(dictionaryID: String, generation: UInt64) async
+    func removeAll(dictionaryID: String) async
     func reset() async
+}
+
+extension ManagedDictionaryQueryRuntime {
+    /// Compatibility defaults keep synthetic runtimes source-compatible. The live runtime
+    /// overrides both methods with generation-aware behaviour; production stale-result paths use
+    /// only the scoped operation below.
+    func remove(dictionaryID: String, generation: UInt64) async {
+        await remove(dictionaryID: dictionaryID)
+    }
+
+    func removeAll(dictionaryID: String) async {
+        await remove(dictionaryID: dictionaryID)
+    }
 }
 
 actor ManagedDictionaryQueryService {
@@ -120,7 +135,7 @@ actor ManagedDictionaryQueryService {
 
     /// Called only after an exclusive lifecycle permit has drained existing query leases.
     func invalidateRuntime(dictionaryID: String) async {
-        await runtime.remove(dictionaryID: dictionaryID)
+        await runtime.removeAll(dictionaryID: dictionaryID)
     }
 
     func commitCatalog(_ updatedCatalog: DictionaryCatalog) async {
@@ -167,20 +182,24 @@ actor ManagedDictionaryQueryService {
             guard let generation = await lifecycleCoordinator.generation(for: descriptor.dictionaryID)
             else { continue }
             do {
-                let outcome = try await lifecycleCoordinator.withQueryLease(
-                    for: descriptor.dictionaryID,
-                    expectedGeneration: generation
-                ) { [runtime] lease in
-                    await runtime.lookup(descriptor: descriptor,
-                                         generation: lease.generation,
-                                         query: query)
-                }
-                guard await isStillEligible(dictionaryID: descriptor.dictionaryID,
-                                            expectedGeneration: generation) else {
-                    // withQueryLease has released the old generation before this point.  Evict
-                    // only after that safe boundary, never while Catalog replacement is merely
-                    // requesting a drain.
-                    await runtime.remove(dictionaryID: descriptor.dictionaryID)
+                let lease = try await lifecycleCoordinator.acquireQueryLease(
+                    for: descriptor.dictionaryID, expectedGeneration: generation
+                )
+                let outcome = await runtime.lookup(descriptor: descriptor,
+                                                   generation: lease.generation,
+                                                   query: query)
+                let lifecycleSnapshot = await lifecycleCoordinator.queryValidationSnapshot(
+                    for: descriptor.dictionaryID
+                )
+                let eligible = isStillEligible(dictionaryID: descriptor.dictionaryID,
+                                                expectedGeneration: generation,
+                                                lifecycleSnapshot: lifecycleSnapshot)
+                let release = await lifecycleCoordinator.release(lease)
+                guard eligible else {
+                    if release?.releasedLastLeaseForGeneration == true {
+                        await runtime.remove(dictionaryID: descriptor.dictionaryID,
+                                             generation: lease.generation)
+                    }
                     continue
                 }
                 switch outcome {
@@ -199,13 +218,19 @@ actor ManagedDictionaryQueryService {
         return (hits, unavailable)
     }
 
-    private func isStillEligible(dictionaryID: String, expectedGeneration: UInt64) async -> Bool {
+    /// Must be called only after awaiting `queryValidationSnapshot`. It deliberately performs no
+    /// further await, so the Catalog read and generation comparison are one query-actor turn.
+    private func isStillEligible(dictionaryID: String,
+                                 expectedGeneration: UInt64,
+                                 lifecycleSnapshot: ManagedDictionaryLifecycleSnapshot?) -> Bool {
         guard let descriptor = catalog.dictionaries.first(where: { $0.dictionaryID == dictionaryID }),
               Self.isManagedLocalEligible(descriptor) || Self.isOpenResourceEligible(descriptor),
-              let currentGeneration = await lifecycleCoordinator.generation(for: dictionaryID) else {
+              let lifecycleSnapshot,
+              lifecycleSnapshot.allowsCurrentGenerationResult,
+              lifecycleSnapshot.generation == expectedGeneration else {
             return false
         }
-        return currentGeneration == expectedGeneration
+        return true
     }
 
     private static func isManagedLocalEligible(_ descriptor: DictionaryDescriptor) -> Bool {

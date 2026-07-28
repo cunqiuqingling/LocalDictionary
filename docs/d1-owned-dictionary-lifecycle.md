@@ -93,5 +93,14 @@ suspended. A successful rollback publishes a new available generation; rollback 
 suspended; deferred cleanup remains retired. Indexing uses the same exclusive permit for its whole
 operation as a safety-first first version, so a ready runtime is never replaced while in use.
 
+D1b-3B-2C-R2 makes an in-process transition latest-wins while old leases drain: a newer Catalog
+identity, deletion, or disabled descriptor replaces the unpublished target without clearing old
+leases or queued writers. Index plans are created only after their keyed exclusive permit and from
+the latest durable Catalog descriptor. A ready but disabled descriptor publishes a suspended
+lifecycle disposition, not an available runtime. Query results obtain a lifecycle snapshot first,
+then synchronously validate the current Catalog; stale generation caches are evicted only by the
+matching `(dictionaryID, generation)` after that generation's final lease ends. Queue-head and late
+cancellation remain process-local coordination fixtures.
+
 These leases coordinate only this App process. They are not an fd-bound SQLite identity guarantee
 across processes; that boundary remains D1b-3B-3.

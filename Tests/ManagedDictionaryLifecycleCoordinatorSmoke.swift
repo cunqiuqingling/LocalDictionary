@@ -10,6 +10,7 @@ private struct Smoke {
     var barriers = 0
     var cancellation = 0
     var ordering = 0
+    var runtimeEviction = 0
 
     mutating func check(_ message: String, category: WritableKeyPath<Smoke, Int>,
                         _ condition: @autoclosure () -> Bool) throws {
@@ -83,6 +84,51 @@ private actor BlockingRuntime: ManagedDictionaryQueryRuntime {
     func reset() { resetCount += 1 }
 
     func snapshot() -> (resetCount: Int, removeCount: Int) { (resetCount, removeCount) }
+}
+
+private actor GenerationRuntime: ManagedDictionaryQueryRuntime {
+    let firstEntered = Gate()
+    let secondEntered = Gate()
+    let releaseFirst = Gate()
+    let releaseSecond = Gate()
+    let scopedRemovalEntered = Gate()
+    let releaseScopedRemoval = Gate()
+    private var oldLookupCount = 0
+    private var cachedGenerations: Set<UInt64> = []
+    private var scopedRemovals: [UInt64] = []
+    private var broadRemovalCount = 0
+
+    func lookup(descriptor: DictionaryDescriptor, generation: UInt64,
+                query: String) async -> ManagedDictionaryRuntimeOutcome {
+        cachedGenerations.insert(generation)
+        if generation == 1 {
+            oldLookupCount += 1
+            if oldLookupCount == 1 {
+                await firstEntered.open()
+                await releaseFirst.wait()
+            } else {
+                await secondEntered.open()
+                await releaseSecond.wait()
+            }
+        }
+        return .hit(hit(descriptor.dictionaryID))
+    }
+
+    func remove(dictionaryID: String) { broadRemovalCount += 1 }
+
+    func remove(dictionaryID: String, generation: UInt64) async {
+        scopedRemovals.append(generation)
+        await scopedRemovalEntered.open()
+        await releaseScopedRemoval.wait()
+        cachedGenerations.remove(generation)
+    }
+
+    func removeAll(dictionaryID: String) { broadRemovalCount += 1 }
+    func reset() {}
+
+    func snapshot() -> (cached: Set<UInt64>, scoped: [UInt64], broad: Int) {
+        (cachedGenerations, scopedRemovals, broadRemovalCount)
+    }
 }
 
 private func descriptor(_ id: String, sourceKind: DictionarySourceKind = .managedLocal,
@@ -291,6 +337,65 @@ private func testIdentityTransitions(smoke: inout Smoke) async throws {
                     afterDeletion?.activeLeaseCount == 0)
 }
 
+private func testLatestWinsPendingTransitions(smoke: inout Smoke) async throws {
+    let item = descriptor("00000000-0000-0000-0000-000000000108")
+    let coordinator = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
+    let generation = try (await coordinator.generation(for: item.dictionaryID)).unwrap("generation")
+    let lease = try await coordinator.acquireQueryLease(for: item.dictionaryID)
+    var identityB = item
+    identityB.indexMetadata.indexFileSize = 2
+    identityB.updatedAt = item.updatedAt.addingTimeInterval(1)
+    var identityC = item
+    identityC.indexMetadata.indexFileSize = 3
+    identityC.updatedAt = item.updatedAt.addingTimeInterval(2)
+    await coordinator.initialize(reconciledCatalog: catalog([identityB]))
+    await coordinator.initialize(reconciledCatalog: catalog([identityC]))
+    let beforeRelease = await coordinator.snapshot(for: item.dictionaryID)
+    try smoke.check("A to B to C remains draining until old lease releases", category: \.barriers,
+                    beforeRelease?.generation == generation)
+    await coordinator.release(lease)
+    let afterLatestRelease = await coordinator.generation(for: item.dictionaryID)
+    try smoke.check("latest pending identity publishes exactly one generation", category: \.actorState,
+                    afterLatestRelease == generation + 1)
+    await coordinator.initialize(reconciledCatalog: catalog([identityC]))
+    let afterRepeatedC = await coordinator.generation(for: item.dictionaryID)
+    try smoke.check("published C does not trigger a second transition", category: \.actorState,
+                    afterRepeatedC == generation + 1)
+
+    let deleted = descriptor("00000000-0000-0000-0000-000000000109")
+    let deletionCoordinator = ManagedDictionaryLifecycleCoordinator(catalog: catalog([deleted]))
+    let deletionLease = try await deletionCoordinator.acquireQueryLease(for: deleted.dictionaryID)
+    var deletionB = deleted
+    deletionB.indexMetadata.indexFileSize = 2
+    await deletionCoordinator.initialize(reconciledCatalog: catalog([deletionB]))
+    await deletionCoordinator.initialize(reconciledCatalog: catalog([]))
+    await deletionCoordinator.release(deletionLease)
+    try await expectError(.dictionaryRetired) {
+        _ = try await deletionCoordinator.acquireQueryLease(for: deleted.dictionaryID)
+    }
+    let deletionSnapshot = await deletionCoordinator.snapshot(for: deleted.dictionaryID)
+    try smoke.check("deletion supersedes an older pending identity", category: \.ordering,
+                    deletionSnapshot?.phase == .retired)
+
+    let disabled = descriptor("00000000-0000-0000-0000-000000000110")
+    let disabledCoordinator = ManagedDictionaryLifecycleCoordinator(catalog: catalog([disabled]))
+    let disabledLease = try await disabledCoordinator.acquireQueryLease(for: disabled.dictionaryID)
+    var disabledB = disabled
+    disabledB.indexMetadata.indexFileSize = 2
+    var disabledC = disabled
+    disabledC.enabled = false
+    disabledC.updatedAt = disabled.updatedAt.addingTimeInterval(2)
+    await disabledCoordinator.initialize(reconciledCatalog: catalog([disabledB]))
+    await disabledCoordinator.initialize(reconciledCatalog: catalog([disabledC]))
+    await disabledCoordinator.release(disabledLease)
+    try await expectError(.dictionaryRuntimeUnavailable) {
+        _ = try await disabledCoordinator.acquireQueryLease(for: disabled.dictionaryID)
+    }
+    let disabledSnapshot = await disabledCoordinator.snapshot(for: disabled.dictionaryID)
+    try smoke.check("disabled descriptor supersedes pending identity with suspension", category: \.ordering,
+                    disabledSnapshot?.phase == .suspended)
+}
+
 private func testFIFOAndShutdown(smoke: inout Smoke) async throws {
     let item = descriptor("00000000-0000-0000-0000-000000000105")
     let coordinator = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
@@ -314,6 +419,50 @@ private func testFIFOAndShutdown(smoke: inout Smoke) async throws {
     try smoke.check("FIFO advances the next exclusive waiter", category: \.barriers,
                     thirdPermit.operation == .reconcile)
     await coordinator.complete(thirdPermit, disposition: .available(incrementGeneration: false))
+
+    let cancellationCoordinator = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
+    let heldPermit = try await cancellationCoordinator.acquireExclusiveOperation(
+        for: item.dictionaryID, operation: .index
+    )
+    let cancelledHead = Task {
+        try await cancellationCoordinator.acquireExclusiveOperation(for: item.dictionaryID, operation: .remove)
+    }
+    _ = await waitForQueuedOperations(1, coordinator: cancellationCoordinator,
+                                      dictionaryID: item.dictionaryID)
+    let survivingWaiter = Task {
+        try await cancellationCoordinator.acquireExclusiveOperation(for: item.dictionaryID, operation: .reconcile)
+    }
+    let cancellationQueueReady = await waitForQueuedOperations(2, coordinator: cancellationCoordinator,
+                                                                dictionaryID: item.dictionaryID)
+    try smoke.check("cancel queue-head fixture has B then C queued", category: \.cancellation,
+                    cancellationQueueReady)
+    cancelledHead.cancel()
+    let cancelledHeadResult = await cancelledHead.result
+    if case .failure(let error as ManagedDictionaryLifecycleError) = cancelledHeadResult {
+        try smoke.check("cancelled queue head returns fixed cancellation error", category: \.cancellation,
+                        error == .lifecycleOperationCancelled)
+    } else {
+        throw SmokeFailure.failed("cancelled queue head unexpectedly acquired a permit")
+    }
+    await cancellationCoordinator.complete(heldPermit, disposition: .available(incrementGeneration: false))
+    let survivingPermit = try await survivingWaiter.value
+    try smoke.check("cancelling B advances FIFO writer C", category: \.cancellation,
+                    survivingPermit.operation == .reconcile)
+    await cancellationCoordinator.complete(survivingPermit, disposition: .available(incrementGeneration: false))
+
+    let lateCancellationCoordinator = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
+    let completed = Task {
+        try await lateCancellationCoordinator.acquireExclusiveOperation(for: item.dictionaryID, operation: .index)
+    }
+    let completedPermit = try await completed.value
+    await lateCancellationCoordinator.complete(completedPermit, disposition: .available(incrementGeneration: false))
+    completed.cancel()
+    let followupPermit = try await lateCancellationCoordinator.acquireExclusiveOperation(
+        for: item.dictionaryID, operation: .remove
+    )
+    try smoke.check("late cancellation does not poison the next exclusive operation", category: \.cancellation,
+                    followupPermit.operation == .remove)
+    await lateCancellationCoordinator.complete(followupPermit, disposition: .available(incrementGeneration: false))
 
     let held = try await coordinator.acquireQueryLease(for: item.dictionaryID)
     let queued = Task { try await coordinator.acquireExclusiveOperation(for: item.dictionaryID, operation: .remove) }
@@ -375,6 +524,95 @@ private func testCurrentCatalogRecheck(smoke: inout Smoke) async throws {
     let afterDeletedCompletion = await deletedRuntime.snapshot()
     try smoke.check("deleted runtime closes after its lease ends", category: \.runtime,
                     afterDeletedCompletion.removeCount == 1)
+}
+
+private func testFinalValidationReentrancy(smoke: inout Smoke) async throws {
+    let item = descriptor("00000000-0000-0000-0000-000000000111")
+    let runtime = BlockingRuntime()
+    let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
+    let service = ManagedDictionaryQueryService(catalog: catalog([item]), runtime: runtime,
+                                                lifecycleCoordinator: lifecycle)
+    let validationEntered = Gate()
+    let continueValidation = Gate()
+    await lifecycle.setBeforeQueryValidationSnapshotForTesting {
+        await validationEntered.open()
+        await continueValidation.wait()
+    }
+    let query = Task { await service.lookup("safe") }
+    await runtime.entered.wait()
+    await runtime.continueLookup.open()
+    await validationEntered.wait()
+    var disabled = item
+    disabled.enabled = false
+    disabled.updatedAt = item.updatedAt.addingTimeInterval(1)
+    await service.replaceCatalog(catalog([disabled]))
+    await continueValidation.open()
+    let disabledBatch = await query.value
+    let disabledSnapshot = await lifecycle.snapshot(for: item.dictionaryID)
+    try smoke.check("final validation reads disabled Catalog after generation await", category: \.ordering,
+                    disabledBatch.hits.isEmpty)
+    try smoke.check("reentrant disabled validation releases lease", category: \.runtime,
+                    disabledSnapshot?.activeLeaseCount == 0)
+
+    let deleted = descriptor("00000000-0000-0000-0000-000000000112")
+    let deletedRuntime = BlockingRuntime()
+    let deletedLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([deleted]))
+    let deletedService = ManagedDictionaryQueryService(catalog: catalog([deleted]), runtime: deletedRuntime,
+                                                       lifecycleCoordinator: deletedLifecycle)
+    let deletedEntered = Gate()
+    let continueDeleted = Gate()
+    await deletedLifecycle.setBeforeQueryValidationSnapshotForTesting {
+        await deletedEntered.open()
+        await continueDeleted.wait()
+    }
+    let deletedQuery = Task { await deletedService.lookup("safe") }
+    await deletedRuntime.entered.wait()
+    await deletedRuntime.continueLookup.open()
+    await deletedEntered.wait()
+    await deletedService.replaceCatalog(catalog([]))
+    await continueDeleted.open()
+    let deletedBatch = await deletedQuery.value
+    let deletedSnapshot = await deletedLifecycle.snapshot(for: deleted.dictionaryID)
+    try smoke.check("final validation reads deleted Catalog after generation await", category: \.ordering,
+                    deletedBatch.hits.isEmpty)
+    try smoke.check("reentrant deletion validation releases lease", category: \.runtime,
+                    deletedSnapshot?.activeLeaseCount == 0)
+}
+
+private func testGenerationScopedRuntimeEviction(smoke: inout Smoke) async throws {
+    let item = descriptor("00000000-0000-0000-0000-000000000113")
+    let runtime = GenerationRuntime()
+    let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
+    let service = ManagedDictionaryQueryService(catalog: catalog([item]), runtime: runtime,
+                                                lifecycleCoordinator: lifecycle)
+    let first = Task { await service.lookup("one") }
+    let second = Task { await service.lookup("two") }
+    await runtime.firstEntered.wait()
+    await runtime.secondEntered.wait()
+    var replacement = item
+    replacement.indexMetadata.indexFileSize = 2
+    replacement.updatedAt = item.updatedAt.addingTimeInterval(1)
+    await service.replaceCatalog(catalog([replacement]))
+    await runtime.releaseFirst.open()
+    _ = await first.value
+    let afterFirst = await runtime.snapshot()
+    try smoke.check("first old lease does not evict generation N", category: \.runtimeEviction,
+                    afterFirst.cached.contains(1) && afterFirst.scoped.isEmpty)
+    await runtime.releaseSecond.open()
+    await runtime.scopedRemovalEntered.wait()
+    let nextGeneration = await lifecycle.generation(for: item.dictionaryID)
+    try smoke.check("last old lease publishes generation N plus one", category: \.runtimeEviction,
+                    nextGeneration == 2)
+    let newBatch = await service.lookup("three")
+    try smoke.check("generation N plus one query remains usable during N eviction", category: \.runtimeEviction,
+                    newBatch.hits.map(\.dictionaryID) == [item.dictionaryID])
+    await runtime.releaseScopedRemoval.open()
+    _ = await second.value
+    let final = await runtime.snapshot()
+    try smoke.check("generation scoped eviction closes only N exactly once", category: \.runtimeEviction,
+                    final.scoped == [1] && !final.cached.contains(1) && final.cached.contains(2))
+    try smoke.check("stale query never calls broad runtime removal", category: \.runtimeEviction,
+                    final.broad == 0)
 }
 
 private func testOpenResourceFallback(smoke: inout Smoke) async throws {
@@ -494,11 +732,14 @@ struct ManagedDictionaryLifecycleCoordinatorSmoke {
         try await testLeaseAndDrain(smoke: &smoke)
         try await testStructuredThrowAndCancellation(smoke: &smoke)
         try await testIdentityTransitions(smoke: &smoke)
+        try await testLatestWinsPendingTransitions(smoke: &smoke)
         try await testFIFOAndShutdown(smoke: &smoke)
         try await testCurrentCatalogRecheck(smoke: &smoke)
+        try await testFinalValidationReentrancy(smoke: &smoke)
+        try await testGenerationScopedRuntimeEviction(smoke: &smoke)
         try await testOpenResourceFallback(smoke: &smoke)
         try await testCatalogTransaction(smoke: &smoke)
         print("Managed lifecycle/query coordination smoke: PASS (\(smoke.assertions) total runtime assertions)")
-        print("categories: actor-state=\(smoke.actorState) query-runtime=\(smoke.runtime) catalog=\(smoke.catalog) POSIX=0 barrier=\(smoke.barriers) cancellation=\(smoke.cancellation) ordering=\(smoke.ordering) helper-only=0")
+        print("categories: actor-state=\(smoke.actorState) query-runtime=\(smoke.runtime) catalog=\(smoke.catalog) runtime-eviction=\(smoke.runtimeEviction) POSIX=0 barrier=\(smoke.barriers) cancellation=\(smoke.cancellation) ordering=\(smoke.ordering) helper-only=0")
     }
 }

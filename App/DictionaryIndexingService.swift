@@ -296,15 +296,6 @@ final class ManagedDictionaryIndexCoordinator {
             return .unavailable("当前词典状态不允许建立索引。")
         }
 
-        let plan: DictionaryIndexPlan
-        do {
-            plan = try makePlan(for: catalog.dictionaries[index])
-        } catch let error as DictionaryIndexError {
-            return .unavailable(error.localizedDescription)
-        } catch {
-            return .unavailable("无法创建安全的索引计划。")
-        }
-
         failureMessages[dictionaryID] = nil
         activity = DictionaryIndexActivity(dictionaryID: dictionaryID, stage: .buildingSQLite)
 
@@ -332,9 +323,9 @@ final class ManagedDictionaryIndexCoordinator {
                 )
                 return
             }
-            guard self.markIndexing(dictionaryID: dictionaryID) else {
+            guard let plan = self.markIndexingAndMakePlan(dictionaryID: dictionaryID) else {
                 await lifecycleCoordinator.complete(
-                    permit, disposition: .available(incrementGeneration: false)
+                    permit, disposition: .suspended(incrementGeneration: false)
                 )
                 self.activity = nil
                 self.cancellationToken = nil
@@ -351,30 +342,36 @@ final class ManagedDictionaryIndexCoordinator {
         return .started
     }
 
-    /// The lifecycle permit is acquired before this short transaction.  The Catalog observer may
-    /// therefore refresh the query service without invalidating active leases or this permit.
-    private func markIndexing(dictionaryID: String) -> Bool {
+    /// The lifecycle permit is acquired before this short transaction. The plan is derived from
+    /// the same latest durable descriptor that is atomically moved to `.indexing`, so a plan
+    /// captured while waiting for an old lease can never build a newly replaced descriptor.
+    private func markIndexingAndMakePlan(dictionaryID: String) -> DictionaryIndexPlan? {
         let now = Date()
         do {
-            let mutation = try catalogStore.mutate { latest, _ in
+            let mutation = try catalogStore.mutate { latest, _ -> DictionaryIndexPlan in
                 guard let index = latest.dictionaries.firstIndex(where: {
                     $0.dictionaryID == dictionaryID && isIndexable($0)
                 }), (latest.dictionaries[index].state == .pendingIndex ||
                     latest.dictionaries[index].state == .failed) else {
                     throw DictionaryIndexError.catalogWriteFailed
                 }
+                let plan = try makePlan(for: latest.dictionaries[index])
                 latest.dictionaries[index].state = .indexing
                 latest.dictionaries[index].relativePaths.index = nil
                 clearPublishedMetadata(&latest.dictionaries[index])
                 latest.dictionaries[index].updatedAt = now
                 latest.updatedAt = now
+                return plan
             }
             catalog = mutation.catalog
             onCatalogChanged?(mutation.catalog)
-            return true
+            return mutation.value
+        } catch let error as DictionaryIndexError {
+            failureMessages[dictionaryID] = error.localizedDescription
+            return nil
         } catch {
             failureMessages[dictionaryID] = DictionaryIndexError.catalogWriteFailed.localizedDescription
-            return false
+            return nil
         }
     }
 
@@ -458,7 +455,7 @@ final class ManagedDictionaryIndexCoordinator {
         updated.updatedAt = now
         do {
             let target = updated.dictionaries[index]
-            let mutation = try catalogStore.mutate { latest, _ in
+            let mutation = try catalogStore.mutate { latest, _ -> Bool in
                 guard let latestIndex = latest.dictionaries.firstIndex(where: {
                     $0.dictionaryID == dictionaryID && isIndexable($0)
                 }) else { throw DictionaryIndexError.catalogWriteFailed }
@@ -467,11 +464,12 @@ final class ManagedDictionaryIndexCoordinator {
                 latest.dictionaries[latestIndex].indexMetadata = target.indexMetadata
                 latest.dictionaries[latestIndex].updatedAt = now
                 latest.updatedAt = now
+                return latest.dictionaries[latestIndex].enabled && target.state == .ready
             }
             if let publication { commit(publication) }
             catalog = mutation.catalog
             onCatalogChanged?(mutation.catalog)
-            return target.state == .ready
+            return mutation.value
                 ? .available(incrementGeneration: true)
                 : .suspended(incrementGeneration: true)
         } catch {

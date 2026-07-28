@@ -315,6 +315,118 @@ private func testPermitBeforeIndexingCatalogMutation() async throws {
 }
 
 @MainActor
+private func testPlanUsesLatestDescriptorAfterPermit() async throws {
+    let fixture = try Fixture(name: "latest-plan")
+    defer { fixture.cleanup() }
+    var active = fixture.descriptor
+    active.state = .ready
+    let activeCatalog = DictionaryCatalog(schemaVersion: DictionaryCatalog.currentSchemaVersion,
+                                         createdAt: active.createdAt, updatedAt: active.updatedAt,
+                                         dictionaries: [active])
+    let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: activeCatalog)
+    let observedSource = Mutex<URL?>(nil)
+    let builder: DictionaryIndexBuildFunction = { source, index, token in
+        observedSource.withLock { $0 = source }
+        return validBuilder(entries: 2)(source, index, token)
+    }
+    let coordinator = fixture.coordinator(builder: builder, lifecycleCoordinator: lifecycle)
+    let activeLease = try await lifecycle.acquireQueryLease(for: fixture.dictionaryID)
+    try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
+               "index should queue behind the active lease")
+    while await lifecycle.snapshot(for: fixture.dictionaryID)?.phase != .draining {
+        await Task.yield()
+    }
+
+    let replacementURL = fixture.root.appendingPathComponent(
+        "Dictionaries/\(fixture.dictionaryID)/source/replacement.mdx"
+    )
+    let replacementData = Data("replacement-index-source".utf8)
+    try replacementData.write(to: replacementURL)
+    var replacement = fixture.descriptor
+    replacement.relativePaths.dictionary =
+        "Dictionaries/\(fixture.dictionaryID)/source/replacement.mdx"
+    replacement.indexMetadata.sourceFileSize = UInt64(replacementData.count)
+    replacement.indexMetadata.sourceSHA256 = sha256(replacementData)
+    replacement.updatedAt = replacement.updatedAt.addingTimeInterval(1)
+    let replacementCatalog = DictionaryCatalog(
+        schemaVersion: DictionaryCatalog.currentSchemaVersion,
+        createdAt: replacement.createdAt, updatedAt: replacement.updatedAt,
+        dictionaries: [replacement]
+    )
+    try fixture.catalogStore.save(replacementCatalog)
+    coordinator.synchronize(catalog: replacementCatalog)
+    await lifecycle.initialize(reconciledCatalog: replacementCatalog)
+    await lifecycle.release(activeLease)
+    try await waitUntilIdle(coordinator)
+    try expect(observedSource.withLock { $0 }?.standardizedFileURL == replacementURL.standardizedFileURL,
+               "index plan must be created from descriptor B after permit acquisition")
+    try expect(coordinator.catalog.dictionaries.first?.indexMetadata.sourceSHA256 == sha256(replacementData),
+               "ready Catalog must retain descriptor B source identity")
+
+    let deletion = try Fixture(name: "deleted-plan")
+    defer { deletion.cleanup() }
+    var deletionActive = deletion.descriptor
+    deletionActive.state = .ready
+    let deletionLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: DictionaryCatalog(
+        schemaVersion: DictionaryCatalog.currentSchemaVersion,
+        createdAt: deletionActive.createdAt, updatedAt: deletionActive.updatedAt,
+        dictionaries: [deletionActive]
+    ))
+    let buildCount = Mutex(0)
+    let deletionCoordinator = deletion.coordinator(builder: { source, index, token in
+        buildCount.withLock { $0 += 1 }
+        return validBuilder()(source, index, token)
+    }, lifecycleCoordinator: deletionLifecycle)
+    let deletionLease = try await deletionLifecycle.acquireQueryLease(for: deletion.dictionaryID)
+    try expect(deletionCoordinator.start(dictionaryID: deletion.dictionaryID) == .started,
+               "deleted-plan index should queue")
+    while await deletionLifecycle.snapshot(for: deletion.dictionaryID)?.phase != .draining {
+        await Task.yield()
+    }
+    let empty = DictionaryCatalog.empty(now: Date(timeIntervalSince1970: 1_700_000_001))
+    try deletion.catalogStore.save(empty)
+    deletionCoordinator.synchronize(catalog: empty)
+    await deletionLifecycle.initialize(reconciledCatalog: empty)
+    await deletionLifecycle.release(deletionLease)
+    try await waitUntilIdle(deletionCoordinator)
+    try expect(buildCount.withLock { $0 } == 0,
+               "deleted descriptor must not build or publish an index after permit wait")
+    try expect(deletionCoordinator.catalog.dictionaries.isEmpty,
+               "deleted descriptor must not be moved to indexing")
+}
+
+@MainActor
+private func testDisabledReadyPublishesSuspended() async throws {
+    let fixture = try Fixture(name: "disabled-ready")
+    defer { fixture.cleanup() }
+    var disabled = fixture.descriptor
+    disabled.enabled = false
+    let disabledCatalog = DictionaryCatalog(schemaVersion: DictionaryCatalog.currentSchemaVersion,
+                                            createdAt: disabled.createdAt,
+                                            updatedAt: disabled.updatedAt,
+                                            dictionaries: [disabled])
+    try fixture.catalogStore.save(disabledCatalog)
+    let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: disabledCatalog)
+    let coordinator = ManagedDictionaryIndexCoordinator(
+        catalog: disabledCatalog,
+        catalogStore: fixture.catalogStore,
+        applicationSupportRootURL: fixture.root,
+        buildIndex: validBuilder(entries: 2),
+        expectedSchemaVersion: 1,
+        hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max }, beforePublish: {}),
+        lifecycleCoordinator: lifecycle
+    )
+    try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
+               "disabled descriptor may build an index without becoming query available")
+    try await waitUntilIdle(coordinator)
+    try expect(coordinator.catalog.dictionaries.first?.state == .ready,
+               "disabled descriptor retains ready index state")
+    let disabledSnapshot = await lifecycle.snapshot(for: fixture.dictionaryID)
+    try expect(disabledSnapshot?.phase == .suspended,
+               "disabled ready descriptor must publish suspended lifecycle disposition")
+}
+
+@MainActor
 private func testValidationFailures() async throws {
     let integrity = try Fixture(name: "integrity")
     defer { integrity.cleanup() }
@@ -582,6 +694,8 @@ struct DictionaryIndexingSmoke {
         try await testFailureAndRetry()
         try await testCancellationAndConcurrency()
         try await testPermitBeforeIndexingCatalogMutation()
+        try await testPlanUsesLatestDescriptorAfterPermit()
+        try await testDisabledReadyPublishesSuspended()
         try await testValidationFailures()
         try await testFailurePreservesExistingIndex()
         try testInterruptedRecovery()
