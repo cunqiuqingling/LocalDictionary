@@ -206,7 +206,8 @@ private func testRoutingAndStateFiltering() async throws {
 
     await service.replaceCatalog(catalog([second]))
     let replacedSnapshot = await runtime.snapshot()
-    try expect(replacedSnapshot.1 == 1, "catalog replacement should reset runtimes")
+    try expect(replacedSnapshot.1 == 0,
+               "catalog replacement must not close a runtime before its lifecycle drain")
 }
 
 private func testRuntimeValidationAndReadOnlySQLite() throws {

@@ -1,5 +1,6 @@
 import CryptoKit
 import Darwin
+import Dispatch
 import Foundation
 
 private struct SmokeFailure: Error { let message: String }
@@ -67,6 +68,7 @@ struct OpenResourceInstallationSmoke {
         try smoke.check("open descriptor source", descriptor.sourceKind == .openResource)
         try smoke.check("open ownership", descriptor.storageOwnership == .appManagedOpenResource)
         try smoke.check("fallback pending index", descriptor.queryLevel == .fallback && descriptor.state == .pendingIndex)
+        try smoke.check("new open resource starts disabled", !descriptor.enabled)
         try smoke.check("catalog sidecar relative", descriptor.openResourceMetadata?.sidecarRelativePath == "Dictionaries/\(identity.dictionaryID)/resource-installation.json")
         try smoke.check("final payload", FileManager.default.fileExists(atPath: dictionaries.appendingPathComponent(identity.dictionaryID).appendingPathComponent("payload.mdx").path))
         try smoke.check("final sidecar", FileManager.default.fileExists(atPath: dictionaries.appendingPathComponent(identity.dictionaryID).appendingPathComponent("resource-installation.json").path))
@@ -85,6 +87,8 @@ struct OpenResourceInstallationSmoke {
         catch DictionaryCatalogValidationError.invalidStorageOwnership { smoke.assertions += 1 }
         try await testSourceNameSubstitution(root: root, smoke: &smoke)
         try await testPayloadInPlaceTamper(root: root, smoke: &smoke)
+        try await testFinalPublicationUsesExclusivePermit(root: root, smoke: &smoke)
+        try await testCancelledPermitDoesNotPublish(root: root, smoke: &smoke)
         print("Open resource installation smoke passed (\(smoke.assertions) total runtime assertions)")
     }
 
@@ -93,7 +97,32 @@ struct OpenResourceInstallationSmoke {
         let result: VerifiedPayloadStagingResult
         let catalog: DictionaryCatalogStore
         let coordinator: OpenResourceInstallationCoordinator
+        let lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator
         let dictionaries: URL
+    }
+
+    /// Test-only deterministic bridge from the synchronous rename hook to async test code.
+    private final class PermitInterlock: @unchecked Sendable {
+        private let entered = DispatchSemaphore(value: 0)
+        private let released = DispatchSemaphore(value: 0)
+
+        func pauseAtRename() throws {
+            entered.signal()
+            guard released.wait(timeout: .now() + 2) == .success else {
+                throw SmokeFailure(message: "install permit interlock timed out")
+            }
+        }
+
+        func waitForRename() async throws {
+            let result = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async { [self] in
+                    continuation.resume(returning: entered.wait(timeout: .now() + 2))
+                }
+            }
+            guard result == .success else { throw SmokeFailure(message: "rename hook not reached") }
+        }
+
+        func releaseRename() { released.signal() }
     }
 
     @MainActor
@@ -132,10 +161,78 @@ struct OpenResourceInstallationSmoke {
                                                   payloadComponent: operation.publishedPayloadComponent,
                                                   sidecarComponent: operation.publishedSidecarComponent,
                                                   installationIdentity: identity)
+        let lifecycleCoordinator = ManagedDictionaryLifecycleCoordinator()
         return Fixture(identity: identity, result: result, catalog: catalog,
                        coordinator: OpenResourceInstallationCoordinator(
-                           lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator()
-                       ), dictionaries: dictionaries)
+                           lifecycleCoordinator: lifecycleCoordinator
+                       ), lifecycleCoordinator: lifecycleCoordinator, dictionaries: dictionaries)
+    }
+
+    @MainActor
+    private static func testFinalPublicationUsesExclusivePermit(root: URL,
+                                                                 smoke: inout Smoke) async throws {
+        let fixture = try fixture(root: root, name: "permit-boundary",
+                                  dictionaryID: "33333333-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        let interlock = PermitInterlock()
+        OpenResourceInstallationCoordinator.setBeforeRenameForResourceTest {
+            try interlock.pauseAtRename()
+        }
+        defer { OpenResourceInstallationCoordinator.clearBeforeRenameForResourceTest() }
+        let install = Task {
+            try await fixture.coordinator.install(fixture.result, dictionariesRoot: fixture.dictionaries,
+                                                  catalogStore: fixture.catalog)
+        }
+        try await interlock.waitForRename()
+        let final = fixture.dictionaries.appendingPathComponent(fixture.identity.dictionaryID,
+                                                                 isDirectory: true)
+        try smoke.check("final directory is not published before rename",
+                        !FileManager.default.fileExists(atPath: final.path))
+        let removal = Task {
+            try await fixture.lifecycleCoordinator.acquireExclusiveOperation(
+                for: fixture.identity.dictionaryID, operation: .remove
+            )
+        }
+        while await fixture.lifecycleCoordinator.snapshot(for: fixture.identity.dictionaryID)?.queuedOperationCount != 1 {
+            await Task.yield()
+        }
+        interlock.releaseRename()
+        let descriptor = try await install.value
+        let permit = try await removal.value
+        try smoke.check("install final publish holds keyed exclusive permit",
+                        FileManager.default.fileExists(atPath: final.path) && !descriptor.enabled)
+        await fixture.lifecycleCoordinator.complete(permit, disposition: .retired)
+    }
+
+    @MainActor
+    private static func testCancelledPermitDoesNotPublish(root: URL,
+                                                           smoke: inout Smoke) async throws {
+        let fixture = try fixture(root: root, name: "permit-cancel",
+                                  dictionaryID: "44444444-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        let held = try await fixture.lifecycleCoordinator.acquireExclusiveOperation(
+            for: fixture.identity.dictionaryID, operation: .remove
+        )
+        let install = Task {
+            try await fixture.coordinator.install(fixture.result, dictionariesRoot: fixture.dictionaries,
+                                                  catalogStore: fixture.catalog)
+        }
+        while await fixture.lifecycleCoordinator.snapshot(for: fixture.identity.dictionaryID)?.queuedOperationCount != 1 {
+            await Task.yield()
+        }
+        install.cancel()
+        let result = await install.result
+        if case .failure(let error as ManagedDictionaryLifecycleError) = result {
+            try smoke.check("cancelled install waiter returns fixed error",
+                            error == .lifecycleOperationCancelled)
+        } else {
+            throw SmokeFailure(message: "cancelled install unexpectedly published")
+        }
+        let final = fixture.dictionaries.appendingPathComponent(fixture.identity.dictionaryID,
+                                                                 isDirectory: true)
+        try smoke.check("cancelled install before permit leaves no final directory",
+                        !FileManager.default.fileExists(atPath: final.path))
+        try smoke.check("cancelled install before permit leaves Catalog unchanged",
+                        fixture.catalog.load().dictionaries.isEmpty)
+        await fixture.lifecycleCoordinator.complete(held, disposition: .available(incrementGeneration: false))
     }
 
     @MainActor

@@ -112,7 +112,10 @@ actor ManagedDictionaryQueryService {
     func replaceCatalog(_ catalog: DictionaryCatalog) async {
         self.catalog = catalog
         await lifecycleCoordinator.initialize(reconciledCatalog: catalog)
-        await runtime.reset()
+        // A Catalog transition may be draining an asynchronous lookup.  Do not close every
+        // runtime here: keyed lifecycle operations invalidate their runtime only after their
+        // exclusive permit has drained the old generation.  Generation is part of the runtime
+        // cache key, so retaining an old entry cannot make it eligible for a new lookup.
     }
 
     /// Called only after an exclusive lifecycle permit has drained existing query leases.
@@ -172,7 +175,14 @@ actor ManagedDictionaryQueryService {
                                          generation: lease.generation,
                                          query: query)
                 }
-                guard isStillEligible(descriptor) else { continue }
+                guard await isStillEligible(dictionaryID: descriptor.dictionaryID,
+                                            expectedGeneration: generation) else {
+                    // withQueryLease has released the old generation before this point.  Evict
+                    // only after that safe boundary, never while Catalog replacement is merely
+                    // requesting a drain.
+                    await runtime.remove(dictionaryID: descriptor.dictionaryID)
+                    continue
+                }
                 switch outcome {
                 case .hit(let hit): hits.append(hit)
                 case .miss: break
@@ -189,8 +199,13 @@ actor ManagedDictionaryQueryService {
         return (hits, unavailable)
     }
 
-    private func isStillEligible(_ descriptor: DictionaryDescriptor) -> Bool {
-        Self.isManagedLocalEligible(descriptor) || Self.isOpenResourceEligible(descriptor)
+    private func isStillEligible(dictionaryID: String, expectedGeneration: UInt64) async -> Bool {
+        guard let descriptor = catalog.dictionaries.first(where: { $0.dictionaryID == dictionaryID }),
+              Self.isManagedLocalEligible(descriptor) || Self.isOpenResourceEligible(descriptor),
+              let currentGeneration = await lifecycleCoordinator.generation(for: dictionaryID) else {
+            return false
+        }
+        return currentGeneration == expectedGeneration
     }
 
     private static func isManagedLocalEligible(_ descriptor: DictionaryDescriptor) -> Bool {

@@ -5,7 +5,7 @@ An open resource has two deliberately separate authorities:
 - `resource-installation.json` is the immutable, verified installation identity. It records the
   local installation UUID, signed resource/manifest identity, payload hash and byte count,
   formatter, language and licence metadata. It never records lifecycle or query settings.
-- Catalog v2 is the mutable lifecycle authority. Its first installed record is an enabled,
+- Catalog v2 is the mutable lifecycle authority. Its first installed record is a disabled,
   fallback, `pendingIndex` `openResource` descriptor with
   `appManagedOpenResource` ownership.
 
@@ -16,10 +16,13 @@ both regular files and their identities, hashes the payload, parses the bounded 
 publishes the already-verified directory with `renameatx_np(RENAME_EXCL)` to
 `Dictionaries/<dictionaryID>`.
 
-The Catalog is saved only after the final directory and its parent are durable. If that Catalog
-save fails, the final directory and receipt remain intact and the operation reports a recoverable
-post-publication error. D1b-3B-2B startup reconciliation now revalidates and registers that final
-orphan as disabled / fallback / pending-index when its full payload identity remains valid.
+Preparation, hashing, and verified staging occur before lifecycle admission. The final no-replace
+publication, parent fsync, and short Catalog transaction occur only while the shared
+per-dictionary exclusive install permit is held, so index/remove work for the same UUID cannot
+overlap final publication. If that Catalog save fails, the final directory and receipt remain intact
+and the operation reports a recoverable post-publication error. D1b-3B-2B startup reconciliation
+now revalidates and registers that final orphan as disabled / fallback / pending-index when its full
+payload identity remains valid.
 
 Catalog v2 uses `catalog-v2.json` and `catalog-v2.backup.json`. It preserves v1 files without
 rewriting them, explicitly migrates legacy and locally imported descriptors in memory, and rejects

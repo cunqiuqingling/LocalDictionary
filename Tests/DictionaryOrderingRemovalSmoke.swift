@@ -459,6 +459,61 @@ private func testRemovalGuardsAndRollback(base: URL) async throws {
                .failed(.notManagedLocal), "legacy references must never be removed")
 }
 
+@MainActor
+private func testRemovalEarlyReturnRetry(base: URL) async throws {
+    func makeCoordinator(_ initial: DictionaryCatalog, fixture: RemovalFixture,
+                         indexing: @escaping (String) -> Bool = { _ in false }) throws
+        -> (ManagedDictionaryRemovalCoordinator, DictionaryCatalogStore) {
+        let store = DictionaryCatalogStore(directoryURL: fixture.root.appendingPathComponent("retry-catalog"))
+        try store.save(initial)
+        let service = ManagedDictionaryQueryService(catalog: initial, runtime: MockRuntime())
+        return (ManagedDictionaryRemovalCoordinator(
+            catalog: initial, catalogStore: store, applicationSupportRootURL: fixture.root,
+            queryService: service, isIndexing: indexing
+        ), store)
+    }
+
+    let missing = try removalFixture(base: base, suffix: "34")
+    let (missingCoordinator, missingStore) = try makeCoordinator(.empty(now: fixedDate), fixture: missing)
+    try expect(await missingCoordinator.remove(dictionaryID: missing.descriptor.dictionaryID) ==
+               .failed(.dictionaryNotFound), "missing descriptor returns its precise error")
+    try expect(!missingCoordinator.isRemoving(missing.descriptor.dictionaryID),
+               "dictionaryNotFound must clear active removal state")
+    try missingStore.save(missing.catalog)
+    missingCoordinator.synchronize(catalog: missing.catalog)
+    try expect(await missingCoordinator.remove(dictionaryID: missing.descriptor.dictionaryID) ==
+               .removed(cleanupDeferred: false), "missing descriptor retry must not be blocked")
+
+    let ownership = try removalFixture(base: base, suffix: "35")
+    let legacy = descriptor(id: ownership.descriptor.dictionaryID, sourceKind: .legacyReference,
+                            level: .preferred, position: 1)
+    let (ownershipCoordinator, ownershipStore) = try makeCoordinator(catalog([legacy]), fixture: ownership)
+    try expect(await ownershipCoordinator.remove(dictionaryID: ownership.descriptor.dictionaryID) ==
+               .failed(.notManagedLocal), "ownership guard returns its precise error")
+    try expect(!ownershipCoordinator.isRemoving(ownership.descriptor.dictionaryID),
+               "ownership guard must clear active removal state")
+    try ownershipStore.save(ownership.catalog)
+    ownershipCoordinator.synchronize(catalog: ownership.catalog)
+    try expect(await ownershipCoordinator.remove(dictionaryID: ownership.descriptor.dictionaryID) ==
+               .removed(cleanupDeferred: false), "ownership guard retry must not be blocked")
+
+    let indexing = try removalFixture(base: base, suffix: "36", state: .indexing)
+    let (indexingCoordinator, indexingStore) = try makeCoordinator(indexing.catalog, fixture: indexing)
+    try expect(await indexingCoordinator.remove(dictionaryID: indexing.descriptor.dictionaryID) ==
+               .failed(.indexingInProgress), "indexing guard returns its precise error")
+    try expect(!indexingCoordinator.isRemoving(indexing.descriptor.dictionaryID),
+               "indexing guard must clear active removal state")
+    var ready = indexing.catalog
+    guard let readyIndex = ready.dictionaries.firstIndex(where: { $0.dictionaryID == indexing.descriptor.dictionaryID }) else {
+        throw SmokeError.failed("indexing retry fixture")
+    }
+    ready.dictionaries[readyIndex].state = .ready
+    try indexingStore.save(ready)
+    indexingCoordinator.synchronize(catalog: ready)
+    try expect(await indexingCoordinator.remove(dictionaryID: indexing.descriptor.dictionaryID) ==
+               .removed(cleanupDeferred: false), "indexing guard retry must not be blocked")
+}
+
 private func testRecoveryAndPathSafety(base: URL) throws {
     let fixture = try removalFixture(base: base, suffix: "24")
     let worker = ManagedDictionaryRemovalWorker(applicationSupportRootURL: fixture.root)
@@ -778,6 +833,7 @@ struct DictionaryOrderingRemovalSmoke {
         try await testQueryOrderingAndStaleResultProtection()
         try await testSuccessfulRemoval(base: base)
         try await testRemovalGuardsAndRollback(base: base)
+        try await testRemovalEarlyReturnRetry(base: base)
         try testRecoveryAndPathSafety(base: base)
         try testRemovalIdentityRaces(base: base)
         try await testCoordinatorStageFailureDisposition(base: base)

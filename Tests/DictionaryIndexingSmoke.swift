@@ -156,7 +156,9 @@ private struct Fixture {
 
     func coordinator(
         builder: @escaping DictionaryIndexBuildFunction,
-        capacity: UInt64 = UInt64.max
+        capacity: UInt64 = UInt64.max,
+        lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator =
+            ManagedDictionaryLifecycleCoordinator()
     ) -> ManagedDictionaryIndexCoordinator {
         ManagedDictionaryIndexCoordinator(
             catalog: catalog,
@@ -167,7 +169,7 @@ private struct Fixture {
             hooks: DictionaryIndexingHooks(
                 availableCapacity: { _ in capacity },
                 beforePublish: {}
-            )
+            ), lifecycleCoordinator: lifecycleCoordinator
         )
     }
 
@@ -193,8 +195,6 @@ private func testSuccessfulStateMachine() async throws {
     let coordinator = fixture.coordinator(builder: validBuilder(entries: 4))
     try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
                "pendingIndex should start")
-    try expect(coordinator.catalog.dictionaries[0].state == .indexing,
-               "state should be indexing before background completion")
     try await waitUntilIdle(coordinator)
     let descriptor = coordinator.catalog.dictionaries[0]
     try expect(descriptor.state == .ready, "successful index should become ready")
@@ -279,6 +279,39 @@ private func testCancellationAndConcurrency() async throws {
         "Dictionaries/\(first.dictionaryID)/index/dictionary.sqlite")
     try expect(!FileManager.default.fileExists(atPath: final.path),
                "cancel must not publish final SQLite")
+}
+
+@MainActor
+private func testPermitBeforeIndexingCatalogMutation() async throws {
+    let fixture = try Fixture(name: "permit-before-index")
+    defer { fixture.cleanup() }
+    var activeDescriptor = fixture.descriptor
+    activeDescriptor.state = .ready
+    let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: DictionaryCatalog(
+        schemaVersion: DictionaryCatalog.currentSchemaVersion,
+        createdAt: activeDescriptor.createdAt, updatedAt: activeDescriptor.updatedAt,
+        dictionaries: [activeDescriptor]
+    ))
+    let coordinator = fixture.coordinator(builder: blockingBuilder(), lifecycleCoordinator: lifecycle)
+    let activeLease = try await lifecycle.acquireQueryLease(for: fixture.dictionaryID)
+    try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
+               "permit-first index should start")
+    while await lifecycle.snapshot(for: fixture.dictionaryID)?.phase != .draining {
+        await Task.yield()
+    }
+    try expect(coordinator.catalog.dictionaries[0].state == .pendingIndex,
+               "Catalog must remain pending until the index permit is acquired")
+    await lifecycle.release(activeLease)
+    while coordinator.catalog.dictionaries[0].state != .indexing {
+        await Task.yield()
+    }
+    let indexingSnapshot = await lifecycle.snapshot(for: fixture.dictionaryID)
+    try expect(indexingSnapshot?.phase == .exclusive,
+               "index Catalog mutation occurs while the exclusive permit is held")
+    coordinator.cancel(dictionaryID: fixture.dictionaryID)
+    try await waitUntilIdle(coordinator)
+    try expect(coordinator.catalog.dictionaries[0].state == .pendingIndex,
+               "cancelled permit-first index returns to pendingIndex")
 }
 
 @MainActor
@@ -548,6 +581,7 @@ struct DictionaryIndexingSmoke {
         try await testSuccessfulStateMachine()
         try await testFailureAndRetry()
         try await testCancellationAndConcurrency()
+        try await testPermitBeforeIndexingCatalogMutation()
         try await testValidationFailures()
         try await testFailurePreservesExistingIndex()
         try testInterruptedRecovery()

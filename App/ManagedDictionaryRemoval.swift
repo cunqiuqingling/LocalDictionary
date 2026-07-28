@@ -1045,6 +1045,8 @@ final class ManagedDictionaryRemovalCoordinator {
         guard activeDictionaryIDs.insert(dictionaryID).inserted else {
             return .failed(.removalAlreadyInProgress)
         }
+        defer { activeDictionaryIDs.remove(dictionaryID) }
+
         guard let descriptor = catalog.dictionaries.first(where: {
             $0.dictionaryID == dictionaryID
         }) else { return .failed(.dictionaryNotFound) }
@@ -1055,8 +1057,6 @@ final class ManagedDictionaryRemovalCoordinator {
               !isIndexing(dictionaryID) else {
             return .failed(.indexingInProgress)
         }
-
-        defer { activeDictionaryIDs.remove(dictionaryID) }
 
         let worker = self.worker
         let plan: ManagedDictionaryRemovalPlan

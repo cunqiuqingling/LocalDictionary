@@ -84,7 +84,9 @@ must pass Catalog eligibility, then acquire a generation-bound query lease befor
 SQLite index is accessed. Draining blocks new leases and waits only for existing leases; it never
 holds the short Catalog mutation lock while waiting.
 
-Removal acquires an exclusive permit, drains leases, invalidates the target runtime, stages and
+Removal installs its active-ID cleanup `defer` immediately after admission, so every early guard,
+cancellation, failure, success, and deferred-cleanup path clears that local state. It then acquires
+an exclusive permit, drains leases, invalidates the target runtime, stages and
 commits the Catalog, then retires the generation. The R2 rule remains unchanged: a stage failure
 resumes only after canonical identity exactly matches the original plan; uncertainty stays
 suspended. A successful rollback publishes a new available generation; rollback uncertainty stays

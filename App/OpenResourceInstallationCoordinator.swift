@@ -25,19 +25,15 @@ actor OpenResourceInstallationCoordinator {
             try OpenResourceInstallationFileWorker.prepare(verified: verified)
         }.value
 
-        let published: OpenResourceInstallationFileWorker.PublishedDirectory
-        do {
-            published = try await Task.detached(priority: .utility) {
-                try OpenResourceInstallationFileWorker.publish(prepared: prepared, dictionariesRoot: dictionariesRoot)
-            }.value
-        } catch {
-            throw error
-        }
-
         let permit = try await lifecycleCoordinator.acquireExclusiveOperation(
             for: prepared.identity.dictionaryID, operation: .install
         )
         do {
+            // Final publication is deliberately inside the keyed lifecycle permit. Preparation
+            // remains outside so hashing/staging never holds up existing readers.
+            let published = try await Task.detached(priority: .utility) {
+                try OpenResourceInstallationFileWorker.publish(prepared: prepared, dictionariesRoot: dictionariesRoot)
+            }.value
             let descriptor = try await MainActor.run {
             do {
                 let mutation = try catalogStore.mutate { catalog, _ in
@@ -54,7 +50,7 @@ actor OpenResourceInstallationCoordinator {
                         sourceKind: .openResource,
                         queryLevel: .fallback,
                         sortPosition: Self.nextFallbackPosition(in: catalog),
-                        enabled: true,
+                        enabled: false,
                         state: .pendingIndex,
                         indexMetadata: DictionaryIndexMetadata(schemaVersion: nil, entryCount: nil,
                                                                indexFileSize: nil, sourceFileSize: prepared.identity.payloadBytes,
@@ -86,7 +82,7 @@ actor OpenResourceInstallationCoordinator {
                 throw OpenResourceInstallationError.catalogCommitFailedAfterFilesystemPublish
             }
             }
-            await lifecycleCoordinator.complete(permit, disposition: .available(incrementGeneration: true))
+            await lifecycleCoordinator.complete(permit, disposition: .suspended(incrementGeneration: true))
             return descriptor
         } catch {
             // The directory may already be final, but no query-eligible descriptor is published.

@@ -64,6 +64,15 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-managed-dictionary-query-smoke.sh` exercises the B3 preferred-to-managed fallback policy, canonical and legacy generic formatter identifiers, B1 root-level and future `source/` managed MDX layouts, path/symlink escape rejection, stable Catalog ordering, state filtering, isolated failures, source SHA-256 and read-only SQLite validation, and safe managed dictionary snapshots for Markdown. It uses generated placeholder bytes, a temporary SQLite metadata table, and a mock managed runtime; it never opens a commercial MDX or accesses the network.
 
+`run-managed-dictionary-lifecycle-coordination-smoke.sh` covers D1b-3B-2C-R1 with synthetic
+Catalogs and runtimes: leaseID/generation accounting across pending identity transitions,
+descriptor deletion drain/retirement, permit-first index publication, removal early-return retry,
+FIFO and cancellation/shutdown waiter cleanup, current-Catalog result rechecks, and OpenResource
+final publication while the shared keyed install permit is held. It uses deterministic actor
+barriers and isolated temporary roots only. These process-local leases do not provide the fd-bound
+SQLite identity guarantee deferred to D1b-3B-3; production manifest endpoints and payload hosts
+remain empty.
+
 `run-generic-mdict-formatter-security-smoke.sh` validates the B3 libxml2 safety boundary with synthetic HTML. It verifies basic headings, paragraphs, lists, emphasis and code while discarding scripts, embedded content, hidden nodes and URL-bearing attributes, and enforcing raw-byte and DOM-depth limits.
 
 `run-dictionary-ordering-removal-smoke.sh` exercises the B4 same-level ordering and managed removal boundaries. It covers persistent preferred/normal/fallback ordering, cross-level rejection, save rollback, stable default restoration, legacy adapter order preservation, managed-only two-phase removal, Catalog rollback, interrupted-removal recovery, deferred cleanup, runtime release, and absolute/traversal/other-UUID/symlink path rejection. It uses generated placeholder files in a temporary directory and never opens a commercial dictionary, accesses the network, or modifies an Obsidian note.

@@ -10,6 +10,8 @@ enum ManagedDictionaryLifecycleError: Error, Equatable, Sendable {
     case staleDictionaryGeneration
     case queryLeaseCancelled
     case lifecycleOperationCancelled
+    case dictionaryLifecycleTransitionPending
+    case dictionaryLifecycleShuttingDown
 }
 
 enum ManagedDictionaryLifecycleOperation: String, Sendable {
@@ -84,7 +86,9 @@ actor ManagedDictionaryLifecycleCoordinator {
         let dictionaryPath: String?
         let indexPath: String?
         let sourceDigest: String?
-        let updatedAt: Date
+        let sourceFileSize: UInt64?
+        let indexFileSize: UInt64?
+        let formatterIdentifier: String
 
         init(_ descriptor: DictionaryDescriptor) {
             sourceKind = descriptor.sourceKind
@@ -94,8 +98,21 @@ actor ManagedDictionaryLifecycleCoordinator {
             dictionaryPath = descriptor.relativePaths.dictionary
             indexPath = descriptor.relativePaths.index
             sourceDigest = descriptor.indexMetadata.sourceSHA256
-            updatedAt = descriptor.updatedAt
+            sourceFileSize = descriptor.indexMetadata.sourceFileSize
+            indexFileSize = descriptor.indexMetadata.indexFileSize
+            formatterIdentifier = descriptor.formatterIdentifier
         }
+    }
+
+    /// A Catalog change that invalidates a runtime is not published over active leases.  It first
+    /// drains the old generation, then advances generation exactly once at a safe boundary.
+    private struct PendingTransition {
+        let identity: DescriptorIdentity?
+        let idlePhase: Phase
+    }
+
+    private struct LeaseRecord {
+        let generation: UInt64
     }
 
     private struct OperationWaiter {
@@ -109,8 +126,9 @@ actor ManagedDictionaryLifecycleCoordinator {
         var phase: Phase
         var idlePhase: Phase
         var identity: DescriptorIdentity?
-        var activeLeases: Set<UUID>
+        var activeLeases: [UUID: LeaseRecord]
         var operationQueue: [OperationWaiter]
+        var pendingTransition: PendingTransition?
 
         init(generation: UInt64 = 1,
              phase: Phase = .available,
@@ -119,15 +137,16 @@ actor ManagedDictionaryLifecycleCoordinator {
             self.phase = phase
             idlePhase = phase
             self.identity = identity
-            activeLeases = []
+            activeLeases = [:]
             operationQueue = []
+            pendingTransition = nil
         }
     }
 
     private var states: [String: State] = [:]
     private var acceptingNewWork = true
-    /// Covers cancellation racing before a continuation has been enqueued.  IDs are one-shot and
-    /// removed by enqueue, so repeated cancellation cannot grow this set without bound.
+    /// Covers cancellation racing before a continuation has been enqueued.  The marker is only
+    /// retained until enqueue observes it; terminal requests never add a marker.
     private var cancelledOperationRequestIDs: Set<UUID> = []
 
     init(catalog: DictionaryCatalog = .empty()) {
@@ -149,22 +168,25 @@ actor ManagedDictionaryLifecycleCoordinator {
             let identity = DescriptorIdentity(descriptor)
             if var existing = states[dictionaryID] {
                 switch existing.phase {
-                case .retired, .draining, .exclusive:
+                case .retired, .draining:
                     // The permit owner publishes the disposition after its durable Catalog
                     // transaction.  A concurrent observer must not invalidate that permit.
+                    continue
+                case .exclusive:
+                    // The permit already drained prior readers.  Accept the committed identity
+                    // without changing generation; complete() publishes the next generation.
+                    existing.identity = identity
+                    states[dictionaryID] = existing
                     continue
                 case .available, .suspended:
                     break
                 }
                 if existing.identity != identity {
-                    existing.generation &+= 1
-                    existing.identity = identity
-                    if existing.activeLeases.isEmpty && existing.operationQueue.isEmpty {
-                        let phase = Self.initialPhase(for: descriptor)
-                        existing.phase = phase
-                        existing.idlePhase = phase
-                    }
+                    scheduleTransition(&existing,
+                                       identity: identity,
+                                       idlePhase: Self.initialPhase(for: descriptor))
                     states[dictionaryID] = existing
+                    advance(dictionaryID: dictionaryID)
                 }
             } else {
                 let phase = Self.initialPhase(for: descriptor)
@@ -180,15 +202,9 @@ actor ManagedDictionaryLifecycleCoordinator {
             case .available, .suspended:
                 break
             }
-            state.generation &+= 1
-            if state.activeLeases.isEmpty {
-                state.phase = .retired
-                state.idlePhase = .retired
-            } else {
-                state.phase = .draining
-                state.idlePhase = .retired
-            }
+            scheduleTransition(&state, identity: nil, idlePhase: .retired)
             states[dictionaryID] = state
+            advance(dictionaryID: dictionaryID)
         }
     }
 
@@ -231,11 +247,13 @@ actor ManagedDictionaryLifecycleCoordinator {
             let lease = ManagedDictionaryRuntimeLease(dictionaryID: dictionaryID,
                                                        generation: state.generation,
                                                        leaseID: UUID())
-            state.activeLeases.insert(lease.leaseID)
+            state.activeLeases[lease.leaseID] = LeaseRecord(generation: lease.generation)
             states[dictionaryID] = state
             return lease
         case .draining:
-            throw ManagedDictionaryLifecycleError.dictionaryLifecycleDraining
+            throw state.pendingTransition == nil
+                ? ManagedDictionaryLifecycleError.dictionaryLifecycleDraining
+                : ManagedDictionaryLifecycleError.dictionaryLifecycleTransitionPending
         case .exclusive:
             throw ManagedDictionaryLifecycleError.dictionaryExclusiveOperationInProgress
         case .suspended:
@@ -245,10 +263,13 @@ actor ManagedDictionaryLifecycleCoordinator {
         }
     }
 
-    /// Idempotent release.  A stale or already released lease cannot affect a newer generation.
+    /// Idempotent release. A lease is matched by its own recorded generation, never by the
+    /// coordinator's current generation, so a pending transition cannot orphan an old lease.
     func release(_ lease: ManagedDictionaryRuntimeLease) {
-        guard var state = states[lease.dictionaryID], state.generation == lease.generation,
-              state.activeLeases.remove(lease.leaseID) != nil else { return }
+        guard var state = states[lease.dictionaryID],
+              let record = state.activeLeases[lease.leaseID],
+              record.generation == lease.generation else { return }
+        state.activeLeases[lease.leaseID] = nil
         states[lease.dictionaryID] = state
         advance(dictionaryID: lease.dictionaryID)
     }
@@ -260,6 +281,7 @@ actor ManagedDictionaryLifecycleCoordinator {
         operation: ManagedDictionaryLifecycleOperation
     ) async throws -> ManagedDictionaryLifecyclePermit {
         if Task.isCancelled { throw ManagedDictionaryLifecycleError.lifecycleOperationCancelled }
+        guard acceptingNewWork else { throw ManagedDictionaryLifecycleError.dictionaryLifecycleShuttingDown }
         let requestID = UUID()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -301,10 +323,17 @@ actor ManagedDictionaryLifecycleCoordinator {
         acceptingNewWork = false
         for dictionaryID in states.keys {
             guard var state = states[dictionaryID] else { continue }
+            let waiters = state.operationQueue
+            state.operationQueue.removeAll()
             if case .available = state.phase { state.phase = .suspended }
+            if case .draining = state.phase, state.activeLeases.isEmpty { state.phase = .suspended }
             state.idlePhase = .suspended
             states[dictionaryID] = state
+            waiters.forEach {
+                $0.continuation.resume(throwing: ManagedDictionaryLifecycleError.dictionaryLifecycleShuttingDown)
+            }
         }
+        cancelledOperationRequestIDs.removeAll()
     }
 
     func snapshot(for dictionaryID: String) -> ManagedDictionaryLifecycleSnapshot? {
@@ -324,7 +353,7 @@ actor ManagedDictionaryLifecycleCoordinator {
             return
         }
         guard acceptingNewWork else {
-            continuation.resume(throwing: ManagedDictionaryLifecycleError.dictionaryRuntimeUnavailable)
+            continuation.resume(throwing: ManagedDictionaryLifecycleError.dictionaryLifecycleShuttingDown)
             return
         }
         var state = states[dictionaryID] ?? State()
@@ -343,15 +372,11 @@ actor ManagedDictionaryLifecycleCoordinator {
     }
 
     private func cancelExclusiveWaiter(dictionaryID: String, requestID: UUID) {
-        guard var state = states[dictionaryID] else {
-            cancelledOperationRequestIDs.insert(requestID)
-            return
-        }
+        guard var state = states[dictionaryID] else { return }
         guard let index = state.operationQueue.firstIndex(where: { $0.id == requestID }) else {
             if case .exclusive(let activeID, _) = state.phase, activeID == requestID {
                 return
             }
-            cancelledOperationRequestIDs.insert(requestID)
             return
         }
         let waiter = state.operationQueue.remove(at: index)
@@ -366,7 +391,32 @@ actor ManagedDictionaryLifecycleCoordinator {
 
     private func advance(dictionaryID: String) {
         guard var state = states[dictionaryID] else { return }
+        guard acceptingNewWork else {
+            if state.activeLeases.isEmpty, case .draining = state.phase { state.phase = .suspended }
+            states[dictionaryID] = state
+            return
+        }
         if state.activeLeases.isEmpty, case .draining = state.phase {
+            if let transition = state.pendingTransition {
+                state.generation &+= 1
+                state.identity = transition.identity
+                state.idlePhase = transition.idlePhase
+                state.pendingTransition = nil
+                if transition.idlePhase == .retired {
+                    let waiters = state.operationQueue
+                    state.operationQueue.removeAll()
+                    state.phase = .retired
+                    states[dictionaryID] = state
+                    waiters.forEach {
+                        $0.continuation.resume(throwing: ManagedDictionaryLifecycleError.dictionaryRetired)
+                    }
+                    return
+                }
+                state.phase = state.operationQueue.isEmpty ? state.idlePhase : .draining
+                states[dictionaryID] = state
+                if case .draining = state.phase { advance(dictionaryID: dictionaryID) }
+                return
+            }
             if state.operationQueue.isEmpty {
                 state.phase = state.idlePhase
                 states[dictionaryID] = state
@@ -389,12 +439,24 @@ actor ManagedDictionaryLifecycleCoordinator {
         }
     }
 
-    private static func initialPhase(for descriptor: DictionaryDescriptor) -> Phase {
-        switch descriptor.state {
-        case .missingResources, .corrupt, .failed, .invalid, .unavailable, .importFailed:
-            return .suspended
-        default:
-            return .available
+    private func scheduleTransition(_ state: inout State,
+                                    identity: DescriptorIdentity?,
+                                    idlePhase: Phase) {
+        state.pendingTransition = PendingTransition(identity: identity, idlePhase: idlePhase)
+        if state.activeLeases.isEmpty && state.operationQueue.isEmpty {
+            state.generation &+= 1
+            state.identity = identity
+            state.idlePhase = idlePhase
+            state.phase = idlePhase
+            state.pendingTransition = nil
+        } else if state.phase == .available || state.phase == .suspended {
+            state.idlePhase = idlePhase
+            state.phase = .draining
         }
+    }
+
+    private static func initialPhase(for descriptor: DictionaryDescriptor) -> Phase {
+        guard descriptor.enabled, descriptor.state == .ready else { return .suspended }
+        return .available
     }
 }

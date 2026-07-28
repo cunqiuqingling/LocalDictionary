@@ -305,31 +305,8 @@ final class ManagedDictionaryIndexCoordinator {
             return .unavailable("无法创建安全的索引计划。")
         }
 
-        let now = Date()
-        let updated: DictionaryCatalog
-        do {
-            let mutation = try catalogStore.mutate { latest, _ in
-                guard let latestIndex = latest.dictionaries.firstIndex(where: {
-                    $0.dictionaryID == dictionaryID && isIndexable($0)
-                }), (latest.dictionaries[latestIndex].state == .pendingIndex ||
-                    latest.dictionaries[latestIndex].state == .failed) else {
-                    throw DictionaryIndexError.catalogWriteFailed
-                }
-                latest.dictionaries[latestIndex].state = .indexing
-                latest.dictionaries[latestIndex].relativePaths.index = nil
-                clearPublishedMetadata(&latest.dictionaries[latestIndex])
-                latest.dictionaries[latestIndex].updatedAt = now
-                latest.updatedAt = now
-            }
-            updated = mutation.catalog
-        } catch {
-            return .unavailable(DictionaryIndexError.catalogWriteFailed.localizedDescription)
-        }
-
-        catalog = updated
         failureMessages[dictionaryID] = nil
         activity = DictionaryIndexActivity(dictionaryID: dictionaryID, stage: .buildingSQLite)
-        onCatalogChanged?(updated)
 
         let token = DictionaryIndexCancellationToken()
         cancellationToken = token
@@ -344,28 +321,61 @@ final class ManagedDictionaryIndexCoordinator {
                 )
             } catch {
                 guard let self else { return }
-                _ = await self.finish(dictionaryID: dictionaryID, outcome: .cancelled)
+                self.activity = nil
+                self.cancellationToken = nil
+                self.currentTask = nil
+                return
+            }
+            guard let self else {
+                await lifecycleCoordinator.complete(
+                    permit, disposition: .suspended(incrementGeneration: true)
+                )
+                return
+            }
+            guard self.markIndexing(dictionaryID: dictionaryID) else {
+                await lifecycleCoordinator.complete(
+                    permit, disposition: .available(incrementGeneration: false)
+                )
+                self.activity = nil
+                self.cancellationToken = nil
+                self.currentTask = nil
                 return
             }
             await runtimeInvalidator(dictionaryID)
             let outcome = await Task.detached(priority: .userInitiated) {
                 worker.prepare(plan: plan, cancellationToken: token)
             }.value
-            guard let self else {
-                if case .prepared(let prepared) = outcome {
-                    await Task.detached(priority: .utility) {
-                        worker.discardPrepared(prepared)
-                    }.value
-                }
-                await lifecycleCoordinator.complete(
-                    permit, disposition: .suspended(incrementGeneration: true)
-                )
-                return
-            }
             let disposition = await self.finish(dictionaryID: dictionaryID, outcome: outcome)
             await lifecycleCoordinator.complete(permit, disposition: disposition)
         }
         return .started
+    }
+
+    /// The lifecycle permit is acquired before this short transaction.  The Catalog observer may
+    /// therefore refresh the query service without invalidating active leases or this permit.
+    private func markIndexing(dictionaryID: String) -> Bool {
+        let now = Date()
+        do {
+            let mutation = try catalogStore.mutate { latest, _ in
+                guard let index = latest.dictionaries.firstIndex(where: {
+                    $0.dictionaryID == dictionaryID && isIndexable($0)
+                }), (latest.dictionaries[index].state == .pendingIndex ||
+                    latest.dictionaries[index].state == .failed) else {
+                    throw DictionaryIndexError.catalogWriteFailed
+                }
+                latest.dictionaries[index].state = .indexing
+                latest.dictionaries[index].relativePaths.index = nil
+                clearPublishedMetadata(&latest.dictionaries[index])
+                latest.dictionaries[index].updatedAt = now
+                latest.updatedAt = now
+            }
+            catalog = mutation.catalog
+            onCatalogChanged?(mutation.catalog)
+            return true
+        } catch {
+            failureMessages[dictionaryID] = DictionaryIndexError.catalogWriteFailed.localizedDescription
+            return false
+        }
     }
 
     func cancel(dictionaryID: String) {
