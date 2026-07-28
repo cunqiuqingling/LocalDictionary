@@ -16,6 +16,7 @@ enum ManagedDictionaryRemovalError: LocalizedError, Equatable, Sendable {
     case filesystemPublishedButIdentityUnconfirmed
     case catalogWriteFailed
     case rollbackFailed
+    indirect case stageFailureRuntimeRemainsSuspended(ManagedDictionaryRemovalError)
 
     var errorDescription: String? {
         switch self {
@@ -34,6 +35,9 @@ enum ManagedDictionaryRemovalError: LocalizedError, Equatable, Sendable {
             return "文件系统操作完成但无法确认词典目录身份；目录已保留。"
         case .catalogWriteFailed: return "无法保存 Catalog，词典目录已恢复。"
         case .rollbackFailed: return "Catalog 未改变，但托管目录暂时无法恢复；请重新启动应用。"
+        case .stageFailureRuntimeRemainsSuspended(let primary):
+            let description = primary.errorDescription ?? "无法安全暂存托管词典目录。"
+            return description + " 为保证安全，该词典将在本次启动中保持暂停；重新启动后会再次验证目录。"
         }
     }
 }
@@ -58,6 +62,10 @@ enum ManagedDictionaryRemovalRenamePhase: Sendable { case stage, rollback }
 enum ManagedDictionaryRemovalTestObserver {
     nonisolated(unsafe) static var beforeRenameBinding:
         (@Sendable (ManagedDictionaryRemovalRenamePhase, String) throws -> Void)?
+    nonisolated(unsafe) static var afterRenameBeforeIdentityConfirmation:
+        (@Sendable (ManagedDictionaryRemovalRenamePhase, String) throws -> Void)?
+    nonisolated(unsafe) static var runtimeDisposition:
+        (@Sendable (Bool) -> Void)?
 }
 #endif
 
@@ -451,6 +459,11 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             if errno == EEXIST { throw ManagedDictionaryRemovalError.stagingConflict }
             throw ManagedDictionaryRemovalError.stagingFailed
         }
+#if OWNED_LIFECYCLE_TESTING
+        try ManagedDictionaryRemovalTestObserver.afterRenameBeforeIdentityConfirmation?(
+            phase, destination.lastPathComponent
+        )
+#endif
         var after = stat()
         guard destination.lastPathComponent.withCString({
             Darwin.fstatat(destinationParent, $0, &after, AT_SYMLINK_NOFOLLOW)
@@ -506,6 +519,22 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
         return ManagedDictionaryDirectoryIdentity(opened)
+    }
+
+    /// A failed stage may be resumed only if the canonical final name still
+    /// resolves to the same object that was validated when its plan was made.
+    /// This deliberately compares against `plan.expectedIdentity` instead of
+    /// treating a freshly valid replacement as equivalent.
+    func canonicalFinalMatchesExpectedIdentity(_ plan: ManagedDictionaryRemovalPlan) -> Bool {
+        do {
+            return try validateOwnedIdentity(
+                plan.descriptor,
+                parentURL: plan.managedDirectoryURL.deletingLastPathComponent(),
+                component: plan.dictionaryID
+            ) == plan.expectedIdentity
+        } catch {
+            return false
+        }
     }
 
     private func validateOpenResourceIdentity(_ descriptor: DictionaryDescriptor,
@@ -1048,11 +1077,16 @@ final class ManagedDictionaryRemovalCoordinator {
                 try worker.stage(plan)
             }.value
         } catch let error as ManagedDictionaryRemovalError {
-            await queryService.resume(dictionaryID: dictionaryID)
-            return .failed(error)
+            if await resumeAfterFailedStageIfSafe(plan) {
+                return .failed(error)
+            }
+            return .failed(.stageFailureRuntimeRemainsSuspended(error))
         } catch {
-            await queryService.resume(dictionaryID: dictionaryID)
-            return .failed(.stagingFailed)
+            let error = ManagedDictionaryRemovalError.stagingFailed
+            if await resumeAfterFailedStageIfSafe(plan) {
+                return .failed(error)
+            }
+            return .failed(.stageFailureRuntimeRemainsSuspended(error))
         }
 
         let updated: DictionaryCatalog
@@ -1100,5 +1134,23 @@ final class ManagedDictionaryRemovalCoordinator {
         } catch {
             return .removed(cleanupDeferred: true)
         }
+    }
+
+    private func resumeAfterFailedStageIfSafe(_ plan: ManagedDictionaryRemovalPlan) async -> Bool {
+        let worker = self.worker
+        let matchesExpectedIdentity = await Task.detached(priority: .userInitiated) {
+            worker.canonicalFinalMatchesExpectedIdentity(plan)
+        }.value
+        guard matchesExpectedIdentity else {
+#if OWNED_LIFECYCLE_TESTING
+            ManagedDictionaryRemovalTestObserver.runtimeDisposition?(false)
+#endif
+            return false
+        }
+        await queryService.resume(dictionaryID: plan.dictionaryID)
+#if OWNED_LIFECYCLE_TESTING
+        ManagedDictionaryRemovalTestObserver.runtimeDisposition?(true)
+#endif
+        return true
     }
 }

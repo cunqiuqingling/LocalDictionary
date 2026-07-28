@@ -15,12 +15,56 @@ private struct Smoke {
     var faultInjection = 0
     var barriers = 0
     var helperOnly = 0
+    var runtimeCoordinator = 0
+    var identityRevalidation = 0
+    var catalogCommitAbsence = 0
+    var enumerationHook = 0
 
     mutating func check(_ name: String, category: WritableKeyPath<Smoke, Int>,
                         _ condition: @autoclosure () throws -> Bool) throws {
         guard try condition() else { throw SmokeFailure.failed(name) }
         assertions += 1
         self[keyPath: category] += 1
+    }
+}
+
+/// Test-only lock-protected counter captured by @Sendable lifecycle hooks.
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    func current() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private final class IndexInventoryFaultGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inventoryInvocation = 0
+    private let failingInvocation: Int
+
+    init(failingInvocation: Int) {
+        self.failingInvocation = failingInvocation
+    }
+
+    func beginInventory() {
+        lock.lock()
+        inventoryInvocation += 1
+        lock.unlock()
+    }
+
+    func shouldFail(afterEntryRead entryCount: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return inventoryInvocation == failingInvocation && entryCount >= 1
     }
 }
 
@@ -264,30 +308,95 @@ private func testOperationIdentityAndIndexInventory(base: URL,
                     FileManager.default.fileExists(atPath: building.path))
     try smoke.check("unknown index entry exact issue", category: \.faultInjection,
                     indexResult.report.issues.map(\.code).contains(.indexInventoryContainsUnknownEntries))
+    try smoke.check("unknown index entry commits structural corruption", category: \.catalogTransactions,
+                    indexResult.catalog.dictionaries.first?.state == .corrupt &&
+                    indexResult.catalog.dictionaries.first?.enabled == false &&
+                    indexStore.load().dictionaries.first?.state == .corrupt &&
+                    indexStore.load().dictionaries.first?.enabled == false)
 
 #if OWNED_LIFECYCLE_TESTING
     let enumRoot = base.appendingPathComponent("index-enumeration", isDirectory: true)
-    let enumDescriptor = managedDescriptor(
+    let enumFirst = managedDescriptor(
         "61000000-0000-4000-8000-000000000002", state: .indexing, source: source
     )
-    try writeManagedDirectory(root: enumRoot, descriptor: enumDescriptor, source: source,
-                              indexFiles: ["dictionary.sqlite.building"])
+    var enumSecond = managedDescriptor(
+        "61000000-0000-4000-8000-000000000003", state: .indexing, source: source
+    )
+    enumSecond.sortPosition = 2
+    let enumInitial = catalog([enumFirst, enumSecond])
+    try writeManagedDirectory(root: enumRoot, descriptor: enumFirst, source: source,
+                              indexFiles: ["dictionary.sqlite", "dictionary.sqlite.building"])
+    try writeManagedDirectory(root: enumRoot, descriptor: enumSecond, source: source,
+                              indexFiles: ["dictionary.sqlite", "dictionary.sqlite.building"])
     let enumBuilding = enumRoot.appendingPathComponent(
-        "Dictionaries/\(enumDescriptor.dictionaryID)/index/dictionary.sqlite.building"
+        "Dictionaries/\(enumSecond.dictionaryID)/index/dictionary.sqlite.building"
+    )
+    let enumSibling = enumRoot.appendingPathComponent(
+        "Dictionaries/\(enumSecond.dictionaryID)/index/dictionary.sqlite"
     )
     let enumStore = DictionaryCatalogStore(directoryURL: enumRoot.appendingPathComponent("Catalog"))
-    try enumStore.save(catalog([enumDescriptor]))
-    OwnedDictionaryLifecycleTestObserver.beforeIndexInventory = {
-        throw OwnedDictionaryLifecycleErrorCode.directoryEnumerationFailure
+    try enumStore.save(enumInitial)
+    let catalogBytesBefore = try Data(contentsOf: enumStore.catalogURL)
+    let catalogIdentityBefore = try fileIdentity(enumStore.catalogURL)
+    let mutationAttempts = LockedCounter()
+    let enumerationGate = IndexInventoryFaultGate(failingInvocation: 2)
+    OwnedDictionaryLifecycleTestObserver.beforeCatalogMutation = {
+        mutationAttempts.increment()
     }
-    defer { OwnedDictionaryLifecycleTestObserver.beforeIndexInventory = nil }
+    OwnedDictionaryLifecycleTestObserver.beforeIndexInventory = {
+        enumerationGate.beginInventory()
+    }
+    OwnedDictionaryLifecycleTestObserver.afterIndexInventoryEntryRead = { entryCount in
+        enumerationGate.shouldFail(afterEntryRead: entryCount)
+    }
+    defer {
+        OwnedDictionaryLifecycleTestObserver.beforeCatalogMutation = nil
+        OwnedDictionaryLifecycleTestObserver.beforeIndexInventory = nil
+        OwnedDictionaryLifecycleTestObserver.afterIndexInventoryEntryRead = nil
+    }
     let enumeration = await OwnedDictionaryLifecycleReconciler(
         catalogStore: enumStore, applicationSupportRootURL: enumRoot
     ).reconcile()
-    try smoke.check("enumeration failure preserves building", category: \.faultInjection,
-                    FileManager.default.fileExists(atPath: enumBuilding.path))
-    try smoke.check("enumeration failure exact issue", category: \.faultInjection,
-                    enumeration.report.issues.map(\.code).contains(.directoryEnumerationFailure))
+    try smoke.check("mid-enumeration failure preserves affected building", category: \.enumerationHook,
+                    FileManager.default.fileExists(atPath: enumBuilding.path) &&
+                    FileManager.default.fileExists(atPath: enumSibling.path))
+    try smoke.check("mid-enumeration failure reports exact transient issue", category: \.enumerationHook,
+                    enumeration.report.issues.map(\.code).contains(.directoryEnumerationFailure) &&
+                    enumeration.report.issues.map(\.code)
+                        .contains(.catalogCommitAbortedDueToIncompleteEnumeration) &&
+                    !enumeration.report.issues.map(\.code)
+                        .contains(.indexInventoryContainsUnknownEntries))
+    try smoke.check("mid-enumeration failure discards all proposed Catalog changes",
+                    category: \.catalogCommitAbsence,
+                    enumeration.catalog == enumInitial &&
+                    enumStore.load() == enumInitial)
+    try smoke.check("mid-enumeration failure preserves Catalog bytes and identity",
+                    category: \.catalogCommitAbsence,
+                    try Data(contentsOf: enumStore.catalogURL) == catalogBytesBefore &&
+                    (try fileIdentity(enumStore.catalogURL)) == catalogIdentityBefore)
+    try smoke.check("mid-enumeration failure never enters Catalog mutation",
+                    category: \.catalogCommitAbsence,
+                    mutationAttempts.current() == 0)
+    try smoke.check("earlier safe index downgrade is reported but not committed",
+                    category: \.catalogCommitAbsence,
+                    enumeration.report.downgradedDictionaryIDs.contains(enumFirst.dictionaryID) &&
+                    enumStore.load().dictionaries.first { $0.dictionaryID == enumFirst.dictionaryID }?
+                        .state == .indexing)
+
+    OwnedDictionaryLifecycleTestObserver.beforeCatalogMutation = nil
+    OwnedDictionaryLifecycleTestObserver.beforeIndexInventory = nil
+    OwnedDictionaryLifecycleTestObserver.afterIndexInventoryEntryRead = nil
+    let secondEnumeration = await OwnedDictionaryLifecycleReconciler(
+        catalogStore: enumStore, applicationSupportRootURL: enumRoot
+    ).reconcile()
+    try smoke.check("second reconciliation commits after complete enumeration",
+                    category: \.catalogTransactions,
+                    secondEnumeration.catalog.dictionaries.allSatisfy { $0.state == .pendingIndex } &&
+                    enumStore.load().dictionaries.count == enumInitial.dictionaries.count &&
+                    enumStore.load().dictionaries.allSatisfy { $0.state == .pendingIndex })
+    try smoke.check("second reconciliation removes only known building files", category: \.posix,
+                    !FileManager.default.fileExists(atPath: enumBuilding.path) &&
+                    FileManager.default.fileExists(atPath: enumSibling.path))
 #endif
 }
 
@@ -1364,6 +1473,8 @@ struct OwnedDictionaryLifecycleReconciliationSmoke {
         print("categories: POSIX=\(smoke.posix) renameatx_np=\(smoke.rename) " +
               "Catalog=\(smoke.catalogTransactions) SHA=\(smoke.sha) " +
               "fault=\(smoke.faultInjection) barrier=\(smoke.barriers) " +
-              "helper-only=\(smoke.helperOnly)")
+              "helper-only=\(smoke.helperOnly) runtime=\(smoke.runtimeCoordinator) " +
+              "identity=\(smoke.identityRevalidation) no-commit=\(smoke.catalogCommitAbsence) " +
+              "enumeration-hook=\(smoke.enumerationHook)")
     }
 }

@@ -2,8 +2,28 @@ import Foundation
 
 private enum SmokeError: Error { case failed(String) }
 
+private final class AssertionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    func current() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private let runtimeAssertions = AssertionCounter()
+
 private func expect(_ condition: Bool, _ message: String) throws {
     if !condition { throw SmokeError.failed(message) }
+    runtimeAssertions.increment()
 }
 
 private let fixedDate = Date(timeIntervalSince1970: 1_700_000_000)
@@ -223,6 +243,25 @@ private actor MockRuntime: ManagedDictionaryQueryRuntime {
     func remove(dictionaryID: String) { removed.append(dictionaryID) }
     func reset() {}
     func snapshot() -> (queried: [String], removed: [String]) { (queried, removed) }
+}
+
+/// Test-only synchronization for the test-macro observer. Every access is
+/// serialized because the coordinator crosses a detached filesystem task.
+private final class RuntimeDispositionSpy: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Bool] = []
+
+    func record(_ resumed: Bool) {
+        lock.lock()
+        values.append(resumed)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
 }
 
 private actor DeferredRuntime: ManagedDictionaryQueryRuntime {
@@ -542,6 +581,159 @@ private func testRemovalIdentityRaces(base: URL) throws {
 }
 
 @MainActor
+private func testCoordinatorStageFailureDisposition(base: URL) async throws {
+#if OWNED_LIFECYCLE_TESTING
+    defer {
+        ManagedDictionaryRemovalTestObserver.beforeRenameBinding = nil
+        ManagedDictionaryRemovalTestObserver.afterRenameBeforeIdentityConfirmation = nil
+        ManagedDictionaryRemovalTestObserver.runtimeDisposition = nil
+    }
+
+    let substitution = try removalFixture(base: base, suffix: "31")
+    let substitutionStore = DictionaryCatalogStore(
+        directoryURL: substitution.root.appendingPathComponent("Catalog")
+    )
+    try substitutionStore.save(substitution.catalog)
+    let substitutionRuntime = MockRuntime()
+    let substitutionService = ManagedDictionaryQueryService(
+        catalog: substitution.catalog, runtime: substitutionRuntime
+    )
+    let substitutionCoordinator = ManagedDictionaryRemovalCoordinator(
+        catalog: substitution.catalog,
+        catalogStore: substitutionStore,
+        applicationSupportRootURL: substitution.root,
+        queryService: substitutionService,
+        isIndexing: { _ in false }
+    )
+    let substitutionDisposition = RuntimeDispositionSpy()
+    let retained = substitution.root.appendingPathComponent("retained-coordinator-stage")
+    ManagedDictionaryRemovalTestObserver.runtimeDisposition = { resumed in
+        substitutionDisposition.record(resumed)
+    }
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = { phase, _ in
+        guard phase == .stage else { return }
+        guard Darwin.rename(substitution.managedDirectory.path, retained.path) == 0,
+              Darwin.mkdir(substitution.managedDirectory.path, 0o700) == 0 else {
+            throw SmokeError.failed("coordinator stage substitution setup")
+        }
+    }
+    let substitutionResult = await substitutionCoordinator.remove(
+        dictionaryID: substitution.descriptor.dictionaryID
+    )
+    try expect(substitutionResult == .failed(
+        .stageFailureRuntimeRemainsSuspended(.removalStageIdentityMismatch)
+    ), "coordinator stage substitution must report suspended identity failure")
+    try expect(substitutionCoordinator.catalog == substitution.catalog,
+               "stage substitution must preserve Catalog descriptor")
+    try expect(substitutionStore.load() == substitution.catalog,
+               "stage substitution must preserve durable Catalog")
+    try expect(substitutionDisposition.snapshot() == [false],
+               "stage substitution must not resume runtime")
+    let blocked = await substitutionService.lookup("synthetic")
+    let blockedAgain = await substitutionService.lookup("synthetic")
+    try expect(!blocked.hits.contains { $0.dictionaryID == substitution.descriptor.dictionaryID } &&
+               !blockedAgain.hits.contains { $0.dictionaryID == substitution.descriptor.dictionaryID },
+               "stage substitution must keep the target dictionary suspended")
+    try expect(!(await substitutionRuntime.snapshot()).queried
+                    .contains(substitution.descriptor.dictionaryID),
+               "suspended target dictionary must not invoke runtime lookup")
+    try expect(FileManager.default.fileExists(atPath: retained.path) &&
+               FileManager.default.fileExists(atPath: substitution.managedDirectory.path) &&
+               !FileManager.default.fileExists(atPath: substitution.pendingDirectory.path),
+               "stage substitution must preserve original and replacement without PendingDeletion")
+
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = nil
+    ManagedDictionaryRemovalTestObserver.runtimeDisposition = nil
+
+    let benign = try removalFixture(base: base, suffix: "32")
+    let benignStore = DictionaryCatalogStore(
+        directoryURL: benign.root.appendingPathComponent("Catalog")
+    )
+    try benignStore.save(benign.catalog)
+    let benignRuntime = MockRuntime()
+    let benignService = ManagedDictionaryQueryService(catalog: benign.catalog,
+                                                      runtime: benignRuntime)
+    let benignCoordinator = ManagedDictionaryRemovalCoordinator(
+        catalog: benign.catalog,
+        catalogStore: benignStore,
+        applicationSupportRootURL: benign.root,
+        queryService: benignService,
+        isIndexing: { _ in false }
+    )
+    let benignDisposition = RuntimeDispositionSpy()
+    ManagedDictionaryRemovalTestObserver.runtimeDisposition = { resumed in
+        benignDisposition.record(resumed)
+    }
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = { phase, _ in
+        guard phase == .stage else { return }
+        throw SmokeError.failed("benign pre-rename stage failure")
+    }
+    let benignResult = await benignCoordinator.remove(dictionaryID: benign.descriptor.dictionaryID)
+    try expect(benignResult == .failed(.stagingFailed),
+               "benign pre-rename failure must preserve its primary error")
+    try expect(benignCoordinator.catalog == benign.catalog &&
+               benignStore.load() == benign.catalog,
+               "benign pre-rename failure must preserve Catalog")
+    try expect(benignDisposition.snapshot() == [true],
+               "matching final identity must resume runtime exactly once")
+    let resumed = await benignService.lookup("synthetic")
+    try expect(resumed.hits.count == 2,
+               "matching final identity must restore managed query eligibility")
+    try expect((await benignRuntime.snapshot()).queried.count == 2,
+               "safe resume must reach both eligible runtime dictionaries")
+
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = nil
+    ManagedDictionaryRemovalTestObserver.runtimeDisposition = nil
+
+    let postPublish = try removalFixture(base: base, suffix: "33")
+    let postPublishStore = DictionaryCatalogStore(
+        directoryURL: postPublish.root.appendingPathComponent("Catalog")
+    )
+    try postPublishStore.save(postPublish.catalog)
+    let postPublishRuntime = MockRuntime()
+    let postPublishService = ManagedDictionaryQueryService(
+        catalog: postPublish.catalog, runtime: postPublishRuntime
+    )
+    let postPublishCoordinator = ManagedDictionaryRemovalCoordinator(
+        catalog: postPublish.catalog,
+        catalogStore: postPublishStore,
+        applicationSupportRootURL: postPublish.root,
+        queryService: postPublishService,
+        isIndexing: { _ in false }
+    )
+    let postPublishDisposition = RuntimeDispositionSpy()
+    let retainedPending = postPublish.root.appendingPathComponent("retained-post-publish")
+    ManagedDictionaryRemovalTestObserver.runtimeDisposition = { resumed in
+        postPublishDisposition.record(resumed)
+    }
+    ManagedDictionaryRemovalTestObserver.afterRenameBeforeIdentityConfirmation = { phase, _ in
+        guard phase == .stage else { return }
+        guard Darwin.rename(postPublish.pendingDirectory.path, retainedPending.path) == 0,
+              Darwin.mkdir(postPublish.pendingDirectory.path, 0o700) == 0 else {
+            throw SmokeError.failed("post-publish substitution setup")
+        }
+    }
+    let postPublishResult = await postPublishCoordinator.remove(
+        dictionaryID: postPublish.descriptor.dictionaryID
+    )
+    try expect(postPublishResult == .failed(
+        .stageFailureRuntimeRemainsSuspended(.filesystemPublishedButIdentityUnconfirmed)
+    ), "post-publish identity uncertainty must remain suspended")
+    try expect(postPublishCoordinator.catalog == postPublish.catalog &&
+               postPublishStore.load() == postPublish.catalog,
+               "post-publish uncertainty must preserve Catalog")
+    try expect(postPublishDisposition.snapshot() == [false],
+               "post-publish uncertainty must not resume runtime")
+    try expect(!(await postPublishService.lookup("synthetic")).hits.contains {
+        $0.dictionaryID == postPublish.descriptor.dictionaryID
+    }, "post-publish uncertainty must block the target managed query")
+    try expect(FileManager.default.fileExists(atPath: retainedPending.path) &&
+               FileManager.default.fileExists(atPath: postPublish.pendingDirectory.path),
+               "post-publish uncertainty must preserve both pending objects")
+#endif
+}
+
+@MainActor
 private func testDeferredCleanupRecovery(base: URL) async throws {
     let fixture = try removalFixture(base: base, suffix: "27")
     let hooks = ManagedDictionaryRemovalHooks(removeItem: { _ in
@@ -576,7 +768,9 @@ struct DictionaryOrderingRemovalSmoke {
         try await testRemovalGuardsAndRollback(base: base)
         try testRecoveryAndPathSafety(base: base)
         try testRemovalIdentityRaces(base: base)
+        try await testCoordinatorStageFailureDisposition(base: base)
         try await testDeferredCleanupRecovery(base: base)
-        print("Dictionary ordering/removal smoke: PASS")
+        print("Dictionary ordering/removal smoke: PASS " +
+              "(\(runtimeAssertions.current()) total runtime assertions)")
     }
 }

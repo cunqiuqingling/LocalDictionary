@@ -54,11 +54,26 @@ Catalog deletion then commits. A Catalog failure restores the same inode no-repl
 successful Catalog commit followed by cleanup failure leaves PendingDeletion for the next
 startup. Existing Obsidian or saved content snapshots are not touched.
 
+If staging fails, the coordinator does not resume merely because staging failed. It first opens the
+canonical final name with `O_NOFOLLOW`, validates the owned directory, and requires its
+device/inode/owner/type identity to equal the identity recorded in the original removal plan.
+Only that exact match resumes the runtime. Missing, replaced, unreadable, or post-publication
+uncertain names remain suspended for the rest of the process; their Catalog descriptor is retained
+and the next startup reconciliation revalidates the filesystem.
+
 At startup, a matching Catalog descriptor causes a validated PendingDeletion directory to be
 restored. No matching descriptor means the removal already committed, so only a completely
 inventoried known owned structure is unlinked. Unknown entries, symlinks, hardlinks, identity
 mismatches, target conflicts and durability failures preserve the directory for retry. Repeating
 reconciliation is idempotent.
+
+Directory enumeration failure is an incomplete transient observation, not proof of structural
+corruption. If any owned lifecycle inventory ends with `directoryEnumerationFailure`, that entire
+reconciliation run discards all proposed Catalog changes and does not enter Catalog mutation. Safe
+filesystem operations that already completed are preserved for the next startup rather than being
+dangerously rolled back. By contrast, a complete inventory that finds an unknown entry remains a
+structural error: the directory is preserved and the descriptor may be durably disabled. Final
+fast-path full-SHA verification remains deferred to D1b-3B-3; this stage does not enter 2C.
 
 This stage does not implement query/runtime leases, OpenResource fallback query, SQLite
 fd-identity publication, Resource Center UI, production payload hosts, real resources, or a

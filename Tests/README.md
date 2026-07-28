@@ -220,6 +220,18 @@ rename interlock to cover managed removal stage and rollback substitution plus r
 conflict. These observers exist only in smoke binaries built with
 `OWNED_LIFECYCLE_TESTING`; App builds do not define that flag.
 
+R2 makes uncertainty fail closed. After any managed-removal stage failure, the coordinator resumes
+only when the canonical final directory is revalidated against the plan's original
+device/inode/owner/type identity; mismatch, absence, and post-publication uncertainty keep that
+dictionary suspended until startup reconciliation. A lifecycle `directoryEnumerationFailure` is a
+transient incomplete observation, not structural corruption: it discards every proposed Catalog
+change for that run and skips Catalog mutation, while already-safe filesystem publication is left
+for the next reconciliation. Complete inventory with an unknown entry remains structural
+corruption and can durably disable the descriptor. R2's synthetic fixtures include coordinator
+stage substitution, safe resume, post-publication uncertainty, mid-enumeration failure after one
+entry, whole-Catalog abort, and a successful second reconciliation. Obsidian smoke remains outside
+this matrix when its private local configuration prerequisite is unavailable.
+
 The reported number is **total runtime assertions**, not a count of independent security
 behaviours. The runner also reports assertion categories for real POSIX filesystem operations,
 real `renameatx_np`, Catalog transactions, SHA-256, injected failures, publication barriers, and

@@ -20,6 +20,7 @@ enum OwnedDictionaryLifecycleErrorCode: String, Error, Equatable, Sendable {
     case catalogCommitFailedAfterFilesystemMutation
     case interruptedIndexReset
     case directoryEnumerationFailure
+    case catalogCommitAbortedDueToIncompleteEnumeration
     case invalidOwnedOperationComponent
     case sourceIdentityChangedBeforeRename
     case destinationIdentityMismatchAfterRename
@@ -76,6 +77,8 @@ private struct OwnedDirectoryIdentity: Equatable {
 enum OwnedDictionaryLifecycleTestObserver {
     nonisolated(unsafe) static var beforeRenameBinding: (@Sendable (String) throws -> Void)?
     nonisolated(unsafe) static var beforeIndexInventory: (@Sendable () throws -> Void)?
+    nonisolated(unsafe) static var afterIndexInventoryEntryRead: (@Sendable (Int) -> Bool)?
+    nonisolated(unsafe) static var beforeCatalogMutation: (@Sendable () -> Void)?
 }
 #endif
 
@@ -157,6 +160,7 @@ private struct OwnedDictionaryLifecyclePrepared: Sendable {
     let originalCatalog: DictionaryCatalog
     let proposedCatalog: DictionaryCatalog
     let report: OwnedDictionaryLifecycleReport
+    let catalogCommitAllowed: Bool
 }
 
 private enum OwnedDictionaryLifecyclePOSIX {
@@ -331,6 +335,42 @@ private enum OwnedDictionaryLifecyclePOSIX {
         return result
     }
 
+#if OWNED_LIFECYCLE_TESTING
+    /// Test-only overload. It uses the same fdopendir/readdir loop and final
+    /// `directoryEnumerationFailure` branch as production, but can stop after
+    /// a completed entry to model a non-EOF read failure deterministically.
+    static func entries(_ directory: Int32,
+                        afterEntryRead: @Sendable (Int) -> Bool) throws -> Set<String> {
+        let copy = Darwin.openat(
+            directory, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        )
+        guard copy >= 0, let stream = Darwin.fdopendir(copy) else {
+            if copy >= 0 { Darwin.close(copy) }
+            throw OwnedDictionaryLifecycleErrorCode.directoryEnumerationFailure
+        }
+        defer { Darwin.closedir(stream) }
+        var result = Set<String>()
+        var injectedFailure = false
+        errno = 0
+        while let entry = Darwin.readdir(stream) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN)) {
+                    String(cString: $0)
+                }
+            }
+            if name != "." && name != ".." { result.insert(name) }
+            if afterEntryRead(result.count) {
+                injectedFailure = true
+                break
+            }
+        }
+        guard !injectedFailure, errno == 0 else {
+            throw OwnedDictionaryLifecycleErrorCode.directoryEnumerationFailure
+        }
+        return result
+    }
+#endif
+
     static func read(_ descriptor: Int32, maximum: Int) throws -> Data {
         let before = try metadata(descriptor)
         guard before.st_size > 0, before.st_size <= Int64(maximum) else {
@@ -404,6 +444,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                  provenance: DictionaryCatalogLoadProvenance) -> OwnedDictionaryLifecyclePrepared {
         var catalog = original
         var report = OwnedDictionaryLifecycleReport(catalogProvenance: provenance)
+        var catalogCommitAllowed = true
         do {
             try checkCancellation()
             let roots = try openRoots()
@@ -432,12 +473,21 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             )
         } catch let code as OwnedDictionaryLifecycleErrorCode {
             report.issue(code)
+            if code == .directoryEnumerationFailure {
+                catalogCommitAllowed = false
+                report.issue(.catalogCommitAbortedDueToIncompleteEnumeration)
+            }
         } catch {
             report.issue(.ioFailure)
         }
-        if catalog != original { catalog.updatedAt = Date() }
+        if catalogCommitAllowed, catalog != original {
+            catalog.updatedAt = Date()
+        } else if !catalogCommitAllowed {
+            catalog = original
+        }
         return OwnedDictionaryLifecyclePrepared(
-            originalCatalog: original, proposedCatalog: catalog, report: report
+            originalCatalog: original, proposedCatalog: catalog, report: report,
+            catalogCommitAllowed: catalogCommitAllowed
         )
     }
 
@@ -531,6 +581,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     try removePartial(parent: roots.staging, component: component)
                     report.completedDeletionDictionaryIDs.append(component)
                 } catch let code as OwnedDictionaryLifecycleErrorCode {
+                    if code == .directoryEnumerationFailure { throw code }
                     report.preservedDictionaryIDs.append(component)
                     report.issue(code)
                 }
@@ -591,6 +642,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     try hooks.synchronize(roots.staging)
                 }
             } catch let code as OwnedDictionaryLifecycleErrorCode {
+                if code == .directoryEnumerationFailure { throw code }
                 if let publishedDictionaryID {
                     durabilityUncertainIDs.insert(publishedDictionaryID)
                 }
@@ -723,6 +775,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                 report.acceptedDictionaryIDs.append(dictionaryID)
                 inspection.validatedDirectoryIDs.insert(dictionaryID)
             } catch let code as OwnedDictionaryLifecycleErrorCode {
+                if code == .directoryEnumerationFailure { throw code }
                 disable(&catalog.dictionaries[index], state: .corrupt)
                 report.preservedDictionaryIDs.append(dictionaryID)
                 report.issue(code, dictionaryID: dictionaryID)
@@ -786,6 +839,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     restored.insert(dictionaryID)
                     report.restoredDictionaryIDs.append(dictionaryID)
                 } catch let code as OwnedDictionaryLifecycleErrorCode {
+                    if code == .directoryEnumerationFailure { throw code }
                     if code == .destinationIdentityMismatchAfterRename {
                         disable(&catalog.dictionaries[descriptorIndex], state: .corrupt)
                     }
@@ -811,6 +865,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     try hooks.synchronize(roots.pendingDeletion)
                     report.completedDeletionDictionaryIDs.append(dictionaryID)
                 } catch let code as OwnedDictionaryLifecycleErrorCode {
+                    if code == .directoryEnumerationFailure { throw code }
                     report.preservedDictionaryIDs.append(dictionaryID)
                     report.issue(code == .unexpectedOwnedEntry
                         ? code : .pendingDeletionCleanupDeferred,
@@ -846,6 +901,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                 )
                 candidates.append((dictionaryID, sidecar.sidecar))
             } catch let code as OwnedDictionaryLifecycleErrorCode {
+                if code == .directoryEnumerationFailure { throw code }
                 report.preservedDictionaryIDs.append(component)
                 report.issue(code)
             } catch {
@@ -903,6 +959,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     parent: roots.dictionaries, dictionaryID: dictionaryID
                 )
             } catch let code as OwnedDictionaryLifecycleErrorCode {
+                if code == .directoryEnumerationFailure { throw code }
                 report.preservedDictionaryIDs.append(dictionaryID)
                 report.issue(code, dictionaryID: dictionaryID)
                 continue
@@ -1282,9 +1339,20 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             "dictionary.sqlite-shm"
         ])
 #if OWNED_LIFECYCLE_TESTING
-        try OwnedDictionaryLifecycleTestObserver.beforeIndexInventory?()
-#endif
+        if inventoryOnly {
+            try OwnedDictionaryLifecycleTestObserver.beforeIndexInventory?()
+        }
+        let entries = try OwnedDictionaryLifecyclePOSIX.entries(
+            index,
+            afterEntryRead: { entryCount in
+                inventoryOnly &&
+                    (OwnedDictionaryLifecycleTestObserver.afterIndexInventoryEntryRead?(entryCount)
+                        ?? false)
+            }
+        )
+#else
         let entries = try OwnedDictionaryLifecyclePOSIX.entries(index)
+#endif
         guard entries.isSubset(of: allowed) else {
             throw OwnedDictionaryLifecycleErrorCode.indexInventoryContainsUnknownEntries
         }
@@ -1446,12 +1514,20 @@ final class OwnedDictionaryLifecycleReconciler {
         let prepared = await Task.detached(priority: .utility) {
             worker.prepare(catalog: catalog, provenance: loaded.provenance)
         }.value
+        guard prepared.catalogCommitAllowed else {
+            return OwnedDictionaryLifecycleResult(
+                catalog: prepared.originalCatalog, report: prepared.report
+            )
+        }
         guard prepared.proposedCatalog != prepared.originalCatalog else {
             return OwnedDictionaryLifecycleResult(
                 catalog: prepared.originalCatalog, report: prepared.report
             )
         }
         do {
+#if OWNED_LIFECYCLE_TESTING
+            OwnedDictionaryLifecycleTestObserver.beforeCatalogMutation?()
+#endif
             let mutation = try catalogStore.mutate { latest, provenance in
                 let sameSnapshot = latest == prepared.originalCatalog ||
                     (provenance == .missing &&
