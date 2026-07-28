@@ -21,7 +21,10 @@ the mutable authority for enabled state, query level/order, lifecycle state, ind
 relative paths. Reconciliation never derives one authority from an untrusted display name.
 
 - A valid `verified-*` directory is bounded-read, fully hashed and published with
-  `renameatx_np(RENAME_EXCL)`. Both parent directories are fsynced before Catalog registration.
+  `renameatx_np(RENAME_EXCL)`. Operation names are accepted only as canonical lowercase UUID
+  components. The validated directory identity (device, inode, owner and type) is rebound at
+  the source name before rename and again at the destination after rename. Both parent
+  directories are fsynced before Catalog registration.
   A post-rename fsync failure leaves the final object unregistered during that run; a later
   startup treats the surviving object as an ordinary durability-uncertain orphan.
 - A complete final OpenResource orphan receives a disabled, fallback, `pendingIndex` descriptor
@@ -40,13 +43,14 @@ Both `appManagedImported` and `appManagedOpenResource` are explicitly indexable 
 resources remain non-queryable in this stage.
 
 An interrupted `indexing` state returns to `pendingIndex`; the exact
-`index/dictionary.sqlite.building` component is removed after fd-bound inventory and directory
-fsync. `ready` without a final index also returns to `pendingIndex` and clears stale index
+`index/dictionary.sqlite.building` component is removed only after a fresh fd-bound complete
+inventory confirms that no unknown index entry exists, then directory fsync. `ready` without a final index also returns to `pendingIndex` and clears stale index
 metadata. A final index beside `pendingIndex` never causes automatic promotion to `ready`.
 
-Removal suspends the current managed runtime, revalidates the owned directory by fd, moves the
-whole UUID directory to `PendingDeletion/<dictionaryID>` with no-replace rename and fsyncs both
-parents. Catalog deletion then commits. A Catalog failure restores the same inode no-replace; a
+Removal suspends the current managed runtime, revalidates the owned directory by fd, carries its
+device/inode/owner/type identity across the stage and rollback names, moves the whole UUID
+directory to `PendingDeletion/<dictionaryID>` with no-replace rename and fsyncs both parents.
+Catalog deletion then commits. A Catalog failure restores the same inode no-replace; a
 successful Catalog commit followed by cleanup failure leaves PendingDeletion for the next
 startup. Existing Obsidian or saved content snapshots are not touched.
 

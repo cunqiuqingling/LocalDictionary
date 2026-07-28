@@ -20,11 +20,64 @@ enum OwnedDictionaryLifecycleErrorCode: String, Error, Equatable, Sendable {
     case catalogCommitFailedAfterFilesystemMutation
     case interruptedIndexReset
     case directoryEnumerationFailure
+    case invalidOwnedOperationComponent
+    case sourceIdentityChangedBeforeRename
+    case destinationIdentityMismatchAfterRename
+    case pendingDeletionIdentityChanged
+    case indexInventoryContainsUnknownEntries
     case unsafePath
     case permissionDenied
     case cancelled
     case ioFailure
 }
+
+private enum OwnedOperationComponent {
+    case partial(UUID)
+    case verified(UUID)
+
+    static func parse(_ component: String) -> OwnedOperationComponent? {
+        let prefix: String
+        let make: (UUID) -> OwnedOperationComponent
+        if component.hasPrefix(".partial-") {
+            prefix = ".partial-"
+            make = OwnedOperationComponent.partial
+        } else if component.hasPrefix("verified-") {
+            prefix = "verified-"
+            make = OwnedOperationComponent.verified
+        } else {
+            return nil
+        }
+        let suffix = String(component.dropFirst(prefix.count))
+        guard let uuid = UUID(uuidString: suffix),
+              uuid.uuidString.lowercased() == suffix else { return nil }
+        return make(uuid)
+    }
+
+    static func hasReservedPrefix(_ component: String) -> Bool {
+        component.hasPrefix(".partial-") || component.hasPrefix("verified-")
+    }
+}
+
+private struct OwnedDirectoryIdentity: Equatable {
+    let device: UInt64
+    let inode: UInt64
+    let owner: uid_t
+    let type: mode_t
+
+    init(_ value: stat) {
+        device = UInt64(value.st_dev)
+        inode = UInt64(value.st_ino)
+        owner = value.st_uid
+        type = value.st_mode & mode_t(S_IFMT)
+    }
+}
+
+#if OWNED_LIFECYCLE_TESTING
+enum OwnedDictionaryLifecycleTestObserver {
+    nonisolated(unsafe) static var beforeRenameBinding: (@Sendable (String) throws -> Void)?
+    nonisolated(unsafe) static var beforeIndexInventory: (@Sendable () throws -> Void)?
+}
+#endif
 
 struct OwnedDictionaryLifecycleIssue: Equatable, Sendable {
     let code: OwnedDictionaryLifecycleErrorCode
@@ -154,6 +207,12 @@ private enum OwnedDictionaryLifecyclePOSIX {
         lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino &&
             (lhs.st_mode & mode_t(S_IFMT)) == (rhs.st_mode & mode_t(S_IFMT)) &&
             lhs.st_uid == rhs.st_uid
+    }
+
+    static func directoryIdentity(_ descriptor: Int32) throws -> OwnedDirectoryIdentity {
+        let value = try metadata(descriptor)
+        try validateDirectory(value)
+        return OwnedDirectoryIdentity(value)
     }
 
     static func validateDirectory(_ value: stat) throws {
@@ -352,11 +411,11 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             let durabilityUncertainIDs = try reconcileStaging(
                 roots: roots, catalog: &catalog, report: &report
             )
-            let initiallyMissing = try inspectCatalogDirectories(
+            let inspection = try inspectCatalogDirectories(
                 roots: roots, catalog: &catalog, report: &report
             )
             let restored = try reconcilePendingDeletions(
-                roots: roots, catalog: catalog, report: &report
+                roots: roots, catalog: &catalog, report: &report
             )
             try recoverFinalOrphans(
                 roots: roots,
@@ -364,8 +423,10 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                 catalog: &catalog,
                 report: &report
             )
-            try reconcileIndexes(roots: roots, catalog: &catalog, report: &report)
-            let unresolved = initiallyMissing.subtracting(restored)
+            try reconcileIndexes(roots: roots, catalog: &catalog,
+                                 validatedDirectoryIDs: inspection.validatedDirectoryIDs,
+                                 report: &report)
+            let unresolved = inspection.missingDictionaryIDs.subtracting(restored)
             try markMissing(
                 unresolved, roots: roots, catalog: &catalog, report: &report
             )
@@ -378,6 +439,30 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         return OwnedDictionaryLifecyclePrepared(
             originalCatalog: original, proposedCatalog: catalog, report: report
         )
+    }
+
+    private struct CatalogDirectoryInspection {
+        var missingDictionaryIDs = Set<String>()
+        var validatedDirectoryIDs = Set<String>()
+    }
+
+    private final class ValidatedDirectoryCapability {
+        let descriptor: Int32
+
+        init(_ descriptor: Int32) { self.descriptor = descriptor }
+
+        deinit { Darwin.close(descriptor) }
+    }
+
+    private struct ValidatedOpenResourceDirectory {
+        let sidecar: OpenResourceInstallationSidecar
+        let identity: OwnedDirectoryIdentity
+        let capability: ValidatedDirectoryCapability
+    }
+
+    private struct ValidatedOwnedDirectory {
+        let identity: OwnedDirectoryIdentity
+        let capability: ValidatedDirectoryCapability
     }
 
     private struct Roots {
@@ -434,7 +519,14 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         var durabilityUncertainIDs = Set<String>()
         for component in try OwnedDictionaryLifecyclePOSIX.entries(roots.staging).sorted() {
             try checkCancellation()
-            if component.hasPrefix(".partial-") {
+            guard let operation = OwnedOperationComponent.parse(component) else {
+                report.preservedDictionaryIDs.append(component)
+                report.issue(OwnedOperationComponent.hasReservedPrefix(component)
+                    ? .invalidOwnedOperationComponent : .unexpectedOwnedEntry)
+                continue
+            }
+            switch operation {
+            case .partial:
                 do {
                     try removePartial(parent: roots.staging, component: component)
                     report.completedDeletionDictionaryIDs.append(component)
@@ -443,18 +535,16 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     report.issue(code)
                 }
                 continue
-            }
-            guard component.hasPrefix("verified-") else {
-                report.preservedDictionaryIDs.append(component)
-                report.issue(.unexpectedOwnedEntry)
-                continue
+            case .verified:
+                break
             }
             var publishedDictionaryID: String?
             do {
-                let sidecar = try validateOpenResourceDirectory(
+                let validated = try validateOpenResourceDirectory(
                     parent: roots.staging, component: component, fullHash: true,
                     expectedDictionaryID: nil, allowIndex: false
                 )
+                let sidecar = validated.sidecar
                 let dictionaryID = try OwnedDictionaryLifecyclePOSIX.canonicalUUID(
                     sidecar.dictionaryID
                 )
@@ -472,9 +562,15 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                         )
                         continue
                     }
-                    try hooks.renameNoReplaceAt(roots.staging, component,
-                                                roots.dictionaries, dictionaryID)
                     publishedDictionaryID = dictionaryID
+                    try renameValidatedDirectory(
+                        sourceParent: roots.staging, sourceComponent: component,
+                        destinationParent: roots.dictionaries,
+                        destinationComponent: dictionaryID,
+                        expected: validated.identity,
+                        validatedCapability: validated.capability,
+                        sourceRaceError: .sourceIdentityChangedBeforeRename
+                    )
                     try hooks.synchronize(roots.dictionaries)
                     try hooks.synchronize(roots.staging)
                     publishedDictionaryID = nil
@@ -483,7 +579,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     let final = try validateOpenResourceDirectory(
                         parent: roots.dictionaries, component: dictionaryID,
                         fullHash: true, expectedDictionaryID: dictionaryID, allowIndex: true
-                    )
+                    ).sidecar
                     guard final == sidecar else {
                         report.preservedDictionaryIDs.append(component)
                         report.issue(.dictionaryIdentityConflict, dictionaryID: dictionaryID)
@@ -540,12 +636,53 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         try hooks.synchronize(parent)
     }
 
+    /// Bind a name-based rename to the directory that has just completed the
+    /// full fd-relative validation pass.  The validation descriptor is kept
+    /// alive through both name re-binding and the
+    /// post-rename destination verification.
+    private func renameValidatedDirectory(
+        sourceParent: Int32,
+        sourceComponent: String,
+        destinationParent: Int32,
+        destinationComponent: String,
+        expected: OwnedDirectoryIdentity,
+        validatedCapability: ValidatedDirectoryCapability,
+        sourceRaceError: OwnedDictionaryLifecycleErrorCode
+    ) throws {
+#if OWNED_LIFECYCLE_TESTING
+        try OwnedDictionaryLifecycleTestObserver.beforeRenameBinding?(sourceComponent)
+#endif
+        guard try OwnedDictionaryLifecyclePOSIX.directoryIdentity(
+            validatedCapability.descriptor
+        ) == expected,
+              OwnedDirectoryIdentity(try OwnedDictionaryLifecyclePOSIX.entryMetadata(
+                sourceParent, sourceComponent
+              )) == expected else {
+            throw sourceRaceError
+        }
+
+        try hooks.renameNoReplaceAt(
+            sourceParent, sourceComponent, destinationParent, destinationComponent
+        )
+
+        let destination = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(
+            destinationParent, destinationComponent
+        )
+        defer { Darwin.close(destination) }
+        guard try OwnedDictionaryLifecyclePOSIX.directoryIdentity(destination) == expected,
+              OwnedDirectoryIdentity(try OwnedDictionaryLifecyclePOSIX.entryMetadata(
+                destinationParent, destinationComponent
+              )) == expected else {
+            throw OwnedDictionaryLifecycleErrorCode.destinationIdentityMismatchAfterRename
+        }
+    }
+
     private func inspectCatalogDirectories(
         roots: Roots,
         catalog: inout DictionaryCatalog,
         report: inout OwnedDictionaryLifecycleReport
-    ) throws -> Set<String> {
-        var missing = Set<String>()
+    ) throws -> CatalogDirectoryInspection {
+        var inspection = CatalogDirectoryInspection()
         for index in catalog.dictionaries.indices {
             try checkCancellation()
             let descriptor = catalog.dictionaries[index]
@@ -565,7 +702,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             guard !(try OwnedDictionaryLifecyclePOSIX.isAbsent(
                 roots.dictionaries, dictionaryID
             )) else {
-                missing.insert(dictionaryID)
+                inspection.missingDictionaryIDs.insert(dictionaryID)
                 continue
             }
             do {
@@ -575,15 +712,16 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                         parent: roots.dictionaries, component: dictionaryID,
                         fullHash: false, expectedDictionaryID: dictionaryID, allowIndex: true
                     )
-                    try match(sidecar: sidecar, descriptor: descriptor)
+                    try match(sidecar: sidecar.sidecar, descriptor: descriptor)
                 case .appManagedImported:
-                    try validateManagedLocalDirectory(
+                    _ = try validateManagedLocalDirectory(
                         parent: roots.dictionaries, descriptor: descriptor
                     )
                 case .externalReference, .bundledReadOnly:
                     continue
                 }
                 report.acceptedDictionaryIDs.append(dictionaryID)
+                inspection.validatedDirectoryIDs.insert(dictionaryID)
             } catch let code as OwnedDictionaryLifecycleErrorCode {
                 disable(&catalog.dictionaries[index], state: .corrupt)
                 report.preservedDictionaryIDs.append(dictionaryID)
@@ -594,12 +732,12 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                 report.issue(.invalidInstallationSidecar, dictionaryID: dictionaryID)
             }
         }
-        return missing
+        return inspection
     }
 
     private func reconcilePendingDeletions(
         roots: Roots,
-        catalog: DictionaryCatalog,
+        catalog: inout DictionaryCatalog,
         report: inout OwnedDictionaryLifecycleReport
     ) throws -> Set<String> {
         var restored = Set<String>()
@@ -615,9 +753,10 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                 report.issue(.unexpectedOwnedEntry)
                 continue
             }
-            if let descriptor = catalog.dictionaries.first(where: {
+            if let descriptorIndex = catalog.dictionaries.firstIndex(where: {
                 $0.dictionaryID == dictionaryID
             }) {
+                let descriptor = catalog.dictionaries[descriptorIndex]
                 guard DictionaryOwnershipPolicy.policy(
                     for: descriptor.sourceKind, ownership: descriptor.storageOwnership
                 )?.isRemovable == true else {
@@ -626,24 +765,35 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     continue
                 }
                 do {
-                    try validateOwnedDirectory(parent: roots.pendingDeletion,
-                                               descriptor: descriptor, fullHash: false)
+                    let validated = try validateOwnedDirectory(
+                        parent: roots.pendingDeletion, descriptor: descriptor, fullHash: false
+                    )
                     guard try OwnedDictionaryLifecyclePOSIX.isAbsent(
                         roots.dictionaries, dictionaryID
                     ) else {
                         throw OwnedDictionaryLifecycleErrorCode.pendingDeletionConflict
                     }
-                    try hooks.renameNoReplaceAt(roots.pendingDeletion, component,
-                                                roots.dictionaries, dictionaryID)
+                    try renameValidatedDirectory(
+                        sourceParent: roots.pendingDeletion, sourceComponent: component,
+                        destinationParent: roots.dictionaries,
+                        destinationComponent: dictionaryID,
+                        expected: validated.identity,
+                        validatedCapability: validated.capability,
+                        sourceRaceError: .pendingDeletionIdentityChanged
+                    )
                     try hooks.synchronize(roots.dictionaries)
                     try hooks.synchronize(roots.pendingDeletion)
                     restored.insert(dictionaryID)
                     report.restoredDictionaryIDs.append(dictionaryID)
                 } catch let code as OwnedDictionaryLifecycleErrorCode {
+                    if code == .destinationIdentityMismatchAfterRename {
+                        disable(&catalog.dictionaries[descriptorIndex], state: .corrupt)
+                    }
                     report.preservedDictionaryIDs.append(dictionaryID)
-                    report.issue(code == .pendingDeletionConflict
-                        ? code : .pendingDeletionRestoreFailed,
-                        dictionaryID: dictionaryID)
+                    let exactIdentityFailure = code == .pendingDeletionIdentityChanged ||
+                        code == .destinationIdentityMismatchAfterRename
+                    report.issue(code == .pendingDeletionConflict || exactIdentityFailure
+                        ? code : .pendingDeletionRestoreFailed, dictionaryID: dictionaryID)
                 } catch {
                     report.preservedDictionaryIDs.append(dictionaryID)
                     report.issue(.pendingDeletionRestoreFailed, dictionaryID: dictionaryID)
@@ -694,7 +844,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                     parent: roots.dictionaries, component: component, fullHash: true,
                     expectedDictionaryID: dictionaryID, allowIndex: true
                 )
-                candidates.append((dictionaryID, sidecar))
+                candidates.append((dictionaryID, sidecar.sidecar))
             } catch let code as OwnedDictionaryLifecycleErrorCode {
                 report.preservedDictionaryIDs.append(component)
                 report.issue(code)
@@ -728,6 +878,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
 
     private func reconcileIndexes(roots: Roots,
                                   catalog: inout DictionaryCatalog,
+                                  validatedDirectoryIDs: Set<String>,
                                   report: inout OwnedDictionaryLifecycleReport) throws {
         let now = Date()
         for index in catalog.dictionaries.indices {
@@ -740,16 +891,22 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             guard (try? OwnedDictionaryLifecyclePOSIX.canonicalUUID(dictionaryID)) != nil,
                   !(try OwnedDictionaryLifecyclePOSIX.isAbsent(
                     roots.dictionaries, dictionaryID
-                  )) else { continue }
+                  )), validatedDirectoryIDs.contains(dictionaryID) else { continue }
 
             if catalog.dictionaries[index].state == .indexing {
                 resetIndex(&catalog.dictionaries[index], now: now)
                 report.downgradedDictionaryIDs.append(dictionaryID)
                 report.issue(.interruptedIndexReset, dictionaryID: dictionaryID)
             }
-            try removeKnownBuildingIfPresent(
-                parent: roots.dictionaries, dictionaryID: dictionaryID
-            )
+            do {
+                try removeKnownBuildingIfPresent(
+                    parent: roots.dictionaries, dictionaryID: dictionaryID
+                )
+            } catch let code as OwnedDictionaryLifecycleErrorCode {
+                report.preservedDictionaryIDs.append(dictionaryID)
+                report.issue(code, dictionaryID: dictionaryID)
+                continue
+            }
             if catalog.dictionaries[index].state == .ready {
                 let finalExists = try finalIndexExists(
                     parent: roots.dictionaries, dictionaryID: dictionaryID
@@ -790,19 +947,20 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         fullHash: Bool,
         expectedDictionaryID: String?,
         allowIndex: Bool
-    ) throws -> OpenResourceInstallationSidecar {
+    ) throws -> ValidatedOpenResourceDirectory {
         let directory = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(parent, component)
-        defer { Darwin.close(directory) }
+        let capability = ValidatedDirectoryCapability(directory)
+        let identity = try OwnedDictionaryLifecyclePOSIX.directoryIdentity(capability.descriptor)
         let allowed = allowIndex
             ? Set([OpenResourceInstallationIdentity.payloadComponent,
                    OpenResourceInstallationIdentity.sidecarComponent, "index"])
             : Set([OpenResourceInstallationIdentity.payloadComponent,
                    OpenResourceInstallationIdentity.sidecarComponent])
-        guard try OwnedDictionaryLifecyclePOSIX.entries(directory).isSubset(of: allowed) else {
+        guard try OwnedDictionaryLifecyclePOSIX.entries(capability.descriptor).isSubset(of: allowed) else {
             throw OwnedDictionaryLifecycleErrorCode.unexpectedOwnedEntry
         }
         let sidecarFD = try OwnedDictionaryLifecyclePOSIX.openRegular(
-            directory, OpenResourceInstallationIdentity.sidecarComponent
+            capability.descriptor, OpenResourceInstallationIdentity.sidecarComponent
         )
         defer { Darwin.close(sidecarFD) }
         try OwnedDictionaryLifecyclePOSIX.validateRegularFile(
@@ -820,7 +978,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             throw OwnedDictionaryLifecycleErrorCode.dictionaryIdentityConflict
         }
         let payloadFD = try OwnedDictionaryLifecyclePOSIX.openRegular(
-            directory, OpenResourceInstallationIdentity.payloadComponent
+            capability.descriptor, OpenResourceInstallationIdentity.payloadComponent
         )
         defer { Darwin.close(payloadFD) }
         try OwnedDictionaryLifecyclePOSIX.validateRegularFile(
@@ -832,20 +990,23 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             throw OwnedDictionaryLifecycleErrorCode.payloadIdentityMismatch
         }
         if allowIndex,
-           !(try OwnedDictionaryLifecyclePOSIX.isAbsent(directory, "index")) {
-            try validateIndexDirectory(directory, inventoryOnly: true)
+           !(try OwnedDictionaryLifecyclePOSIX.isAbsent(capability.descriptor, "index")) {
+            try validateIndexDirectory(capability.descriptor, inventoryOnly: true)
         }
-        return sidecar
+        return ValidatedOpenResourceDirectory(
+            sidecar: sidecar, identity: identity, capability: capability
+        )
     }
 
     private func validateManagedLocalDirectory(parent: Int32,
-                                               descriptor: DictionaryDescriptor) throws {
+                                               descriptor: DictionaryDescriptor)
+        throws -> ValidatedDirectoryCapability {
         let directory = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(
             parent, descriptor.dictionaryID
         )
-        defer { Darwin.close(directory) }
-        let entries = try OwnedDictionaryLifecyclePOSIX.entries(directory)
-        try inventory(entries: entries, directory: directory,
+        let capability = ValidatedDirectoryCapability(directory)
+        let entries = try OwnedDictionaryLifecyclePOSIX.entries(capability.descriptor)
+        try inventory(entries: entries, directory: capability.descriptor,
                       ownership: .appManagedImported,
                       descriptor: descriptor, allowIndex: true)
         guard let relativePath = descriptor.relativePaths.dictionary,
@@ -856,23 +1017,26 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         }
         if sourceComponents.count == 1 {
             let file = try OwnedDictionaryLifecyclePOSIX.openRegular(
-                directory, sourceComponents[0]
+                capability.descriptor, sourceComponents[0]
             )
             Darwin.close(file)
         } else {
             guard sourceComponents[0] == "source" else {
                 throw OwnedDictionaryLifecycleErrorCode.unsafePath
             }
-            let source = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(directory, "source")
+            let source = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(
+                capability.descriptor, "source"
+            )
             defer { Darwin.close(source) }
             let file = try OwnedDictionaryLifecyclePOSIX.openRegular(source, sourceComponents[1])
             Darwin.close(file)
         }
+        return capability
     }
 
     private func validateOwnedDirectory(parent: Int32,
                                         descriptor: DictionaryDescriptor,
-                                        fullHash: Bool) throws {
+                                        fullHash: Bool) throws -> ValidatedOwnedDirectory {
         switch descriptor.storageOwnership {
         case .appManagedOpenResource:
             let sidecar = try validateOpenResourceDirectory(
@@ -880,16 +1044,18 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                 fullHash: fullHash, expectedDictionaryID: descriptor.dictionaryID,
                 allowIndex: true
             )
-            try match(sidecar: sidecar, descriptor: descriptor)
-        case .appManagedImported:
-            try validateManagedLocalDirectory(parent: parent, descriptor: descriptor)
-            let directory = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(
-                parent, descriptor.dictionaryID
+            try match(sidecar: sidecar.sidecar, descriptor: descriptor)
+            return ValidatedOwnedDirectory(
+                identity: sidecar.identity, capability: sidecar.capability
             )
-            defer { Darwin.close(directory) }
-            if !(try OwnedDictionaryLifecyclePOSIX.isAbsent(directory, "index")) {
-                try validateIndexDirectory(directory, inventoryOnly: true)
-            }
+        case .appManagedImported:
+            let capability = try validateManagedLocalDirectory(
+                parent: parent, descriptor: descriptor
+            )
+            let identity = try OwnedDictionaryLifecyclePOSIX.directoryIdentity(
+                capability.descriptor
+            )
+            return ValidatedOwnedDirectory(identity: identity, capability: capability)
         case .externalReference, .bundledReadOnly:
             throw OwnedDictionaryLifecycleErrorCode.invalidOwnedDirectory
         }
@@ -989,7 +1155,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                                       descriptor: DictionaryDescriptor?,
                                       allowIndex: Bool) throws {
         if let descriptor {
-            try validateOwnedDirectory(parent: parent, descriptor: descriptor, fullHash: false)
+            _ = try validateOwnedDirectory(parent: parent, descriptor: descriptor, fullHash: false)
         } else if ownership == .appManagedOpenResource {
             _ = try validateOpenResourceDirectory(
                 parent: parent, component: component, fullHash: false,
@@ -1115,9 +1281,12 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             "dictionary.sqlite.previous", "dictionary.sqlite-wal",
             "dictionary.sqlite-shm"
         ])
+#if OWNED_LIFECYCLE_TESTING
+        try OwnedDictionaryLifecycleTestObserver.beforeIndexInventory?()
+#endif
         let entries = try OwnedDictionaryLifecyclePOSIX.entries(index)
         guard entries.isSubset(of: allowed) else {
-            throw OwnedDictionaryLifecycleErrorCode.unexpectedOwnedEntry
+            throw OwnedDictionaryLifecycleErrorCode.indexInventoryContainsUnknownEntries
         }
         for entry in entries {
             try OwnedDictionaryLifecyclePOSIX.validateRegularFile(
@@ -1138,6 +1307,10 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         }
         let index = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(directory, "index")
         defer { Darwin.close(index) }
+        // Validate the complete inventory at the deletion boundary.  A
+        // descriptor accepted earlier in this run is not authority to remove
+        // a known file after an unknown entry has appeared.
+        try validateIndexDirectory(directory, inventoryOnly: true)
         guard !(try OwnedDictionaryLifecyclePOSIX.isAbsent(
             index, "dictionary.sqlite.building"
         )) else { return }

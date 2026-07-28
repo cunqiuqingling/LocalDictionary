@@ -39,6 +39,7 @@ xcrun --sdk macosx swiftc \
   -parse-as-library \
   -strict-concurrency=complete \
   -warnings-as-errors \
+  -D OWNED_LIFECYCLE_TESTING \
   -sanitize=address,undefined \
   -module-cache-path "$BUILD/debug-module-cache" \
   "${SOURCES[@]}" \
@@ -55,6 +56,7 @@ xcrun --sdk macosx swiftc \
   -DNDEBUG \
   -strict-concurrency=complete \
   -warnings-as-errors \
+  -D OWNED_LIFECYCLE_TESTING \
   -module-cache-path "$BUILD/release-module-cache" \
   "${SOURCES[@]}" \
   -lsqlite3 \

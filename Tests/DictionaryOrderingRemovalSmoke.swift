@@ -464,6 +464,83 @@ private func testRecoveryAndPathSafety(base: URL) throws {
     } catch ManagedDictionaryRemovalError.unsafeManagedPath {}
 }
 
+private func testRemovalIdentityRaces(base: URL) throws {
+#if OWNED_LIFECYCLE_TESTING
+    let stageFixture = try removalFixture(base: base, suffix: "28")
+    let worker = ManagedDictionaryRemovalWorker(applicationSupportRootURL: stageFixture.root)
+    let stagePlan: ManagedDictionaryRemovalPlan
+    do {
+        stagePlan = try worker.makePlan(for: stageFixture.descriptor)
+    } catch { throw SmokeError.failed("stage fixture plan: \(error)") }
+    let retained = stageFixture.root.appendingPathComponent("retained-stage", isDirectory: true)
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = { phase, _ in
+        guard phase == .stage else { return }
+        guard Darwin.rename(stageFixture.managedDirectory.path, retained.path) == 0,
+              Darwin.mkdir(stageFixture.managedDirectory.path, 0o700) == 0 else {
+            throw SmokeError.failed("stage substitution setup")
+        }
+    }
+    do {
+        try worker.stage(stagePlan)
+        throw SmokeError.failed("stage substitution must fail closed")
+    } catch ManagedDictionaryRemovalError.removalStageIdentityMismatch {}
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = nil
+    try expect(FileManager.default.fileExists(atPath: retained.path) &&
+               FileManager.default.fileExists(atPath: stageFixture.managedDirectory.path) &&
+               !FileManager.default.fileExists(atPath: stageFixture.pendingDirectory.path),
+               "stage substitution must preserve both directories without publishing pending")
+
+    let rollbackFixture = try removalFixture(base: base, suffix: "29")
+    let rollbackWorker = ManagedDictionaryRemovalWorker(applicationSupportRootURL: rollbackFixture.root)
+    let rollbackPlan: ManagedDictionaryRemovalPlan
+    do {
+        rollbackPlan = try rollbackWorker.makePlan(for: rollbackFixture.descriptor)
+    } catch { throw SmokeError.failed("rollback fixture plan: \(error)") }
+    do {
+        try rollbackWorker.stage(rollbackPlan)
+    } catch {
+        throw SmokeError.failed("rollback fixture stage: \(error)")
+    }
+    let retainedPending = rollbackFixture.root.appendingPathComponent("retained-pending", isDirectory: true)
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = { phase, _ in
+        guard phase == .rollback else { return }
+        guard Darwin.rename(rollbackFixture.pendingDirectory.path, retainedPending.path) == 0,
+              Darwin.mkdir(rollbackFixture.pendingDirectory.path, 0o700) == 0 else {
+            throw SmokeError.failed("rollback substitution setup")
+        }
+    }
+    do {
+        try rollbackWorker.rollback(rollbackPlan)
+        throw SmokeError.failed("rollback substitution must fail closed")
+    } catch ManagedDictionaryRemovalError.removalRollbackIdentityMismatch {}
+    ManagedDictionaryRemovalTestObserver.beforeRenameBinding = nil
+    try expect(FileManager.default.fileExists(atPath: retainedPending.path) &&
+               FileManager.default.fileExists(atPath: rollbackFixture.pendingDirectory.path) &&
+               !FileManager.default.fileExists(atPath: rollbackFixture.managedDirectory.path),
+               "rollback substitution must preserve pending objects")
+
+    let conflictFixture = try removalFixture(base: base, suffix: "30")
+    let conflictWorker = ManagedDictionaryRemovalWorker(applicationSupportRootURL: conflictFixture.root)
+    let conflictPlan: ManagedDictionaryRemovalPlan
+    do {
+        conflictPlan = try conflictWorker.makePlan(for: conflictFixture.descriptor)
+    } catch { throw SmokeError.failed("conflict fixture plan: \(error)") }
+    do {
+        try conflictWorker.stage(conflictPlan)
+    } catch {
+        throw SmokeError.failed("conflict fixture stage: \(error)")
+    }
+    try FileManager.default.createDirectory(at: conflictFixture.managedDirectory,
+                                            withIntermediateDirectories: false)
+    do {
+        try conflictWorker.rollback(conflictPlan)
+        throw SmokeError.failed("rollback target conflict must fail")
+    } catch ManagedDictionaryRemovalError.rollbackFailed {}
+    try expect(FileManager.default.fileExists(atPath: conflictFixture.pendingDirectory.path),
+               "rollback conflict must retain pending object")
+#endif
+}
+
 @MainActor
 private func testDeferredCleanupRecovery(base: URL) async throws {
     let fixture = try removalFixture(base: base, suffix: "27")
@@ -498,6 +575,7 @@ struct DictionaryOrderingRemovalSmoke {
         try await testSuccessfulRemoval(base: base)
         try await testRemovalGuardsAndRollback(base: base)
         try testRecoveryAndPathSafety(base: base)
+        try testRemovalIdentityRaces(base: base)
         try await testDeferredCleanupRecovery(base: base)
         print("Dictionary ordering/removal smoke: PASS")
     }

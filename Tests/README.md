@@ -213,6 +213,13 @@ durability uncertainty, idempotence, and the startup publication barrier. It use
 temporary roots and synthetic payloads only; it never reads Application Support, private
 dictionaries, `local.json`, the network, or Keychain.
 
+R1 additionally exercises exact canonical UUID operation names, verified-publication name
+substitution, unknown-index preservation before `.building` cleanup, and an injected index
+enumeration failure. `run-dictionary-ordering-removal-smoke.sh` compiles the same test-only
+rename interlock to cover managed removal stage and rollback substitution plus rollback target
+conflict. These observers exist only in smoke binaries built with
+`OWNED_LIFECYCLE_TESTING`; App builds do not define that flag.
+
 The reported number is **total runtime assertions**, not a count of independent security
 behaviours. The runner also reports assertion categories for real POSIX filesystem operations,
 real `renameatx_np`, Catalog transactions, SHA-256, injected failures, publication barriers, and

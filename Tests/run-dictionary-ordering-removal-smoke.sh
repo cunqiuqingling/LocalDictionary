@@ -18,6 +18,7 @@ xcrun --sdk macosx swiftc \
   -parse-as-library \
   -strict-concurrency=complete \
   -warnings-as-errors \
+  -D OWNED_LIFECYCLE_TESTING \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/AppConfig.swift" \
   "$ROOT/App/DictionaryCatalog.swift" \

@@ -11,6 +11,9 @@ enum ManagedDictionaryRemovalError: LocalizedError, Equatable, Sendable {
     case removalAlreadyInProgress
     case stagingConflict
     case stagingFailed
+    case removalStageIdentityMismatch
+    case removalRollbackIdentityMismatch
+    case filesystemPublishedButIdentityUnconfirmed
     case catalogWriteFailed
     case rollbackFailed
 
@@ -25,11 +28,38 @@ enum ManagedDictionaryRemovalError: LocalizedError, Equatable, Sendable {
         case .removalAlreadyInProgress: return "已有词典移除操作正在进行。"
         case .stagingConflict: return "该词典存在尚未清理的移除暂存目录。"
         case .stagingFailed: return "无法安全暂存托管词典目录。"
+        case .removalStageIdentityMismatch: return "托管词典目录在验证后发生变化，未执行移除。"
+        case .removalRollbackIdentityMismatch: return "暂存目录在恢复前发生变化，未执行恢复。"
+        case .filesystemPublishedButIdentityUnconfirmed:
+            return "文件系统操作完成但无法确认词典目录身份；目录已保留。"
         case .catalogWriteFailed: return "无法保存 Catalog，词典目录已恢复。"
         case .rollbackFailed: return "Catalog 未改变，但托管目录暂时无法恢复；请重新启动应用。"
         }
     }
 }
+
+struct ManagedDictionaryDirectoryIdentity: Equatable, Sendable {
+    let device: UInt64
+    let inode: UInt64
+    let owner: uid_t
+    let type: mode_t
+
+    init(_ value: stat) {
+        device = UInt64(value.st_dev)
+        inode = UInt64(value.st_ino)
+        owner = value.st_uid
+        type = value.st_mode & mode_t(S_IFMT)
+    }
+}
+
+enum ManagedDictionaryRemovalRenamePhase: Sendable { case stage, rollback }
+
+#if OWNED_LIFECYCLE_TESTING
+enum ManagedDictionaryRemovalTestObserver {
+    nonisolated(unsafe) static var beforeRenameBinding:
+        (@Sendable (ManagedDictionaryRemovalRenamePhase, String) throws -> Void)?
+}
+#endif
 
 struct ManagedDictionaryRemovalPlan: Sendable {
     let dictionaryID: String
@@ -37,6 +67,7 @@ struct ManagedDictionaryRemovalPlan: Sendable {
     let managedDirectoryURL: URL
     let pendingDeletionRootURL: URL
     let pendingDirectoryURL: URL
+    let expectedIdentity: ManagedDictionaryDirectoryIdentity
 }
 
 struct ManagedDictionaryRemovalRecoveryReport: Equatable, Sendable {
@@ -103,7 +134,7 @@ struct ManagedDictionaryRemovalWorker: Sendable {
                 throw ManagedDictionaryRemovalError.unsafeManagedPath
             }
         }
-        try validateOwnedIdentity(
+        let expectedIdentity = try validateOwnedIdentity(
             descriptor,
             parentURL: roots.dictionariesRoot,
             component: dictionaryID
@@ -114,7 +145,8 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             descriptor: descriptor,
             managedDirectoryURL: roots.managedDirectory,
             pendingDeletionRootURL: roots.pendingDeletionRoot,
-            pendingDirectoryURL: roots.pendingDirectory
+            pendingDirectoryURL: roots.pendingDirectory,
+            expectedIdentity: expectedIdentity
         )
     }
 
@@ -138,13 +170,18 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             throw ManagedDictionaryRemovalError.stagingConflict
         }
         do {
-            try validateOwnedIdentity(
+            let validated = try validateOwnedIdentity(
                 plan.descriptor,
                 parentURL: plan.managedDirectoryURL.deletingLastPathComponent(),
                 component: plan.dictionaryID
             )
+            guard validated == plan.expectedIdentity else {
+                throw ManagedDictionaryRemovalError.removalStageIdentityMismatch
+            }
             try renameNoReplace(source: plan.managedDirectoryURL,
-                                destination: plan.pendingDirectoryURL)
+                                destination: plan.pendingDirectoryURL,
+                                expected: plan.expectedIdentity,
+                                phase: .stage)
             try synchronizeDirectory(plan.managedDirectoryURL.deletingLastPathComponent())
             try synchronizeDirectory(plan.pendingDeletionRootURL)
         } catch let error as ManagedDictionaryRemovalError {
@@ -161,15 +198,22 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             throw ManagedDictionaryRemovalError.rollbackFailed
         }
         do {
-            try validateOwnedIdentity(
+            let validated = try validateOwnedIdentity(
                 plan.descriptor,
                 parentURL: plan.pendingDeletionRootURL,
                 component: plan.dictionaryID
             )
+            guard validated == plan.expectedIdentity else {
+                throw ManagedDictionaryRemovalError.removalRollbackIdentityMismatch
+            }
             try renameNoReplace(source: plan.pendingDirectoryURL,
-                                destination: plan.managedDirectoryURL)
+                                destination: plan.managedDirectoryURL,
+                                expected: plan.expectedIdentity,
+                                phase: .rollback)
             try synchronizeDirectory(plan.managedDirectoryURL.deletingLastPathComponent())
             try synchronizeDirectory(plan.pendingDeletionRootURL)
+        } catch let error as ManagedDictionaryRemovalError {
+            throw error
         } catch {
             throw ManagedDictionaryRemovalError.rollbackFailed
         }
@@ -177,7 +221,7 @@ struct ManagedDictionaryRemovalWorker: Sendable {
 
     func finalize(_ plan: ManagedDictionaryRemovalPlan) throws {
         try hooks.removeItem(plan.pendingDirectoryURL)
-        try validateOwnedIdentity(
+        _ = try validateOwnedIdentity(
             plan.descriptor,
             parentURL: plan.pendingDeletionRootURL,
             component: plan.dictionaryID
@@ -234,12 +278,15 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             do {
                 if let descriptor = managedDescriptors[dictionaryID],
                    !fileManager.fileExists(atPath: managedDirectory.path) {
-                    try validateOwnedIdentity(
+                    let identity = try validateOwnedIdentity(
                         descriptor,
                         parentURL: roots.pendingDeletionRoot,
                         component: dictionaryID
                     )
-                    try renameNoReplace(source: child, destination: managedDirectory)
+                    try renameNoReplace(
+                        source: child, destination: managedDirectory,
+                        expected: identity, phase: .rollback
+                    )
                     try synchronizeDirectory(roots.dictionariesRoot)
                     try synchronizeDirectory(roots.pendingDeletionRoot)
                     report.restoredDictionaryIDs.append(dictionaryID)
@@ -363,7 +410,10 @@ struct ManagedDictionaryRemovalWorker: Sendable {
         return value
     }
 
-    private func renameNoReplace(source: URL, destination: URL) throws {
+    private func renameNoReplace(source: URL,
+                                 destination: URL,
+                                 expected: ManagedDictionaryDirectoryIdentity,
+                                 phase: ManagedDictionaryRemovalRenamePhase) throws {
         let sourceParent = Darwin.open(
             source.deletingLastPathComponent().path,
             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
@@ -378,12 +428,16 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             throw ManagedDictionaryRemovalError.stagingFailed
         }
         defer { Darwin.close(destinationParent) }
+ #if OWNED_LIFECYCLE_TESTING
+        try ManagedDictionaryRemovalTestObserver.beforeRenameBinding?(phase, source.lastPathComponent)
+ #endif
         var before = stat()
         guard source.lastPathComponent.withCString({
             Darwin.fstatat(sourceParent, $0, &before, AT_SYMLINK_NOFOLLOW)
-        }) == 0, (before.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
-        before.st_uid == geteuid() else {
-            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        }) == 0, ManagedDictionaryDirectoryIdentity(before) == expected else {
+            throw phase == .stage
+                ? ManagedDictionaryRemovalError.removalStageIdentityMismatch
+                : ManagedDictionaryRemovalError.removalRollbackIdentityMismatch
         }
         let result = source.lastPathComponent.withCString { sourceName in
             destination.lastPathComponent.withCString { destinationName in
@@ -400,8 +454,8 @@ struct ManagedDictionaryRemovalWorker: Sendable {
         var after = stat()
         guard destination.lastPathComponent.withCString({
             Darwin.fstatat(destinationParent, $0, &after, AT_SYMLINK_NOFOLLOW)
-        }) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino else {
-            throw ManagedDictionaryRemovalError.stagingFailed
+        }) == 0, ManagedDictionaryDirectoryIdentity(after) == expected else {
+            throw ManagedDictionaryRemovalError.filesystemPublishedButIdentityUnconfirmed
         }
     }
 
@@ -418,7 +472,7 @@ struct ManagedDictionaryRemovalWorker: Sendable {
 
     private func validateOwnedIdentity(_ descriptor: DictionaryDescriptor,
                                        parentURL: URL,
-                                       component: String) throws {
+                                       component: String) throws -> ManagedDictionaryDirectoryIdentity {
         guard component == descriptor.dictionaryID else {
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
@@ -451,6 +505,7 @@ struct ManagedDictionaryRemovalWorker: Sendable {
         case .externalReference, .bundledReadOnly:
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
+        return ManagedDictionaryDirectoryIdentity(opened)
     }
 
     private func validateOpenResourceIdentity(_ descriptor: DictionaryDescriptor,
@@ -1026,6 +1081,8 @@ final class ManagedDictionaryRemovalCoordinator {
                 }.value
                 await queryService.resume(dictionaryID: dictionaryID)
                 return .failed(.catalogWriteFailed)
+            } catch let error as ManagedDictionaryRemovalError {
+                return .failed(error)
             } catch {
                 return .failed(.rollbackFailed)
             }

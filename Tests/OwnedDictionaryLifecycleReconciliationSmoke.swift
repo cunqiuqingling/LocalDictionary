@@ -200,6 +200,172 @@ private func writeManagedDirectory(root: URL,
     }
 }
 
+@MainActor
+private func testOperationIdentityAndIndexInventory(base: URL,
+                                                    smoke: inout Smoke) async throws {
+    let root = base.appendingPathComponent("operation-components", isDirectory: true)
+    let staging = root.appendingPathComponent("Staging", isDirectory: true)
+    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+    let invalid = [
+        ".partial-arbitrary", ".partial-",
+        ".partial-AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        ".partial-123e4567-e89b-12d3-a456-426614174000-extra",
+        "verified-arbitrary",
+        "verified-AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        "verified-123e4567-e89b-12d3-a456-426614174000-extra"
+    ]
+    var identities: [String: (UInt64, UInt64)] = [:]
+    for component in invalid {
+        let directory = staging.appendingPathComponent(component, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let marker = directory.appendingPathComponent("marker")
+        try Data("preserve".utf8).write(to: marker)
+        try chmod600(marker)
+        identities[component] = try fileIdentity(directory)
+    }
+    let store = DictionaryCatalogStore(directoryURL: root.appendingPathComponent("Catalog"))
+    let first = await OwnedDictionaryLifecycleReconciler(
+        catalogStore: store, applicationSupportRootURL: root
+    ).reconcile()
+    try smoke.check("invalid operation component exact issue", category: \.posix,
+                    first.report.issues.filter { $0.code == .invalidOwnedOperationComponent }.count == invalid.count)
+    try smoke.check("invalid operation components retain catalog", category: \.catalogTransactions,
+                    first.catalog.dictionaries.isEmpty)
+    for component in invalid {
+        let directory = staging.appendingPathComponent(component, isDirectory: true)
+        try smoke.check("invalid operation preserved \(component)", category: \.posix,
+                        FileManager.default.fileExists(atPath: directory.path) &&
+                        (try fileIdentity(directory)) == identities[component]!)
+    }
+    let second = await OwnedDictionaryLifecycleReconciler(
+        catalogStore: store, applicationSupportRootURL: root
+    ).reconcile()
+    try smoke.check("invalid operation second pass remains inert", category: \.posix,
+                    invalid.allSatisfy { FileManager.default.fileExists(
+                        atPath: staging.appendingPathComponent($0).path
+                    ) } && second.catalog.dictionaries.isEmpty)
+
+    let indexRoot = base.appendingPathComponent("index-inventory", isDirectory: true)
+    let source = Data("source".utf8)
+    let descriptor = managedDescriptor(
+        "61000000-0000-4000-8000-000000000001", state: .indexing, source: source
+    )
+    try writeManagedDirectory(root: indexRoot, descriptor: descriptor, source: source,
+                              indexFiles: ["dictionary.sqlite.building", "unknown-file"])
+    let building = indexRoot.appendingPathComponent(
+        "Dictionaries/\(descriptor.dictionaryID)/index/dictionary.sqlite.building"
+    )
+    let indexStore = DictionaryCatalogStore(directoryURL: indexRoot.appendingPathComponent("Catalog"))
+    try indexStore.save(catalog([descriptor]))
+    let indexResult = await OwnedDictionaryLifecycleReconciler(
+        catalogStore: indexStore, applicationSupportRootURL: indexRoot
+    ).reconcile()
+    try smoke.check("unknown index entry prevents building delete", category: \.posix,
+                    FileManager.default.fileExists(atPath: building.path))
+    try smoke.check("unknown index entry exact issue", category: \.faultInjection,
+                    indexResult.report.issues.map(\.code).contains(.indexInventoryContainsUnknownEntries))
+
+#if OWNED_LIFECYCLE_TESTING
+    let enumRoot = base.appendingPathComponent("index-enumeration", isDirectory: true)
+    let enumDescriptor = managedDescriptor(
+        "61000000-0000-4000-8000-000000000002", state: .indexing, source: source
+    )
+    try writeManagedDirectory(root: enumRoot, descriptor: enumDescriptor, source: source,
+                              indexFiles: ["dictionary.sqlite.building"])
+    let enumBuilding = enumRoot.appendingPathComponent(
+        "Dictionaries/\(enumDescriptor.dictionaryID)/index/dictionary.sqlite.building"
+    )
+    let enumStore = DictionaryCatalogStore(directoryURL: enumRoot.appendingPathComponent("Catalog"))
+    try enumStore.save(catalog([enumDescriptor]))
+    OwnedDictionaryLifecycleTestObserver.beforeIndexInventory = {
+        throw OwnedDictionaryLifecycleErrorCode.directoryEnumerationFailure
+    }
+    defer { OwnedDictionaryLifecycleTestObserver.beforeIndexInventory = nil }
+    let enumeration = await OwnedDictionaryLifecycleReconciler(
+        catalogStore: enumStore, applicationSupportRootURL: enumRoot
+    ).reconcile()
+    try smoke.check("enumeration failure preserves building", category: \.faultInjection,
+                    FileManager.default.fileExists(atPath: enumBuilding.path))
+    try smoke.check("enumeration failure exact issue", category: \.faultInjection,
+                    enumeration.report.issues.map(\.code).contains(.directoryEnumerationFailure))
+#endif
+}
+
+@MainActor
+private func testVerifiedPublicationIdentityRace(base: URL, smoke: inout Smoke) async throws {
+#if OWNED_LIFECYCLE_TESTING
+    let root = base.appendingPathComponent("verified-identity-race", isDirectory: true)
+    let staging = root.appendingPathComponent("Staging", isDirectory: true)
+    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+    let payload = Data("race payload".utf8)
+    let dictionaryID = "62000000-0000-4000-8000-000000000001"
+    let operation = "verified-62000000-0000-4000-8000-000000000099"
+    let identity = try makeIdentity(dictionaryID: dictionaryID, resourceID: "race", payload: payload)
+    let original = try writeOpenDirectory(parent: staging, component: operation,
+                                          identity: identity, payload: payload)
+    let retained = staging.appendingPathComponent("retained-original", isDirectory: true)
+    let replacement = staging.appendingPathComponent(operation, isDirectory: true)
+    OwnedDictionaryLifecycleTestObserver.beforeRenameBinding = { component in
+        guard component == operation else { return }
+        guard Darwin.rename(original.path, retained.path) == 0,
+              Darwin.mkdir(replacement.path, 0o700) == 0 else {
+            throw SmokeFailure.failed("race replacement setup")
+        }
+    }
+    defer { OwnedDictionaryLifecycleTestObserver.beforeRenameBinding = nil }
+    let store = DictionaryCatalogStore(directoryURL: root.appendingPathComponent("Catalog"))
+    let result = await OwnedDictionaryLifecycleReconciler(
+        catalogStore: store, applicationSupportRootURL: root
+    ).reconcile()
+    try smoke.check("verified substitution preserves original and replacement", category: \.rename,
+                    FileManager.default.fileExists(atPath: retained.path) &&
+                    FileManager.default.fileExists(atPath: replacement.path))
+    try smoke.check("verified substitution does not publish catalog", category: \.catalogTransactions,
+                    result.catalog.dictionaries.isEmpty)
+    try smoke.check("verified substitution exact identity issue", category: \.faultInjection,
+                    result.report.issues.map(\.code).contains(.sourceIdentityChangedBeforeRename))
+#endif
+}
+
+@MainActor
+private func testPendingDeletionIdentityRace(base: URL, smoke: inout Smoke) async throws {
+#if OWNED_LIFECYCLE_TESTING
+    let root = base.appendingPathComponent("pending-identity-race", isDirectory: true)
+    let pending = root.appendingPathComponent("PendingDeletion", isDirectory: true)
+    try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
+    let payload = Data("pending race payload".utf8)
+    let dictionaryID = "63000000-0000-4000-8000-000000000001"
+    let identity = try makeIdentity(dictionaryID: dictionaryID,
+                                    resourceID: "pending-race", payload: payload)
+    let original = try writeOpenDirectory(parent: pending, component: dictionaryID,
+                                          identity: identity, payload: payload)
+    let retained = pending.appendingPathComponent("retained-pending", isDirectory: true)
+    let replacement = pending.appendingPathComponent(dictionaryID, isDirectory: true)
+    OwnedDictionaryLifecycleTestObserver.beforeRenameBinding = { component in
+        guard component == dictionaryID else { return }
+        guard Darwin.rename(original.path, retained.path) == 0,
+              Darwin.mkdir(replacement.path, 0o700) == 0 else {
+            throw SmokeFailure.failed("pending replacement setup")
+        }
+    }
+    defer { OwnedDictionaryLifecycleTestObserver.beforeRenameBinding = nil }
+    let store = DictionaryCatalogStore(directoryURL: root.appendingPathComponent("Catalog"))
+    try store.save(catalog([openDescriptor(identity)]))
+    let result = await OwnedDictionaryLifecycleReconciler(
+        catalogStore: store, applicationSupportRootURL: root
+    ).reconcile()
+    try smoke.check("pending substitution preserves original and replacement", category: \.rename,
+                    FileManager.default.fileExists(atPath: retained.path) &&
+                    FileManager.default.fileExists(atPath: replacement.path))
+    try smoke.check("pending substitution does not restore final", category: \.catalogTransactions,
+                    !FileManager.default.fileExists(atPath: root.appendingPathComponent(
+                        "Dictionaries/\(dictionaryID)"
+                    ).path))
+    try smoke.check("pending substitution exact identity issue", category: \.faultInjection,
+                    result.report.issues.map(\.code).contains(.pendingDeletionIdentityChanged))
+#endif
+}
+
 private actor RemovalRuntime: ManagedDictionaryQueryRuntime {
     private var removed: [String] = []
 
@@ -1186,6 +1352,9 @@ struct OwnedDictionaryLifecycleReconciliationSmoke {
         try await testVerifiedRecovery(base: base, smoke: &smoke)
         try await testFinalValidationFailures(base: base, smoke: &smoke)
         try await testFinalAndIndexRecovery(base: base, smoke: &smoke)
+        try await testOperationIdentityAndIndexInventory(base: base, smoke: &smoke)
+        try await testVerifiedPublicationIdentityRace(base: base, smoke: &smoke)
+        try await testPendingDeletionIdentityRace(base: base, smoke: &smoke)
         try await testOrphanAndDuplicateRecovery(base: base, smoke: &smoke)
         try await testPendingDeletion(base: base, smoke: &smoke)
         try await testOwnedRemoval(base: base, smoke: &smoke)
