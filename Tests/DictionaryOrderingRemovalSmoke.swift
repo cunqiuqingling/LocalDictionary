@@ -225,6 +225,7 @@ private actor MockRuntime: ManagedDictionaryQueryRuntime {
     private var removed: [String] = []
 
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) -> ManagedDictionaryRuntimeOutcome {
         queried.append(descriptor.dictionaryID)
         return .hit(ManagedDictionaryQueryHit(
@@ -270,6 +271,7 @@ private actor DeferredRuntime: ManagedDictionaryQueryRuntime {
     private var removed: [String] = []
 
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         lookupStarted = true
         while !mayFinish { await Task.yield() }
@@ -305,17 +307,27 @@ private func testQueryOrderingAndStaleResultProtection() async throws {
                "managed query results should follow Catalog order")
 
     let deferred = DeferredRuntime()
+    let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([first]))
     let staleService = ManagedDictionaryQueryService(catalog: catalog([first]),
-                                                     runtime: deferred)
+                                                     runtime: deferred,
+                                                     lifecycleCoordinator: lifecycle)
     let task = Task { await staleService.lookup("prompt") }
     while !(await deferred.hasStarted()) { await Task.yield() }
-    await staleService.suspend(dictionaryID: first.dictionaryID)
+    let draining = Task {
+        try await lifecycle.acquireExclusiveOperation(for: first.dictionaryID, operation: .remove)
+    }
+    while await lifecycle.snapshot(for: first.dictionaryID)?.phase != .draining {
+        await Task.yield()
+    }
     await deferred.finish()
-    let staleBatch = await task.value
-    try expect(staleBatch.hits.isEmpty,
-               "result completing after suspension must be discarded")
+    let protectedBatch = await task.value
+    try expect(protectedBatch.hits.map(\.dictionaryID) == [first.dictionaryID],
+               "drained query must finish while its runtime lease remains active")
+    let permit = try await draining.value
+    await staleService.invalidateRuntime(dictionaryID: first.dictionaryID)
+    await lifecycle.complete(permit, disposition: .available(incrementGeneration: true))
     try expect(await deferred.removedIDs() == [first.dictionaryID],
-               "suspension should release only the target runtime")
+               "exclusive removal should release only the drained target runtime")
 }
 
 private struct RemovalFixture {

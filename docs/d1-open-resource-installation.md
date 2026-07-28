@@ -43,6 +43,20 @@ installation identity before publication. The source name is rebound to the veri
 immediately before `renameatx_np(RENAME_EXCL)`. After publication, the final directory identity,
 payload hash, receipt identity, modes, link counts, and exact two-entry layout are revalidated
 before Catalog commit. A final object that fails post-publication verification remains on disk
-without a Catalog descriptor for conservative startup reconciliation. Open resources are now
-eligible for the existing explicit indexing workflow and owned removal, but they remain excluded
-from query fallback. Query leases and SQLite fd-identity/publish hardening remain later stages.
+without a Catalog descriptor for conservative startup reconciliation.
+
+## D1b-3B-2C registration and fallback query
+
+Final filesystem publication remains the existing fd-anchored `RENAME_EXCL` operation. Catalog
+registration now also obtains the shared per-dictionary lifecycle exclusive permit, publishing a
+new process-local generation but no query runtime for the initial `pendingIndex` descriptor.
+
+After explicit indexing, an OpenResource joins offline fallback only when all of these are true:
+`sourceKind == openResource`, `storageOwnership == appManagedOpenResource`, query level is
+`fallback`, the descriptor is enabled and `ready`, its relative paths/receipt remain valid, and a
+current lifecycle lease can be acquired. The fixed order is preferred legacy dictionaries, user
+managedLocal dictionaries, then OpenResource fallback. A fallback miss or isolated runtime error
+does not make an AI request; AI remains user initiated. Results still use the existing bounded
+generic MDict sanitizer and never render raw HTML, load resources, or expose paths or receipt
+text. Production manifest endpoints and payload hosts remain empty, and no real resource is
+bundled.

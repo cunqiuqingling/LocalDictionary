@@ -989,15 +989,17 @@ final class ManagedDictionaryRemovalCoordinator {
     private let saveCatalog: SaveCatalog?
     private let catalogStore: DictionaryCatalogStore?
     private let queryService: ManagedDictionaryQueryService
+    private let lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator
     private let isIndexing: IsIndexing
     private let worker: ManagedDictionaryRemovalWorker
-    private(set) var activeDictionaryID: String?
+    private(set) var activeDictionaryIDs: Set<String> = []
 
     init(catalog: DictionaryCatalog = .empty(),
          catalogStore: DictionaryCatalogStore,
          applicationSupportRootURL: URL =
             ManagedDictionaryRemovalCoordinator.defaultApplicationSupportRootURL(),
          queryService: ManagedDictionaryQueryService,
+         lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator? = nil,
          isIndexing: @escaping IsIndexing,
          hooks: ManagedDictionaryRemovalHooks = .live,
          saveCatalog: SaveCatalog? = nil) {
@@ -1005,6 +1007,7 @@ final class ManagedDictionaryRemovalCoordinator {
         self.catalogStore = saveCatalog == nil ? catalogStore : nil
         self.saveCatalog = saveCatalog
         self.queryService = queryService
+        self.lifecycleCoordinator = lifecycleCoordinator ?? queryService.lifecycleCoordinator
         self.isIndexing = isIndexing
         worker = ManagedDictionaryRemovalWorker(
             applicationSupportRootURL: applicationSupportRootURL,
@@ -1027,7 +1030,7 @@ final class ManagedDictionaryRemovalCoordinator {
     }
 
     func isRemoving(_ dictionaryID: String) -> Bool {
-        activeDictionaryID == dictionaryID
+        activeDictionaryIDs.contains(dictionaryID)
     }
 
     func recoverPendingDeletions() async -> ManagedDictionaryRemovalRecoveryReport {
@@ -1039,7 +1042,9 @@ final class ManagedDictionaryRemovalCoordinator {
     }
 
     func remove(dictionaryID: String) async -> ManagedDictionaryRemovalResult {
-        guard activeDictionaryID == nil else { return .failed(.removalAlreadyInProgress) }
+        guard activeDictionaryIDs.insert(dictionaryID).inserted else {
+            return .failed(.removalAlreadyInProgress)
+        }
         guard let descriptor = catalog.dictionaries.first(where: {
             $0.dictionaryID == dictionaryID
         }) else { return .failed(.dictionaryNotFound) }
@@ -1051,8 +1056,7 @@ final class ManagedDictionaryRemovalCoordinator {
             return .failed(.indexingInProgress)
         }
 
-        activeDictionaryID = dictionaryID
-        defer { activeDictionaryID = nil }
+        defer { activeDictionaryIDs.remove(dictionaryID) }
 
         let worker = self.worker
         let plan: ManagedDictionaryRemovalPlan
@@ -1065,10 +1069,24 @@ final class ManagedDictionaryRemovalCoordinator {
         catch { return .failed(.unsafeManagedPath) }
 
         guard !isIndexing(dictionaryID) else { return .failed(.indexingInProgress) }
-        await queryService.suspend(dictionaryID: dictionaryID)
+        let permit: ManagedDictionaryLifecyclePermit
+        do {
+            permit = try await lifecycleCoordinator.acquireExclusiveOperation(
+                for: dictionaryID, operation: .remove
+            )
+        } catch {
+            return .failed(.removalAlreadyInProgress)
+        }
+        func finished(_ result: ManagedDictionaryRemovalResult,
+                      _ disposition: ManagedDictionaryLifecycleDisposition)
+            async -> ManagedDictionaryRemovalResult {
+            await lifecycleCoordinator.complete(permit, disposition: disposition)
+            return result
+        }
+        await queryService.invalidateRuntime(dictionaryID: dictionaryID)
         guard !isIndexing(dictionaryID) else {
-            await queryService.resume(dictionaryID: dictionaryID)
-            return .failed(.indexingInProgress)
+            return await finished(.failed(.indexingInProgress),
+                                  .available(incrementGeneration: true))
         }
         beforeRemoval?(dictionaryID)
 
@@ -1078,15 +1096,17 @@ final class ManagedDictionaryRemovalCoordinator {
             }.value
         } catch let error as ManagedDictionaryRemovalError {
             if await resumeAfterFailedStageIfSafe(plan) {
-                return .failed(error)
+                return await finished(.failed(error), .available(incrementGeneration: true))
             }
-            return .failed(.stageFailureRuntimeRemainsSuspended(error))
+            return await finished(.failed(.stageFailureRuntimeRemainsSuspended(error)),
+                                  .suspended(incrementGeneration: true))
         } catch {
             let error = ManagedDictionaryRemovalError.stagingFailed
             if await resumeAfterFailedStageIfSafe(plan) {
-                return .failed(error)
+                return await finished(.failed(error), .available(incrementGeneration: true))
             }
-            return .failed(.stageFailureRuntimeRemainsSuspended(error))
+            return await finished(.failed(.stageFailureRuntimeRemainsSuspended(error)),
+                                  .suspended(incrementGeneration: true))
         }
 
         let updated: DictionaryCatalog
@@ -1113,26 +1133,26 @@ final class ManagedDictionaryRemovalCoordinator {
                 try await Task.detached(priority: .userInitiated) {
                     try worker.rollback(plan)
                 }.value
-                await queryService.resume(dictionaryID: dictionaryID)
-                return .failed(.catalogWriteFailed)
+                return await finished(.failed(.catalogWriteFailed),
+                                      .available(incrementGeneration: true))
             } catch let error as ManagedDictionaryRemovalError {
-                return .failed(error)
+                return await finished(.failed(error), .suspended(incrementGeneration: true))
             } catch {
-                return .failed(.rollbackFailed)
+                return await finished(.failed(.rollbackFailed),
+                                      .suspended(incrementGeneration: true))
             }
         }
 
         catalog = updated
-        await queryService.commitRemoval(dictionaryID: dictionaryID,
-                                         updatedCatalog: updated)
+        await queryService.commitCatalog(updated)
         onCatalogChanged?(updated)
         do {
             try await Task.detached(priority: .utility) {
                 try worker.finalize(plan)
             }.value
-            return .removed(cleanupDeferred: false)
+            return await finished(.removed(cleanupDeferred: false), .retired)
         } catch {
-            return .removed(cleanupDeferred: true)
+            return await finished(.removed(cleanupDeferred: true), .retired)
         }
     }
 
@@ -1147,7 +1167,6 @@ final class ManagedDictionaryRemovalCoordinator {
 #endif
             return false
         }
-        await queryService.resume(dictionaryID: plan.dictionaryID)
 #if OWNED_LIFECYCLE_TESTING
         ManagedDictionaryRemovalTestObserver.runtimeDisposition?(true)
 #endif

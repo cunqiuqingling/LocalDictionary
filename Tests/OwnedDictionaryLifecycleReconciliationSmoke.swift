@@ -479,6 +479,7 @@ private actor RemovalRuntime: ManagedDictionaryQueryRuntime {
     private var removed: [String] = []
 
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         .miss
     }

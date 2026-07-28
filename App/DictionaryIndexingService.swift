@@ -215,6 +215,8 @@ final class ManagedDictionaryIndexCoordinator {
     private let applicationSupportRootURL: URL
     private let worker: ManagedDictionaryIndexWorker
     private let expectedSchemaVersion: Int
+    private let lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator
+    private var runtimeInvalidator: @Sendable (String) async -> Void
     private var currentTask: Task<Void, Never>?
     private var cancellationToken: DictionaryIndexCancellationToken?
     private var failureMessages: [String: String] = [:]
@@ -225,13 +227,18 @@ final class ManagedDictionaryIndexCoordinator {
         applicationSupportRootURL: URL = DictionaryImportService.defaultApplicationSupportRootURL(),
         buildIndex: @escaping DictionaryIndexBuildFunction,
         expectedSchemaVersion: Int,
-        hooks: DictionaryIndexingHooks = .live
+        hooks: DictionaryIndexingHooks = .live,
+        lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator =
+            ManagedDictionaryLifecycleCoordinator(),
+        runtimeInvalidator: @escaping @Sendable (String) async -> Void = { _ in }
     ) {
         self.catalog = catalog
         self.catalogStore = catalogStore
         self.applicationSupportRootURL = applicationSupportRootURL
         self.expectedSchemaVersion = expectedSchemaVersion
         worker = ManagedDictionaryIndexWorker(buildIndex: buildIndex, hooks: hooks)
+        self.lifecycleCoordinator = lifecycleCoordinator
+        self.runtimeInvalidator = runtimeInvalidator
     }
 
     @discardableResult
@@ -271,6 +278,12 @@ final class ManagedDictionaryIndexCoordinator {
 
     func synchronize(catalog: DictionaryCatalog) {
         self.catalog = catalog
+    }
+
+    /// Installed during AppDelegate composition after the shared query service exists.  The
+    /// coordinator has already drained leases before this callback is invoked.
+    func setRuntimeInvalidator(_ invalidator: @escaping @Sendable (String) async -> Void) {
+        runtimeInvalidator = invalidator
     }
 
     func start(dictionaryID: String) -> DictionaryIndexStartResult {
@@ -321,7 +334,20 @@ final class ManagedDictionaryIndexCoordinator {
         let token = DictionaryIndexCancellationToken()
         cancellationToken = token
         let worker = self.worker
+        let lifecycleCoordinator = self.lifecycleCoordinator
+        let runtimeInvalidator = self.runtimeInvalidator
         currentTask = Task { @MainActor [weak self] in
+            let permit: ManagedDictionaryLifecyclePermit
+            do {
+                permit = try await lifecycleCoordinator.acquireExclusiveOperation(
+                    for: dictionaryID, operation: .index
+                )
+            } catch {
+                guard let self else { return }
+                _ = await self.finish(dictionaryID: dictionaryID, outcome: .cancelled)
+                return
+            }
+            await runtimeInvalidator(dictionaryID)
             let outcome = await Task.detached(priority: .userInitiated) {
                 worker.prepare(plan: plan, cancellationToken: token)
             }.value
@@ -331,9 +357,13 @@ final class ManagedDictionaryIndexCoordinator {
                         worker.discardPrepared(prepared)
                     }.value
                 }
+                await lifecycleCoordinator.complete(
+                    permit, disposition: .suspended(incrementGeneration: true)
+                )
                 return
             }
-            await self.finish(dictionaryID: dictionaryID, outcome: outcome)
+            let disposition = await self.finish(dictionaryID: dictionaryID, outcome: outcome)
+            await lifecycleCoordinator.complete(permit, disposition: disposition)
         }
         return .started
     }
@@ -350,7 +380,8 @@ final class ManagedDictionaryIndexCoordinator {
     }
 
     private func finish(dictionaryID: String,
-                        outcome: DictionaryIndexWorkerOutcome) async {
+                        outcome: DictionaryIndexWorkerOutcome) async
+        -> ManagedDictionaryLifecycleDisposition {
         defer {
             activity = nil
             cancellationToken = nil
@@ -363,7 +394,7 @@ final class ManagedDictionaryIndexCoordinator {
                 let worker = self.worker
                 await Task.detached(priority: .utility) { worker.discardPrepared(prepared) }.value
             }
-            return
+            return .suspended(incrementGeneration: true)
         }
 
         var updated = catalog
@@ -430,6 +461,9 @@ final class ManagedDictionaryIndexCoordinator {
             if let publication { commit(publication) }
             catalog = mutation.catalog
             onCatalogChanged?(mutation.catalog)
+            return target.state == .ready
+                ? .available(incrementGeneration: true)
+                : .suspended(incrementGeneration: true)
         } catch {
             if let publication { rollback(publication) }
             failureMessages[dictionaryID] = DictionaryIndexError.catalogWriteFailed.localizedDescription
@@ -439,6 +473,7 @@ final class ManagedDictionaryIndexCoordinator {
             clearPublishedMetadata(&inMemoryFallback.dictionaries[index])
             catalog = inMemoryFallback
             onCatalogChanged?(inMemoryFallback)
+            return .suspended(incrementGeneration: true)
         }
     }
 

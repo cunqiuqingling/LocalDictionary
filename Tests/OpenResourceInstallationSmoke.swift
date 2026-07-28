@@ -60,7 +60,9 @@ struct OpenResourceInstallationSmoke {
                                                   payloadComponent: operation.publishedPayloadComponent,
                                                   sidecarComponent: operation.publishedSidecarComponent,
                                                   installationIdentity: identity)
-        let coordinator = OpenResourceInstallationCoordinator()
+        let coordinator = OpenResourceInstallationCoordinator(
+            lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator()
+        )
         let descriptor = try await coordinator.install(result, dictionariesRoot: dictionaries, catalogStore: catalog)
         try smoke.check("open descriptor source", descriptor.sourceKind == .openResource)
         try smoke.check("open ownership", descriptor.storageOwnership == .appManagedOpenResource)
@@ -131,7 +133,9 @@ struct OpenResourceInstallationSmoke {
                                                   sidecarComponent: operation.publishedSidecarComponent,
                                                   installationIdentity: identity)
         return Fixture(identity: identity, result: result, catalog: catalog,
-                       coordinator: OpenResourceInstallationCoordinator(), dictionaries: dictionaries)
+                       coordinator: OpenResourceInstallationCoordinator(
+                           lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator()
+                       ), dictionaries: dictionaries)
     }
 
     @MainActor

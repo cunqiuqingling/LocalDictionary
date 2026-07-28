@@ -16,6 +16,7 @@ xcrun --sdk macosx swiftc -parse-as-library -strict-concurrency=complete -warnin
   -D OPEN_RESOURCE_INSTALLATION_TESTING \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/DictionaryCatalog.swift" \
+  "$ROOT/App/ManagedDictionaryLifecycleCoordinator.swift" \
   "$ROOT/App/DictionaryCatalogStore.swift" \
   "$ROOT/App/ResourceManifestModels.swift" \
   "$ROOT/App/StrictJSON.swift" \

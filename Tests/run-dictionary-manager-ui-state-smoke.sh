@@ -23,6 +23,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT_DIR/App/AppConfig.swift" \
   "$ROOT_DIR/App/DictionaryCatalog.swift" \
   "$ROOT_DIR/App/ResourceManifestKeyID.swift" \
+  "$ROOT_DIR/App/ManagedDictionaryLifecycleCoordinator.swift" \
   "$ROOT_DIR/App/DictionaryManagerPresentation.swift" \
   "$ROOT_DIR/Tests/DictionaryManagerUIStateSmoke.swift" \
   -o "$BUILD_DIR/DictionaryManagerUIStateSmoke"
@@ -37,6 +38,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT_DIR/App/AppConfig.swift" \
   "$ROOT_DIR/App/DictionaryCatalog.swift" \
   "$ROOT_DIR/App/ResourceManifestKeyID.swift" \
+  "$ROOT_DIR/App/ManagedDictionaryLifecycleCoordinator.swift" \
   "$ROOT_DIR/App/DictionaryCatalogStore.swift" \
   "$ROOT_DIR/App/ResourceManifestModels.swift" \
   "$ROOT_DIR/App/StrictJSON.swift" \

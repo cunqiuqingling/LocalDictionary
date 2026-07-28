@@ -73,8 +73,23 @@ reconciliation run discards all proposed Catalog changes and does not enter Cata
 filesystem operations that already completed are preserved for the next startup rather than being
 dangerously rolled back. By contrast, a complete inventory that finds an unknown entry remains a
 structural error: the directory is preserved and the descriptor may be durably disabled. Final
-fast-path full-SHA verification remains deferred to D1b-3B-3; this stage does not enter 2C.
+fast-path full-SHA verification remains deferred to D1b-3B-3.
 
-This stage does not implement query/runtime leases, OpenResource fallback query, SQLite
-fd-identity publication, Resource Center UI, production payload hosts, real resources, or a
-general quarantine/journal framework.
+## D1b-3B-2C process-local lifecycle leases
+
+The App now creates one shared, process-local lifecycle coordinator after startup reconciliation
+and before publishing query services. State is keyed by `dictionaryID`, so a drain or exclusive
+operation for one dictionary does not serialize unrelated dictionaries. A ready descriptor still
+must pass Catalog eligibility, then acquire a generation-bound query lease before its runtime or
+SQLite index is accessed. Draining blocks new leases and waits only for existing leases; it never
+holds the short Catalog mutation lock while waiting.
+
+Removal acquires an exclusive permit, drains leases, invalidates the target runtime, stages and
+commits the Catalog, then retires the generation. The R2 rule remains unchanged: a stage failure
+resumes only after canonical identity exactly matches the original plan; uncertainty stays
+suspended. A successful rollback publishes a new available generation; rollback uncertainty stays
+suspended; deferred cleanup remains retired. Indexing uses the same exclusive permit for its whole
+operation as a safety-first first version, so a ready runtime is never replaced while in use.
+
+These leases coordinate only this App process. They are not an fd-bound SQLite identity guarantee
+across processes; that boundary remains D1b-3B-3.

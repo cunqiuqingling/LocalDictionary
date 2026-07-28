@@ -10,6 +10,7 @@ private func layoutExpect(_ condition: @autoclosure () -> Bool,
 
 private actor EmptyManagedRuntime: ManagedDictionaryQueryRuntime {
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome { .miss }
     func remove(dictionaryID: String) async {}
     func reset() async {}

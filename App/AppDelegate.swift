@@ -7,6 +7,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictionaryManagerController: DictionaryManagerWindowController?
     private var dictionaryCatalog = DictionaryCatalog.empty()
     private let dictionaryCatalogStore = DictionaryCatalogStore()
+    private let managedDictionaryLifecycleCoordinator =
+        ManagedDictionaryLifecycleCoordinator()
+    // The Resource Center has no product UI in this stage, but its future installation entry
+    // must use this same process-local coordinator rather than creating a second state source.
+    private lazy var openResourceInstallationCoordinator = OpenResourceInstallationCoordinator(
+        lifecycleCoordinator: managedDictionaryLifecycleCoordinator
+    )
     private lazy var ownedDictionaryLifecycleReconciler =
         OwnedDictionaryLifecycleReconciler(catalogStore: dictionaryCatalogStore)
     private var managedDictionaryQueryService: ManagedDictionaryQueryService?
@@ -14,7 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var dictionaryIndexCoordinator = ManagedDictionaryIndexCoordinator(
         catalogStore: dictionaryCatalogStore,
         buildIndex: liveDictionaryIndexBuilder,
-        expectedSchemaVersion: Int(liveDictionaryIndexSchemaVersion)
+        expectedSchemaVersion: Int(liveDictionaryIndexSchemaVersion),
+        lifecycleCoordinator: managedDictionaryLifecycleCoordinator
     )
     private var hotKey: GlobalHotKey?
     private let selectionReader = AccessibilitySelectionReader()
@@ -61,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         dictionaryIndexCoordinator.cancelCurrentTask()
+        Task { await managedDictionaryLifecycleCoordinator.shutdown() }
     }
 
     private func handleGlobalHotKey() {
@@ -271,13 +280,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 .markingUnresolvableLegacyReferencesUnavailable(in: catalog)
         }
         dictionaryCatalog = catalog
+        await managedDictionaryLifecycleCoordinator.initialize(reconciledCatalog: catalog)
         dictionaryIndexCoordinator.synchronize(catalog: catalog)
 
         let managedService = ManagedDictionaryQueryService(
             catalog: catalog,
-            runtime: LiveManagedDictionaryQueryRuntime()
+            runtime: LiveManagedDictionaryQueryRuntime(),
+            lifecycleCoordinator: managedDictionaryLifecycleCoordinator
         )
         managedDictionaryQueryService = managedService
+        dictionaryIndexCoordinator.setRuntimeInvalidator { dictionaryID in
+            await managedService.invalidateRuntime(dictionaryID: dictionaryID)
+        }
 
         if let config {
             let core = DictionaryCoreBridge(dictionaryPath: config.primaryDictionary,
@@ -321,6 +335,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             catalog: catalog,
             catalogStore: dictionaryCatalogStore,
             queryService: managedService,
+            lifecycleCoordinator: managedDictionaryLifecycleCoordinator,
             isIndexing: { [dictionaryIndexCoordinator] dictionaryID in
                 dictionaryIndexCoordinator.activity?.dictionaryID == dictionaryID
             }

@@ -6,6 +6,7 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     static let cacheMaximumEntries = 16
 
     private struct RuntimeIdentity: Equatable {
+        let generation: UInt64
         let descriptorUpdatedAt: Date
         let sourceSHA256: String
         let sourceFileSize: UInt64
@@ -24,7 +25,14 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
 
     private let validator: ManagedDictionaryRuntimeValidator
     private let formatter = GenericMDictEntryFormatter()
-    private var runtimes: [String: Runtime] = [:]
+    /// Generation is part of the cache identity.  Lifecycle operations drain leases before
+    /// invalidating this cache, so an old runtime cannot be reused by a newly published index.
+    private var runtimes: [RuntimeKey: Runtime] = [:]
+
+    private struct RuntimeKey: Hashable {
+        let dictionaryID: String
+        let generation: UInt64
+    }
 
     init(applicationSupportRootURL: URL =
          DictionaryImportService.defaultApplicationSupportRootURL(),
@@ -38,22 +46,25 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     func reset() { runtimes.removeAll() }
 
     func remove(dictionaryID: String) {
-        runtimes[dictionaryID] = nil
+        runtimes = runtimes.filter { $0.key.dictionaryID != dictionaryID }
     }
 
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         guard !Task.isCancelled else { return .miss }
         do {
             let runtime: Runtime
-            if let expectedIdentity = Self.identity(for: descriptor),
-               let existing = runtimes[descriptor.dictionaryID],
+            let key = RuntimeKey(dictionaryID: descriptor.dictionaryID, generation: generation)
+            if let expectedIdentity = Self.identity(for: descriptor, generation: generation),
+               let existing = runtimes[key],
                existing.identity == expectedIdentity {
                 runtime = existing
             } else {
                 let plan = try validator.validate(descriptor)
                 guard !Task.isCancelled else { return .miss }
                 let identity = RuntimeIdentity(
+                    generation: generation,
                     descriptorUpdatedAt: plan.descriptorUpdatedAt,
                     sourceSHA256: plan.sourceSHA256,
                     sourceFileSize: plan.sourceFileSize,
@@ -67,13 +78,13 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
                 )
                 guard core.isReady else { return .unavailable }
                 runtime = Runtime(identity: identity, core: core)
-                runtimes[plan.dictionaryID] = runtime
+                runtimes[key] = runtime
             }
             let raw = runtime.core.lookup(
                 query, maximumHTMLBytes: UInt(Self.maximumRawHTMLBytes)
             )
             if let error = raw["error"] as? String, !error.isEmpty {
-                runtimes[descriptor.dictionaryID] = nil
+                runtimes[key] = nil
                 return .unavailable
             }
             guard raw["found"] as? Bool == true,
@@ -98,16 +109,18 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
         } catch is CancellationError {
             return .miss
         } catch {
-            runtimes[descriptor.dictionaryID] = nil
+            runtimes[RuntimeKey(dictionaryID: descriptor.dictionaryID, generation: generation)] = nil
             return .unavailable
         }
     }
 
-    private static func identity(for descriptor: DictionaryDescriptor) -> RuntimeIdentity? {
+    private static func identity(for descriptor: DictionaryDescriptor,
+                                 generation: UInt64) -> RuntimeIdentity? {
         guard let sourceSHA256 = descriptor.indexMetadata.sourceSHA256,
               let sourceFileSize = descriptor.indexMetadata.sourceFileSize,
               let indexFileSize = descriptor.indexMetadata.indexFileSize else { return nil }
         return RuntimeIdentity(
+            generation: generation,
             descriptorUpdatedAt: descriptor.updatedAt,
             sourceSHA256: sourceSHA256.lowercased(),
             sourceFileSize: sourceFileSize,

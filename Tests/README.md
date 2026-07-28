@@ -238,6 +238,21 @@ real `renameatx_np`, Catalog transactions, SHA-256, injected failures, publicati
 helper-only checks. Conflicting or structurally unknown owned directories are preserved in place;
 2B does not recursively delete them or introduce a general quarantine/journal framework.
 
+## D1b-3B-2C lifecycle/query coordination smoke
+
+`Tests/run-managed-dictionary-lifecycle-coordination-smoke.sh` uses only synthetic Catalog
+descriptors and runtimes. It runs Debug ASan/UBSan and optimized Release with the same lease
+error contract. The coordinator is process-local and keyed by dictionary UUID: it verifies
+multiple leases, deterministic drain before an exclusive operation, generation rejection,
+retirement, throw/cancellation release, a real isolated `DictionaryCatalogStore` mutation, and
+the priority chain `preferred → managedLocal → openResource → offline miss`. Its category output
+separates actor state, query-runtime service, Catalog transaction, deterministic barriers,
+cancellation, and ordering/eligibility assertions; it is not a count of independent product
+features. The runner also invokes the existing isolated indexing and PendingDeletion-removal
+smokes, which supply the real POSIX publication/removal integration coverage for the lifecycle
+wiring. It never reads Application Support, local configuration, private MDX/MDD/SQLite data,
+the network, or Keychain.
+
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.
 - Build an index, request cooperative cancellation, exercise a controlled failure and retry, and confirm pending/indexing/cancelling/ready/failed wording.

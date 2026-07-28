@@ -86,6 +86,7 @@ enum ManagedDictionaryRuntimeOutcome: Sendable {
 
 protocol ManagedDictionaryQueryRuntime: Sendable {
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome
     func remove(dictionaryID: String) async
     func reset() async
@@ -96,36 +97,32 @@ actor ManagedDictionaryQueryService {
     static let genericFormatterIdentifier = DictionaryFormatterIdentifier.genericMDictV1
 
     private var catalog: DictionaryCatalog
-    private var suspendedDictionaryIDs: Set<String> = []
     private let runtime: any ManagedDictionaryQueryRuntime
+    nonisolated let lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator
 
     init(catalog: DictionaryCatalog = .empty(),
-         runtime: any ManagedDictionaryQueryRuntime) {
+         runtime: any ManagedDictionaryQueryRuntime,
+         lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator? = nil) {
         self.catalog = catalog
         self.runtime = runtime
+        self.lifecycleCoordinator = lifecycleCoordinator ??
+            ManagedDictionaryLifecycleCoordinator(catalog: catalog)
     }
 
     func replaceCatalog(_ catalog: DictionaryCatalog) async {
         self.catalog = catalog
-        let remainingIDs = Set(catalog.dictionaries.map(\.dictionaryID))
-        suspendedDictionaryIDs.formIntersection(remainingIDs)
+        await lifecycleCoordinator.initialize(reconciledCatalog: catalog)
         await runtime.reset()
     }
 
-    func suspend(dictionaryID: String) async {
-        suspendedDictionaryIDs.insert(dictionaryID)
+    /// Called only after an exclusive lifecycle permit has drained existing query leases.
+    func invalidateRuntime(dictionaryID: String) async {
         await runtime.remove(dictionaryID: dictionaryID)
     }
 
-    func resume(dictionaryID: String) {
-        suspendedDictionaryIDs.remove(dictionaryID)
-    }
-
-    /// Commits a removal after the target runtime has already been suspended
-    /// and released. Other managed dictionary runtimes remain warm.
-    func commitRemoval(dictionaryID: String, updatedCatalog: DictionaryCatalog) {
+    func commitCatalog(_ updatedCatalog: DictionaryCatalog) async {
         catalog = updatedCatalog
-        suspendedDictionaryIDs.remove(dictionaryID)
+        await lifecycleCoordinator.initialize(reconciledCatalog: updatedCatalog)
     }
 
     func lookup(_ query: String,
@@ -137,41 +134,79 @@ actor ManagedDictionaryQueryService {
         }
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return .empty }
-        let eligible = catalog.sortedDictionaries.filter {
-            $0.sourceKind == .managedLocal && $0.queryLevel == .normal &&
-                $0.enabled && $0.state == .ready &&
-                !suspendedDictionaryIDs.contains($0.dictionaryID) &&
-                DictionaryFormatterIdentifier.supportsGenericMDictV1(
-                    $0.formatterIdentifier
-                )
-        }.prefix(Self.maximumDictionariesPerQuery)
-        var hits: [ManagedDictionaryQueryHit] = []
-        var unavailable: [String] = []
-        for descriptor in eligible {
-            guard !Task.isCancelled else { break }
-            let outcome = await runtime.lookup(descriptor: descriptor, query: clean)
-            guard isStillEligible(dictionaryID: descriptor.dictionaryID) else { continue }
-            switch outcome {
-            case .hit(let hit): hits.append(hit)
-            case .miss: break
-            case .unavailable: unavailable.append(descriptor.dictionaryID)
-            }
+        let normal = catalog.sortedDictionaries.filter(Self.isManagedLocalEligible)
+            .prefix(Self.maximumDictionariesPerQuery)
+        let normalResult = await lookupTier(normal, query: clean)
+        // Existing normal-tier aggregation is retained.  Fallback resources only run when that
+        // entire tier misses, preserving preferred → managedLocal → openResource precedence.
+        let fallbackResult: (hits: [ManagedDictionaryQueryHit], unavailable: [String])
+        if normalResult.hits.isEmpty, !Task.isCancelled {
+            let fallback = catalog.sortedDictionaries.filter(Self.isOpenResourceEligible)
+                .prefix(Self.maximumDictionariesPerQuery)
+            fallbackResult = await lookupTier(fallback, query: clean)
+        } else {
+            fallbackResult = ([], [])
         }
         return ManagedDictionaryQueryBatch(
-            hits: hits,
-            unavailableDictionaryIDs: unavailable,
+            hits: normalResult.hits + fallbackResult.hits,
+            unavailableDictionaryIDs: normalResult.unavailable + fallbackResult.unavailable,
             skippedBecausePreferredMatched: false
         )
     }
 
-    private func isStillEligible(dictionaryID: String) -> Bool {
-        guard !suspendedDictionaryIDs.contains(dictionaryID),
-              let descriptor = catalog.dictionaries.first(where: {
-                  $0.dictionaryID == dictionaryID
-              }) else { return false }
-        return descriptor.sourceKind == .managedLocal &&
+    private func lookupTier(_ descriptors: ArraySlice<DictionaryDescriptor>,
+                            query: String) async -> (hits: [ManagedDictionaryQueryHit],
+                                                     unavailable: [String]) {
+        var hits: [ManagedDictionaryQueryHit] = []
+        var unavailable: [String] = []
+        for descriptor in descriptors {
+            guard !Task.isCancelled else { break }
+            guard let generation = await lifecycleCoordinator.generation(for: descriptor.dictionaryID)
+            else { continue }
+            do {
+                let outcome = try await lifecycleCoordinator.withQueryLease(
+                    for: descriptor.dictionaryID,
+                    expectedGeneration: generation
+                ) { [runtime] lease in
+                    await runtime.lookup(descriptor: descriptor,
+                                         generation: lease.generation,
+                                         query: query)
+                }
+                guard isStillEligible(descriptor) else { continue }
+                switch outcome {
+                case .hit(let hit): hits.append(hit)
+                case .miss: break
+                case .unavailable: unavailable.append(descriptor.dictionaryID)
+                }
+            } catch is CancellationError {
+                break
+            } catch {
+                // A draining, stale, or malformed fallback dictionary is isolated from the next
+                // descriptor and never escalates into automatic AI.
+                unavailable.append(descriptor.dictionaryID)
+            }
+        }
+        return (hits, unavailable)
+    }
+
+    private func isStillEligible(_ descriptor: DictionaryDescriptor) -> Bool {
+        Self.isManagedLocalEligible(descriptor) || Self.isOpenResourceEligible(descriptor)
+    }
+
+    private static func isManagedLocalEligible(_ descriptor: DictionaryDescriptor) -> Bool {
+        descriptor.sourceKind == .managedLocal &&
+            descriptor.storageOwnership == .appManagedImported &&
             descriptor.queryLevel == .normal && descriptor.enabled &&
-            descriptor.state == .ready &&
+            descriptor.state == .ready && DictionaryFormatterIdentifier.supportsGenericMDictV1(
+                descriptor.formatterIdentifier
+            )
+    }
+
+    private static func isOpenResourceEligible(_ descriptor: DictionaryDescriptor) -> Bool {
+        descriptor.sourceKind == .openResource &&
+            descriptor.storageOwnership == .appManagedOpenResource &&
+            descriptor.queryLevel == .fallback && descriptor.enabled &&
+            descriptor.state == .ready && descriptor.openResourceMetadata != nil &&
             DictionaryFormatterIdentifier.supportsGenericMDictV1(
                 descriptor.formatterIdentifier
             )
@@ -216,10 +251,7 @@ struct ManagedDictionaryRuntimeValidator: Sendable {
     let expectedSchemaVersion: Int
 
     func validate(_ descriptor: DictionaryDescriptor) throws -> ManagedDictionaryRuntimePlan {
-        guard descriptor.sourceKind == .managedLocal,
-              descriptor.queryLevel == .normal,
-              descriptor.enabled,
-              descriptor.state == .ready,
+        guard Self.isQueryEligible(descriptor),
               DictionaryFormatterIdentifier.supportsGenericMDictV1(
                 descriptor.formatterIdentifier
               ) else {
@@ -233,6 +265,10 @@ struct ManagedDictionaryRuntimeValidator: Sendable {
               let sourcePath = descriptor.relativePaths.dictionary,
               let indexPath = descriptor.relativePaths.index else {
             throw ManagedDictionaryRuntimeValidationError.schemaMismatch
+        }
+        if descriptor.sourceKind == .openResource,
+           sourcePath != "Dictionaries/\(descriptor.dictionaryID)/payload.mdx" {
+            throw ManagedDictionaryRuntimeValidationError.unsafePath
         }
         let sourceURL = try managedSourceURL(relativePath: sourcePath,
                                              dictionaryID: descriptor.dictionaryID)
@@ -264,6 +300,20 @@ struct ManagedDictionaryRuntimeValidator: Sendable {
             indexFileSize: expectedIndexSize,
             descriptorUpdatedAt: descriptor.updatedAt
         )
+    }
+
+    private static func isQueryEligible(_ descriptor: DictionaryDescriptor) -> Bool {
+        let managedLocal = descriptor.sourceKind == .managedLocal &&
+            descriptor.storageOwnership == .appManagedImported &&
+            descriptor.queryLevel == .normal
+        let openResource = descriptor.sourceKind == .openResource &&
+            descriptor.storageOwnership == .appManagedOpenResource &&
+            descriptor.queryLevel == .fallback && descriptor.openResourceMetadata != nil
+        return (managedLocal || openResource) && descriptor.enabled &&
+            descriptor.state == .ready &&
+            DictionaryFormatterIdentifier.supportsGenericMDictV1(
+                descriptor.formatterIdentifier
+            )
     }
 
     private func managedSourceURL(relativePath: String,

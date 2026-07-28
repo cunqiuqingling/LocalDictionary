@@ -19,6 +19,7 @@ private actor MockManagedRuntime: ManagedDictionaryQueryRuntime {
     }
 
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         queriedIDs.append(descriptor.dictionaryID)
         return outcomes[descriptor.dictionaryID] ?? .miss

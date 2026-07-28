@@ -6,6 +6,11 @@ import Foundation
 /// orphaned directories or expose open resources to indexing/query code; those are later phases.
 actor OpenResourceInstallationCoordinator {
     private var activeResourceIDs: Set<String> = []
+    private let lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator
+
+    init(lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator) {
+        self.lifecycleCoordinator = lifecycleCoordinator
+    }
 
     func install(_ verified: VerifiedPayloadStagingResult,
                  dictionariesRoot: URL,
@@ -29,7 +34,11 @@ actor OpenResourceInstallationCoordinator {
             throw error
         }
 
-        return try await MainActor.run {
+        let permit = try await lifecycleCoordinator.acquireExclusiveOperation(
+            for: prepared.identity.dictionaryID, operation: .install
+        )
+        do {
+            let descriptor = try await MainActor.run {
             do {
                 let mutation = try catalogStore.mutate { catalog, _ in
                     guard !catalog.dictionaries.contains(where: { $0.openResourceMetadata?.resourceID == prepared.identity.resourceID }) else {
@@ -76,6 +85,13 @@ actor OpenResourceInstallationCoordinator {
             } catch {
                 throw OpenResourceInstallationError.catalogCommitFailedAfterFilesystemPublish
             }
+            }
+            await lifecycleCoordinator.complete(permit, disposition: .available(incrementGeneration: true))
+            return descriptor
+        } catch {
+            // The directory may already be final, but no query-eligible descriptor is published.
+            await lifecycleCoordinator.complete(permit, disposition: .suspended(incrementGeneration: true))
+            throw error
         }
     }
 
