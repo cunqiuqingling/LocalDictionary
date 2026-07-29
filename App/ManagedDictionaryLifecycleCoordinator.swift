@@ -44,12 +44,6 @@ struct ManagedDictionaryLifecyclePermit: Equatable, Sendable {
     fileprivate let operationID: UUID
 }
 
-/// A generation can be evicted only once its last registered query lease has been released.
-struct ManagedDictionaryLeaseRelease: Equatable, Sendable {
-    let lease: ManagedDictionaryRuntimeLease
-    let releasedLastLeaseForGeneration: Bool
-}
-
 /// Immutable diagnostic state used only by synthetic tests.  It contains no file paths or
 /// descriptor content and is also useful for safe internal observability.
 struct ManagedDictionaryLifecycleSnapshot: Equatable, Sendable {
@@ -63,6 +57,18 @@ struct ManagedDictionaryLifecycleSnapshot: Equatable, Sendable {
     /// A queued exclusive operation without a Catalog identity transition may allow an already
     /// running current-generation query to return. Pending identity transitions never do.
     let allowsCurrentGenerationResult: Bool
+}
+
+/// Atomically describes one release and the lifecycle state published immediately afterwards.
+/// A generation is eligible for precise cache eviction only when its final recorded lease ended.
+struct ManagedDictionaryLeaseRelease: Equatable, Sendable {
+    let lease: ManagedDictionaryRuntimeLease
+    let wasReleased: Bool
+    let drainedGeneration: UInt64?
+    /// An already-issued query may still publish if it was released while no Catalog identity
+    /// transition was pending. A queued exclusive operation alone does not make its result stale.
+    let resultMayPublish: Bool
+    let postReleaseSnapshot: ManagedDictionaryLifecycleSnapshot?
 }
 
 /// The coordinator never performs file work or Catalog persistence.  Callers first acquire an
@@ -160,9 +166,14 @@ actor ManagedDictionaryLifecycleCoordinator {
 
 #if MANAGED_DICTIONARY_LIFECYCLE_TESTING
     private var beforeQueryValidationSnapshotForTesting: (@Sendable () async -> Void)?
+    private var beforeFinalLeaseReleaseForTesting: (@Sendable () async -> Void)?
 
     func setBeforeQueryValidationSnapshotForTesting(_ hook: (@Sendable () async -> Void)?) {
         beforeQueryValidationSnapshotForTesting = hook
+    }
+
+    func setBeforeFinalLeaseReleaseForTesting(_ hook: (@Sendable () async -> Void)?) {
+        beforeFinalLeaseReleaseForTesting = hook
     }
 #endif
 
@@ -309,9 +320,35 @@ actor ManagedDictionaryLifecycleCoordinator {
     /// coordinator's current generation, so a pending transition cannot orphan an old lease.
     @discardableResult
     func release(_ lease: ManagedDictionaryRuntimeLease) -> ManagedDictionaryLeaseRelease? {
+        let outcome = releaseLease(lease)
+        return outcome.wasReleased ? outcome : nil
+    }
+
+    /// The final query path uses this single actor operation to release its lease, advance any
+    /// pending drain, and obtain the post-release state without inferring safety from a later
+    /// current-generation read.
+    func releaseForFinalValidation(_ lease: ManagedDictionaryRuntimeLease) async
+        -> ManagedDictionaryLeaseRelease {
+#if MANAGED_DICTIONARY_LIFECYCLE_TESTING
+        if let hook = beforeFinalLeaseReleaseForTesting { await hook() }
+#endif
+        return releaseLease(lease)
+    }
+
+    private func releaseLease(_ lease: ManagedDictionaryRuntimeLease) -> ManagedDictionaryLeaseRelease {
         guard var state = states[lease.dictionaryID],
               let record = state.activeLeases[lease.leaseID],
-              record.generation == lease.generation else { return nil }
+              record.generation == lease.generation else {
+            return ManagedDictionaryLeaseRelease(
+                lease: lease,
+                wasReleased: false,
+                drainedGeneration: nil,
+                resultMayPublish: false,
+                postReleaseSnapshot: snapshot(for: lease.dictionaryID)
+            )
+        }
+        let resultMayPublish = state.phase == .available ||
+            (state.phase == .draining && state.pendingTransition == nil)
         state.activeLeases[lease.leaseID] = nil
         let releasedLastLeaseForGeneration = !state.activeLeases.values.contains {
             $0.generation == lease.generation
@@ -320,7 +357,10 @@ actor ManagedDictionaryLifecycleCoordinator {
         advance(dictionaryID: lease.dictionaryID)
         return ManagedDictionaryLeaseRelease(
             lease: lease,
-            releasedLastLeaseForGeneration: releasedLastLeaseForGeneration
+            wasReleased: true,
+            drainedGeneration: releasedLastLeaseForGeneration ? lease.generation : nil,
+            resultMayPublish: resultMayPublish,
+            postReleaseSnapshot: snapshot(for: lease.dictionaryID)
         )
     }
 

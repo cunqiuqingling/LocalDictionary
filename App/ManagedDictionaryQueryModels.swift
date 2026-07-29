@@ -188,21 +188,25 @@ actor ManagedDictionaryQueryService {
                 let outcome = await runtime.lookup(descriptor: descriptor,
                                                    generation: lease.generation,
                                                    query: query)
+                let release = await lifecycleCoordinator.releaseForFinalValidation(lease)
+                if let drainedGeneration = generationNeedingEviction(release) {
+                    await runtime.remove(dictionaryID: descriptor.dictionaryID,
+                                         generation: drainedGeneration)
+                }
+                // This is deliberately the final suspension before result publication. After it
+                // returns, the actor synchronously reads its current Catalog and finalizes the
+                // result without retaining an eligibility decision across another await.
                 let lifecycleSnapshot = await lifecycleCoordinator.queryValidationSnapshot(
                     for: descriptor.dictionaryID
                 )
-                let eligible = isStillEligible(dictionaryID: descriptor.dictionaryID,
-                                                expectedGeneration: generation,
-                                                lifecycleSnapshot: lifecycleSnapshot)
-                let release = await lifecycleCoordinator.release(lease)
-                guard eligible else {
-                    if release?.releasedLastLeaseForGeneration == true {
-                        await runtime.remove(dictionaryID: descriptor.dictionaryID,
-                                             generation: lease.generation)
-                    }
-                    continue
-                }
-                switch outcome {
+                guard let finalizedOutcome = finalizeQueryOutcome(
+                    outcome,
+                    dictionaryID: descriptor.dictionaryID,
+                    expectedGeneration: generation,
+                    release: release,
+                    lifecycleSnapshot: lifecycleSnapshot
+                ) else { continue }
+                switch finalizedOutcome {
                 case .hit(let hit): hits.append(hit)
                 case .miss: break
                 case .unavailable: unavailable.append(descriptor.dictionaryID)
@@ -218,19 +222,54 @@ actor ManagedDictionaryQueryService {
         return (hits, unavailable)
     }
 
-    /// Must be called only after awaiting `queryValidationSnapshot`. It deliberately performs no
-    /// further await, so the Catalog read and generation comparison are one query-actor turn.
+    private func generationNeedingEviction(_ release: ManagedDictionaryLeaseRelease) -> UInt64? {
+        guard let drainedGeneration = release.drainedGeneration,
+              let snapshot = release.postReleaseSnapshot,
+              snapshot.generation != drainedGeneration || !release.resultMayPublish
+        else { return nil }
+        return drainedGeneration
+    }
+
+    /// This synchronous finalizer is the query result's linearization point. It must be called
+    /// only after the final lifecycle await: Catalog eligibility and generation are then checked
+    /// in the same query-actor turn, with no later suspension before publication.
+    private func finalizeQueryOutcome(
+        _ outcome: ManagedDictionaryRuntimeOutcome,
+        dictionaryID: String,
+        expectedGeneration: UInt64,
+        release: ManagedDictionaryLeaseRelease,
+        lifecycleSnapshot: ManagedDictionaryLifecycleSnapshot?
+    ) -> ManagedDictionaryRuntimeOutcome? {
+        guard release.wasReleased,
+              isStillEligible(dictionaryID: dictionaryID,
+                              expectedGeneration: expectedGeneration,
+                              release: release,
+                              lifecycleSnapshot: lifecycleSnapshot) else {
+            return nil
+        }
+        return outcome
+    }
+
     private func isStillEligible(dictionaryID: String,
                                  expectedGeneration: UInt64,
+                                 release: ManagedDictionaryLeaseRelease,
                                  lifecycleSnapshot: ManagedDictionaryLifecycleSnapshot?) -> Bool {
         guard let descriptor = catalog.dictionaries.first(where: { $0.dictionaryID == dictionaryID }),
               Self.isManagedLocalEligible(descriptor) || Self.isOpenResourceEligible(descriptor),
               let lifecycleSnapshot,
-              lifecycleSnapshot.allowsCurrentGenerationResult,
+              lifecycleSnapshot.allowsCurrentGenerationResult ||
+                (releaseMayPublishAcrossQueuedExclusive(release, lifecycleSnapshot: lifecycleSnapshot)),
               lifecycleSnapshot.generation == expectedGeneration else {
             return false
         }
         return true
+    }
+
+    private func releaseMayPublishAcrossQueuedExclusive(
+        _ release: ManagedDictionaryLeaseRelease,
+        lifecycleSnapshot: ManagedDictionaryLifecycleSnapshot
+    ) -> Bool {
+        release.resultMayPublish && lifecycleSnapshot.phase == .exclusive
     }
 
     private static func isManagedLocalEligible(_ descriptor: DictionaryDescriptor) -> Bool {

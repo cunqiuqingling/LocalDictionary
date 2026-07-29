@@ -64,12 +64,14 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-managed-dictionary-query-smoke.sh` exercises the B3 preferred-to-managed fallback policy, canonical and legacy generic formatter identifiers, B1 root-level and future `source/` managed MDX layouts, path/symlink escape rejection, stable Catalog ordering, state filtering, isolated failures, source SHA-256 and read-only SQLite validation, and safe managed dictionary snapshots for Markdown. It uses generated placeholder bytes, a temporary SQLite metadata table, and a mock managed runtime; it never opens a commercial MDX or accesses the network.
 
-`run-managed-dictionary-lifecycle-coordination-smoke.sh` covers D1b-3B-2C-R2 with synthetic
+`run-managed-dictionary-lifecycle-coordination-smoke.sh` covers D1b-3B-2C-R3 with synthetic
 Catalogs and runtimes: leaseID/generation accounting, latest-wins pending transitions (including
 delete and disable), permit-first index planning/publication, removal early-return retry, FIFO
-queue-head and late-cancellation cleanup, no-await final Catalog rechecks, and generation-scoped
-runtime eviction after the final old lease. It compiles its lifecycle-only validation hook only in
-the smoke binaries; application Release builds do not define that test macro. OpenResource
+queue-head and late-cancellation cleanup, atomic final lease-release outcomes, deterministic
+disable/delete release-window rechecks, and generation-scoped runtime eviction after the final old
+lease. The final lifecycle snapshot is the last query await; current Catalog eligibility is then
+read and finalized synchronously. It compiles its lifecycle-only validation hooks only in the smoke
+binaries; application Release builds do not define that test macro. OpenResource
 final publication while the shared keyed install permit is held. It uses deterministic actor
 barriers and isolated temporary roots only. These process-local leases do not provide the fd-bound
 SQLite identity guarantee deferred to D1b-3B-3; production manifest endpoints and payload hosts
