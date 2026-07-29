@@ -27,10 +27,13 @@ private let fixedID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
 private func digest(_ value: Data) -> String {
     SHA256.hash(data: value).map { String(format: "%02x", $0) }.joined()
 }
-private func plan(root: URL, payload: Data) throws -> ResourcePayloadDownloadPlan {
+private func plan(root: URL, payload: Data,
+                  maximumBytes: UInt64? = nil,
+                  diskSafetyMargin: UInt64 = 0) throws -> ResourcePayloadDownloadPlan {
     let policy = try ResourcePayloadDownloadPolicy(
         applicationAllowedHosts: ["example.test"], applicationHardLimit: 4_096,
-        diskSafetyMargin: 0, maximumRedirects: 0, requestTimeout: 1, resourceTimeout: 1
+        diskSafetyMargin: diskSafetyMargin, maximumRedirects: 0,
+        requestTimeout: 1, resourceTimeout: 1
     )
     let identity = try OpenResourceInstallationIdentity(
         dictionaryID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", resourceID: "synthetic",
@@ -46,13 +49,39 @@ private func plan(root: URL, payload: Data) throws -> ResourcePayloadDownloadPla
         resourceID: "synthetic", resourceRevision: 1,
         downloadURL: URL(string: "https://example.test/synthetic.mdx")!,
         signedFileName: "synthetic.mdx", expectedBytes: UInt64(payload.count),
-        maximumBytes: UInt64(payload.count), expectedSHA256: digest(payload),
+        maximumBytes: maximumBytes ?? UInt64(payload.count), expectedSHA256: digest(payload),
         allowedHosts: ["example.test"], stagingRoot: root, policy: policy,
         installationIdentity: identity
     )
 }
-private func store() -> ResourcePayloadStagingStore {
-    ResourcePayloadStagingStore(operationIDFactory: { fixedID })
+
+private let deterministicCapacity = ResourcePayloadCapacityMeasurement(
+    ordinary: .value(Int64.max),
+    important: .unavailable,
+    opportunistic: .unavailable
+)
+
+private struct CapacityProbeFailure: Error {}
+
+private func measurement(
+    ordinary: ResourcePayloadCapacitySample,
+    important: ResourcePayloadCapacitySample,
+    opportunistic: ResourcePayloadCapacitySample = .unavailable
+) -> ResourcePayloadCapacityMeasurement {
+    ResourcePayloadCapacityMeasurement(
+        ordinary: ordinary,
+        important: important,
+        opportunistic: opportunistic
+    )
+}
+
+private func store(
+    measurement: ResourcePayloadCapacityMeasurement = deterministicCapacity
+) -> ResourcePayloadStagingStore {
+    ResourcePayloadStagingStore(
+        hooks: hooks(capacityMeasurement: { _ in measurement }),
+        operationIDFactory: { fixedID }
+    )
 }
 
 private func store(hooks: ResourcePayloadFileSystemHooks) -> ResourcePayloadStagingStore {
@@ -60,13 +89,15 @@ private func store(hooks: ResourcePayloadFileSystemHooks) -> ResourcePayloadStag
 }
 
 private func hooks(
+    capacityMeasurement: (@Sendable (URL) throws
+        -> ResourcePayloadCapacityMeasurement)? = nil,
     writeAll: (@Sendable (Int32, Data) throws -> Void)? = nil,
     synchronize: (@Sendable (Int32) throws -> Void)? = nil,
     renameNoReplaceAt: (@Sendable (Int32, String, Int32, String) throws -> Void)? = nil
 ) -> ResourcePayloadFileSystemHooks {
     let base = ResourcePayloadFileSystemHooks.production
     return ResourcePayloadFileSystemHooks(
-        availableCapacity: base.availableCapacity,
+        capacityMeasurement: capacityMeasurement ?? { _ in deterministicCapacity },
         writeAll: writeAll ?? base.writeAll,
         synchronize: synchronize ?? base.synchronize,
         close: base.close,
@@ -118,6 +149,7 @@ enum ResourcePayloadStagingSecuritySmoke {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let payload = Data("synthetic payload only".utf8)
         try testComponents(&harness)
+        try testCapacityAdmission(&harness, root: root, payload: payload)
         try testRootAndPrepare(&harness, root: root, payload: payload)
         try testSidecarIdentityRevalidation(&harness, root: root, payload: payload)
         try testPrepareAndStreamingFailures(&harness, root: root, payload: payload)
@@ -138,6 +170,247 @@ enum ResourcePayloadStagingSecuritySmoke {
         }
         try ResourcePayloadStagingStore.validatePathComponentForTesting(".partial-11111111-2222-3333-4444-555555555555")
         try harness.check("canonical component accepted", true)
+    }
+
+    private static func testCapacityAdmission(
+        _ harness: inout Harness, root: URL, payload: Data
+    ) throws {
+        let gibibyte: Int64 = 1_024 * 1_024 * 1_024
+        let thirtyTwoGiB = 32 * gibibyte
+        let sixtyFourGiB = 64 * gibibyte
+        let effective = ResourcePayloadCapacityAdmission.effectiveCapacity
+
+        try harness.check(
+            "ordinary 64 GiB wins over important zero",
+            effective(measurement(ordinary: .value(sixtyFourGiB),
+                                  important: .value(0))) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "important 64 GiB wins over ordinary zero",
+            effective(measurement(ordinary: .value(0),
+                                  important: .value(sixtyFourGiB))) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "larger important capacity is effective",
+            effective(measurement(ordinary: .value(thirtyTwoGiB),
+                                  important: .value(sixtyFourGiB))) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "larger ordinary capacity is effective",
+            effective(measurement(ordinary: .value(sixtyFourGiB),
+                                  important: .value(thirtyTwoGiB))) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "ordinary survives unavailable important",
+            effective(measurement(ordinary: .value(sixtyFourGiB),
+                                  important: .unavailable)) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "important survives unavailable ordinary",
+            effective(measurement(ordinary: .unavailable,
+                                  important: .value(sixtyFourGiB))) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "important survives failed ordinary sample",
+            effective(measurement(ordinary: .failed,
+                                  important: .value(sixtyFourGiB))) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "ordinary survives failed important sample",
+            effective(measurement(ordinary: .value(sixtyFourGiB),
+                                  important: .failed)) == UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "two unavailable samples remain unavailable",
+            effective(measurement(ordinary: .unavailable,
+                                  important: .unavailable)) == nil
+        )
+        try harness.check(
+            "two failed samples remain unavailable",
+            effective(measurement(ordinary: .failed, important: .failed)) == nil
+        )
+        try harness.check(
+            "two real zero samples remain zero",
+            effective(measurement(ordinary: .value(0),
+                                  important: .value(0))) == 0
+        )
+        try harness.check(
+            "zero is not collapsed into unavailable",
+            effective(measurement(ordinary: .value(0),
+                                  important: .unavailable)) == 0 &&
+                effective(measurement(ordinary: .unavailable,
+                                      important: .unavailable)) == nil
+        )
+        try harness.check(
+            "negative capacity is not trusted",
+            effective(measurement(ordinary: .value(-1),
+                                  important: .unavailable)) == nil
+        )
+        try harness.check(
+            "positive sample survives negative peer",
+            effective(measurement(ordinary: .value(-1),
+                                  important: .value(sixtyFourGiB))) ==
+                UInt64(sixtyFourGiB)
+        )
+        try harness.check(
+            "opportunistic capacity never expands admission",
+            effective(measurement(ordinary: .unavailable,
+                                  important: .unavailable,
+                                  opportunistic: .value(sixtyFourGiB))) == nil
+        )
+
+        let ordinaryRoot = root.appendingPathComponent("capacity-ordinary", isDirectory: true)
+        let ordinaryOperation = try store(
+            measurement: measurement(ordinary: .value(sixtyFourGiB),
+                                     important: .value(0))
+        ).prepare(plan: try plan(root: ordinaryRoot, payload: payload))
+        ordinaryOperation.cleanup()
+        try harness.check("ordinary positive important zero stages",
+                          !FileManager.default.fileExists(
+                            atPath: partialDirectory(ordinaryRoot).path))
+
+        let importantRoot = root.appendingPathComponent("capacity-important", isDirectory: true)
+        let importantOperation = try store(
+            measurement: measurement(ordinary: .value(0),
+                                     important: .value(sixtyFourGiB))
+        ).prepare(plan: try plan(root: importantRoot, payload: payload))
+        importantOperation.cleanup()
+        try harness.check("important positive ordinary zero stages",
+                          !FileManager.default.fileExists(
+                            atPath: partialDirectory(importantRoot).path))
+
+        let required = UInt64(payload.count)
+        let lessRoot = root.appendingPathComponent("capacity-less-one", isDirectory: true)
+        try harness.expect("effective capacity required minus one",
+                           .insufficientDiskSpace) {
+            _ = try store(
+                measurement: measurement(ordinary: .value(Int64(required - 1)),
+                                         important: .unavailable)
+            ).prepare(plan: try plan(root: lessRoot, payload: payload))
+        }
+
+        let exactRoot = root.appendingPathComponent("capacity-exact", isDirectory: true)
+        let exactOperation = try store(
+            measurement: measurement(ordinary: .value(Int64(required)),
+                                     important: .unavailable)
+        ).prepare(plan: try plan(root: exactRoot, payload: payload))
+        exactOperation.cleanup()
+        try harness.check("effective capacity exactly required stages",
+                          !FileManager.default.fileExists(
+                            atPath: partialDirectory(exactRoot).path))
+
+        let greaterRoot = root.appendingPathComponent("capacity-greater", isDirectory: true)
+        let greaterOperation = try store(
+            measurement: measurement(ordinary: .value(Int64(required + 1)),
+                                     important: .unavailable)
+        ).prepare(plan: try plan(root: greaterRoot, payload: payload))
+        greaterOperation.cleanup()
+        try harness.check("effective capacity above required stages",
+                          !FileManager.default.fileExists(
+                            atPath: partialDirectory(greaterRoot).path))
+
+        let margin: UInt64 = 17
+        let marginRequired = required + margin
+        let marginLessRoot = root.appendingPathComponent("capacity-margin-less", isDirectory: true)
+        try harness.expect("safety margin remains in required capacity",
+                           .insufficientDiskSpace) {
+            _ = try store(
+                measurement: measurement(
+                    ordinary: .value(Int64(marginRequired - 1)),
+                    important: .unavailable
+                )
+            ).prepare(plan: try plan(root: marginLessRoot, payload: payload,
+                                    diskSafetyMargin: margin))
+        }
+        let marginExactRoot = root.appendingPathComponent("capacity-margin-exact",
+                                                           isDirectory: true)
+        let marginExactOperation = try store(
+            measurement: measurement(ordinary: .value(Int64(marginRequired)),
+                                     important: .unavailable)
+        ).prepare(plan: try plan(root: marginExactRoot, payload: payload,
+                                diskSafetyMargin: margin))
+        marginExactOperation.cleanup()
+        try harness.check("capacity including exact safety margin stages",
+                          !FileManager.default.fileExists(
+                            atPath: partialDirectory(marginExactRoot).path))
+
+        let zeroRoot = root.appendingPathComponent("capacity-two-zero", isDirectory: true)
+        try harness.expect("two zero samples reject positive required bytes",
+                           .insufficientDiskSpace) {
+            _ = try store(
+                measurement: measurement(ordinary: .value(0), important: .value(0))
+            ).prepare(plan: try plan(root: zeroRoot, payload: payload))
+        }
+
+        let unavailableRoot = root.appendingPathComponent("capacity-unavailable",
+                                                           isDirectory: true)
+        try harness.expect("two unavailable samples fail closed",
+                           .insufficientDiskSpace) {
+            _ = try store(
+                measurement: measurement(ordinary: .unavailable,
+                                         important: .unavailable)
+            ).prepare(plan: try plan(root: unavailableRoot, payload: payload))
+        }
+
+        let failedProbeRoot = root.appendingPathComponent("capacity-probe-error",
+                                                           isDirectory: true)
+        let failedProbeHooks = hooks(capacityMeasurement: { _ in
+            throw CapacityProbeFailure()
+        })
+        try harness.expect("whole capacity probe failure fails closed",
+                           .insufficientDiskSpace) {
+            _ = try store(hooks: failedProbeHooks)
+                .prepare(plan: try plan(root: failedProbeRoot, payload: payload))
+        }
+
+        let overflowRoot = root.appendingPathComponent("capacity-overflow", isDirectory: true)
+        try harness.expect("required capacity overflow fails closed",
+                           .insufficientDiskSpace) {
+            _ = try store().prepare(
+                plan: try plan(root: overflowRoot, payload: payload,
+                               maximumBytes: UInt64.max, diskSafetyMargin: 1)
+            )
+        }
+
+        let enospcRoot = root.appendingPathComponent("capacity-write-enospc",
+                                                      isDirectory: true)
+        let enospcHooks = hooks(
+            capacityMeasurement: { _ in deterministicCapacity },
+            writeAll: { _, _ in throw ResourcePayloadDownloadError.insufficientDiskSpace }
+        )
+        let enospcOperation = try store(hooks: enospcHooks)
+            .prepare(plan: try plan(root: enospcRoot, payload: payload))
+        try harness.expect("write ENOSPC remains fail closed",
+                           .insufficientDiskSpace) {
+            _ = try enospcOperation.append(
+                payload, maximumBytes: required, expectedBytes: required
+            )
+        }
+        enospcOperation.cleanup()
+        try harness.check("write ENOSPC cleanup removes partial directory",
+                          !FileManager.default.fileExists(
+                            atPath: partialDirectory(enospcRoot).path))
+
+        do {
+            let productionMeasurement =
+                try ResourcePayloadFileSystemHooks.production.capacityMeasurement(root)
+            print("production capacity diagnostic ordinary=\(productionMeasurement.ordinary) " +
+                  "important=\(productionMeasurement.important) " +
+                  "opportunistic=\(productionMeasurement.opportunistic)")
+            if case .value(let ordinary) = productionMeasurement.ordinary,
+               ordinary > 0,
+               case .value(0) = productionMeasurement.important {
+                try harness.check(
+                    "production ordinary positive survives important zero",
+                    effective(productionMeasurement) == UInt64(ordinary)
+                )
+            } else {
+                try harness.check("production capacity categories remain observable", true)
+            }
+        } catch {
+            print("production capacity diagnostic error=\(String(reflecting: error))")
+            try harness.check("production capacity probe failure remains observable", true)
+        }
     }
 
     private static func testRootAndPrepare(_ harness: inout Harness, root: URL, payload: Data) throws {

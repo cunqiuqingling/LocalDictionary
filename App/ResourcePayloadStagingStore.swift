@@ -2,25 +2,58 @@ import CryptoKit
 import Darwin
 import Foundation
 
+enum ResourcePayloadCapacitySample: Equatable, Sendable {
+    case value(Int64)
+    case unavailable
+    case failed
+}
+
+struct ResourcePayloadCapacityMeasurement: Equatable, Sendable {
+    let ordinary: ResourcePayloadCapacitySample
+    let important: ResourcePayloadCapacitySample
+    let opportunistic: ResourcePayloadCapacitySample
+}
+
+enum ResourcePayloadCapacityAdmission {
+    static func effectiveCapacity(
+        for measurement: ResourcePayloadCapacityMeasurement
+    ) -> UInt64? {
+        let trusted = [measurement.ordinary, measurement.important].compactMap {
+            sample -> UInt64? in
+            guard case .value(let value) = sample, value >= 0 else { return nil }
+            return UInt64(value)
+        }
+        return trusted.max()
+    }
+}
+
 /// The small injectable surface is used by synthetic payload tests. Production operations remain
 /// rooted in directory descriptors; no hook receives or resolves a descendant absolute path.
 struct ResourcePayloadFileSystemHooks: Sendable {
-    let availableCapacity: @Sendable (URL) throws -> UInt64
+    let capacityMeasurement: @Sendable (URL) throws -> ResourcePayloadCapacityMeasurement
     let writeAll: @Sendable (Int32, Data) throws -> Void
     let synchronize: @Sendable (Int32) throws -> Void
     let close: @Sendable (Int32) throws -> Void
     let renameNoReplaceAt: @Sendable (Int32, String, Int32, String) throws -> Void
 
     static let production = ResourcePayloadFileSystemHooks(
-        availableCapacity: { root in
+        capacityMeasurement: { root in
             let values = try root.resourceValues(forKeys: [
-                .volumeAvailableCapacityForImportantUsageKey
+                .volumeAvailableCapacityKey,
+                .volumeAvailableCapacityForImportantUsageKey,
+                .volumeAvailableCapacityForOpportunisticUsageKey
             ])
-            guard let capacity = values.volumeAvailableCapacityForImportantUsage,
-                  capacity >= 0 else {
-                throw ResourcePayloadDownloadError.insufficientDiskSpace
-            }
-            return UInt64(capacity)
+            return ResourcePayloadCapacityMeasurement(
+                ordinary: values.volumeAvailableCapacity.map {
+                    .value(Int64($0))
+                } ?? .unavailable,
+                important: values.volumeAvailableCapacityForImportantUsage.map {
+                    .value($0)
+                } ?? .unavailable,
+                opportunistic: values.volumeAvailableCapacityForOpportunisticUsage.map {
+                    .value($0)
+                } ?? .unavailable
+            )
         },
         writeAll: { descriptor, data in
             try data.withUnsafeBytes { bytes in
@@ -69,6 +102,46 @@ struct ResourcePayloadFileSystemHooks: Sendable {
             }
         }
     )
+
+    init(
+        capacityMeasurement: @escaping @Sendable (URL) throws
+            -> ResourcePayloadCapacityMeasurement,
+        writeAll: @escaping @Sendable (Int32, Data) throws -> Void,
+        synchronize: @escaping @Sendable (Int32) throws -> Void,
+        close: @escaping @Sendable (Int32) throws -> Void,
+        renameNoReplaceAt: @escaping @Sendable (Int32, String, Int32, String) throws -> Void
+    ) {
+        self.capacityMeasurement = capacityMeasurement
+        self.writeAll = writeAll
+        self.synchronize = synchronize
+        self.close = close
+        self.renameNoReplaceAt = renameNoReplaceAt
+    }
+
+    /// Compatibility initializer for existing synthetic downloader tests. The supplied value is
+    /// treated as one raw ordinary-capacity sample; admission still runs through production policy.
+    init(
+        availableCapacity: @escaping @Sendable (URL) throws -> UInt64,
+        writeAll: @escaping @Sendable (Int32, Data) throws -> Void,
+        synchronize: @escaping @Sendable (Int32) throws -> Void,
+        close: @escaping @Sendable (Int32) throws -> Void,
+        renameNoReplaceAt: @escaping @Sendable (Int32, String, Int32, String) throws -> Void
+    ) {
+        self.init(
+            capacityMeasurement: { root in
+                let capacity = try availableCapacity(root)
+                return ResourcePayloadCapacityMeasurement(
+                    ordinary: .value(Int64(clamping: capacity)),
+                    important: .unavailable,
+                    opportunistic: .unavailable
+                )
+            },
+            writeAll: writeAll,
+            synchronize: synchronize,
+            close: close,
+            renameNoReplaceAt: renameNoReplaceAt
+        )
+    }
 }
 
 fileprivate final class OwnedFileDescriptor {
@@ -255,7 +328,15 @@ struct ResourcePayloadStagingStore: Sendable {
 
         let root = try openRoot(rootURL)
         do {
-            guard try hooks.availableCapacity(rootURL) >= required.partialValue else {
+            let measurement: ResourcePayloadCapacityMeasurement
+            do {
+                measurement = try hooks.capacityMeasurement(rootURL)
+            } catch {
+                throw ResourcePayloadDownloadError.insufficientDiskSpace
+            }
+            guard let effectiveCapacity =
+                    ResourcePayloadCapacityAdmission.effectiveCapacity(for: measurement),
+                  effectiveCapacity >= required.partialValue else {
                 throw ResourcePayloadDownloadError.insufficientDiskSpace
             }
             let operationID = operationIDFactory()
