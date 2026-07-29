@@ -39,6 +39,7 @@ PUBLIC_TESTS=(
   Tests/run-dictionary-catalog-smoke.sh
   Tests/run-dictionary-import-smoke.sh
   Tests/run-dictionary-indexing-smoke.sh
+  Tests/run-managed-source-indexing-production-smoke.sh
   Tests/run-managed-dictionary-query-smoke.sh
   Tests/run-managed-dictionary-lifecycle-coordination-smoke.sh
   Tests/run-generic-mdict-formatter-security-smoke.sh

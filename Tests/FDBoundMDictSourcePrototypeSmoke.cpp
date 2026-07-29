@@ -417,6 +417,19 @@ void TestUnsafeSources(Harness &harness, int root_descriptor,
         (void)ignored;
       },
       "owner mismatch was accepted");
+  WriteBytes(root / "unsafe/hardlink-source.mdx",
+             BuildSyntheticMDX("hardlink-alpha", "hardlink-omega"));
+  if (link((root / "unsafe/hardlink-source.mdx").c_str(),
+           (root / "unsafe/hardlink-alias.mdx").c_str()) != 0) {
+    throw std::runtime_error("cannot create hard-link fixture");
+  }
+  harness.ExpectThrow(
+      [&] {
+        auto ignored = MDictSourceCapability::OpenAt(
+            directory, "hardlink-source.mdx");
+        (void)ignored;
+      },
+      "hard-linked source was accepted");
 
   const int writable =
       open((root / "unsafe/dictionary.mdx").c_str(),

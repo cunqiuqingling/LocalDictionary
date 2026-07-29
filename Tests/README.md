@@ -286,8 +286,25 @@ EOF/overflow, malformed input, fd recovery, independent parsers, and
 concurrent duplicates; and report bounded parser reads, memory, timing, and
 fd observations. A source-structure gate scopes pathname-fallback checks to
 the new fd reader/factory/readfile chain so the retained legacy path API is
-not rejected. The prototype is not connected to an App production caller
-and does not read private dictionaries or configuration.
+not rejected. The directory/source capability implementation is now owned by
+`MDictCore/ManagedMDictSource.*`; the prototype header is a compatibility
+alias, so the feasibility smoke and production indexing share one
+security-critical primitive.
+
+`Tests/run-managed-source-indexing-production-smoke.sh` builds the production
+Objective-C++ bridge, fd-based SQLite index builder, shared managed-source
+capability, and vendored parser in Debug with ASan/UBSan and optimized
+Release, all with warnings-as-errors. Its synthetic-only matrix covers
+managedLocal and openResource success, expected size/SHA mismatch, hash
+cancellation, canonical and same-size replacement, ancestor replacement,
+source/ancestor symlinks, non-regular input, parser/build failure cleanup,
+parallel dictionary isolation, fd recovery, and the retained legacy path
+builder. Static gates require the managed adapter → bridge → core chain to
+call `Mdict::fromFileDescriptor` without `/dev/fd`, a pathname parser
+fallback, or source-path metadata reopening. The Swift indexing smoke also
+requires the capability to remain valid through the final pre-publication
+check; mismatch cannot publish a candidate, mark Catalog ready, or restore
+the lifecycle to available.
 
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.

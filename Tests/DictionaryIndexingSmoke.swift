@@ -23,12 +23,38 @@ private final class ScriptedBuilder: Sendable {
         self.builders = Mutex(builders)
     }
 
-    func next(source: URL, index: URL,
+    func next(source: DictionaryIndexSourceCapability, index: URL,
               token: DictionaryIndexCancellationToken) -> DictionaryIndexBuildOutcome {
         let builder = builders.withLock { builders in
             builders.isEmpty ? nil : builders.removeFirst()
         }
         return builder?(source, index, token) ?? .failure("测试 Builder 已耗尽。")
+    }
+}
+
+private func syntheticSourceOpener(
+    onOpen: (@Sendable (String) -> Void)? = nil
+) -> DictionaryIndexSourceOpenFunction {
+    { root, relativePath, expectedSize, expectedSHA256, token in
+        if token.isCancelled { throw CancellationError() }
+        onOpen?(relativePath)
+        let url = root.appendingPathComponent(relativePath)
+        let data = try Data(contentsOf: url)
+        let digest = sha256(data)
+        guard UInt64(data.count) == expectedSize,
+              digest == expectedSHA256 else {
+            throw DictionaryIndexError.sourceChanged
+        }
+        return DictionaryIndexSourceCapability(
+            sourceFileSize: UInt64(data.count),
+            sourceSHA256: digest,
+            storage: data as NSData,
+            validation: {
+                guard let current = try? Data(contentsOf: url) else { return false }
+                return UInt64(current.count) == expectedSize &&
+                    sha256(current) == expectedSHA256
+            }
+        )
     }
 }
 
@@ -156,20 +182,25 @@ private struct Fixture {
 
     func coordinator(
         builder: @escaping DictionaryIndexBuildFunction,
+        openSource: @escaping DictionaryIndexSourceOpenFunction =
+            syntheticSourceOpener(),
         capacity: UInt64 = UInt64.max,
         lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator =
-            ManagedDictionaryLifecycleCoordinator()
+            ManagedDictionaryLifecycleCoordinator(),
+        runtimeInvalidator: @escaping @Sendable (String) async -> Void = { _ in }
     ) -> ManagedDictionaryIndexCoordinator {
         ManagedDictionaryIndexCoordinator(
             catalog: catalog,
             catalogStore: catalogStore,
             applicationSupportRootURL: root,
+            openSource: openSource,
             buildIndex: builder,
             expectedSchemaVersion: 1,
             hooks: DictionaryIndexingHooks(
                 availableCapacity: { _ in capacity },
                 beforePublish: {}
-            ), lifecycleCoordinator: lifecycleCoordinator
+            ), lifecycleCoordinator: lifecycleCoordinator,
+            runtimeInvalidator: runtimeInvalidator
         )
     }
 
@@ -260,6 +291,7 @@ private func testCancellationAndConcurrency() async throws {
         catalog: catalog,
         catalogStore: first.catalogStore,
         applicationSupportRootURL: first.root,
+        openSource: syntheticSourceOpener(),
         buildIndex: blockingBuilder(),
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max },
@@ -324,12 +356,15 @@ private func testPlanUsesLatestDescriptorAfterPermit() async throws {
                                          createdAt: active.createdAt, updatedAt: active.updatedAt,
                                          dictionaries: [active])
     let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: activeCatalog)
-    let observedSource = Mutex<URL?>(nil)
-    let builder: DictionaryIndexBuildFunction = { source, index, token in
-        observedSource.withLock { $0 = source }
-        return validBuilder(entries: 2)(source, index, token)
+    let observedSource = Mutex<String?>(nil)
+    let opener = syntheticSourceOpener { relativePath in
+        observedSource.withLock { $0 = relativePath }
     }
-    let coordinator = fixture.coordinator(builder: builder, lifecycleCoordinator: lifecycle)
+    let coordinator = fixture.coordinator(
+        builder: validBuilder(entries: 2),
+        openSource: opener,
+        lifecycleCoordinator: lifecycle
+    )
     let activeLease = try await lifecycle.acquireQueryLease(for: fixture.dictionaryID)
     try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
                "index should queue behind the active lease")
@@ -358,7 +393,8 @@ private func testPlanUsesLatestDescriptorAfterPermit() async throws {
     await lifecycle.initialize(reconciledCatalog: replacementCatalog)
     await lifecycle.release(activeLease)
     try await waitUntilIdle(coordinator)
-    try expect(observedSource.withLock { $0 }?.standardizedFileURL == replacementURL.standardizedFileURL,
+    try expect(observedSource.withLock { $0 } ==
+               replacement.relativePaths.dictionary,
                "index plan must be created from descriptor B after permit acquisition")
     try expect(coordinator.catalog.dictionaries.first?.indexMetadata.sourceSHA256 == sha256(replacementData),
                "ready Catalog must retain descriptor B source identity")
@@ -411,6 +447,7 @@ private func testDisabledReadyPublishesSuspended() async throws {
         catalog: disabledCatalog,
         catalogStore: fixture.catalogStore,
         applicationSupportRootURL: fixture.root,
+        openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max }, beforePublish: {}),
@@ -482,6 +519,72 @@ private func testFailurePreservesExistingIndex() async throws {
     let preserved = try Data(contentsOf: final)
     try expect(preserved == previous,
                "failed build must not overwrite an existing final index")
+}
+
+@MainActor
+private func testCapabilityRevalidatedBeforePublication() async throws {
+    let fixture = try Fixture(name: "capability-publication-gate")
+    defer { fixture.cleanup() }
+    let validationCalls = Mutex(0)
+    let opener: DictionaryIndexSourceOpenFunction = {
+        _, _, expectedSize, expectedDigest, _ in
+        DictionaryIndexSourceCapability(
+            sourceFileSize: expectedSize,
+            sourceSHA256: expectedDigest,
+            validation: {
+                validationCalls.withLock {
+                    $0 += 1
+                    return $0 <= 4
+                }
+            }
+        )
+    }
+    let lifecycle = ManagedDictionaryLifecycleCoordinator(catalog: fixture.catalog)
+    let coordinator = fixture.coordinator(
+        builder: validBuilder(entries: 2),
+        openSource: opener,
+        lifecycleCoordinator: lifecycle
+    )
+    try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
+               "capability publication gate should start")
+    try await waitUntilIdle(coordinator)
+    try expect(validationCalls.withLock { $0 } >= 5,
+               "source capability was not revalidated in finish")
+    try expect(coordinator.catalog.dictionaries.first?.state == .failed,
+               "post-build source rebind incorrectly committed ready Catalog")
+    let final = fixture.root.appendingPathComponent(
+        "Dictionaries/\(fixture.dictionaryID)/index/dictionary.sqlite")
+    try expect(!FileManager.default.fileExists(atPath: final.path),
+               "post-build source rebind published final candidate")
+    let lifecycleState = await lifecycle.snapshot(for: fixture.dictionaryID)
+    try expect(lifecycleState?.phase == .suspended,
+               "post-build source rebind restored query availability")
+}
+
+@MainActor
+private func testSourceOpensBeforeRuntimeInvalidation() async throws {
+    let fixture = try Fixture(name: "source-before-invalidation")
+    defer { fixture.cleanup() }
+    let events = Mutex<[String]>([])
+    let opener = syntheticSourceOpener { _ in
+        events.withLock { $0.append("source") }
+    }
+    let builder: DictionaryIndexBuildFunction = { source, index, token in
+        events.withLock { $0.append("build") }
+        return validBuilder(entries: 2)(source, index, token)
+    }
+    let coordinator = fixture.coordinator(
+        builder: builder,
+        openSource: opener,
+        runtimeInvalidator: { _ in
+            events.withLock { $0.append("invalidate") }
+        }
+    )
+    try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
+               "source ordering fixture should start")
+    try await waitUntilIdle(coordinator)
+    try expect(events.withLock { $0 } == ["source", "invalidate", "build"],
+               "source capability must precede invalidation and parser build")
 }
 
 @MainActor
@@ -575,6 +678,7 @@ private func testOwnershipPolicyEligibility() async throws {
         catalog: catalog,
         catalogStore: store,
         applicationSupportRootURL: root,
+        openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(
@@ -601,6 +705,7 @@ private func testOwnershipPolicyEligibility() async throws {
         catalog: externalCatalog,
         catalogStore: store,
         applicationSupportRootURL: root,
+        openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
         expectedSchemaVersion: 1
     )
@@ -665,6 +770,7 @@ private func testB1B2B3Compatibility() async throws {
         catalog: imported,
         catalogStore: store,
         applicationSupportRootURL: root,
+        openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max },
@@ -698,6 +804,8 @@ struct DictionaryIndexingSmoke {
         try await testDisabledReadyPublishesSuspended()
         try await testValidationFailures()
         try await testFailurePreservesExistingIndex()
+        try await testCapabilityRevalidatedBeforePublication()
+        try await testSourceOpensBeforeRuntimeInvalidation()
         try testInterruptedRecovery()
         try await testOwnershipPolicyEligibility()
         try await testB1B2B3Compatibility()

@@ -72,6 +72,13 @@ private enum DictionaryManagerLayoutSmoke {
         let indexCoordinator = ManagedDictionaryIndexCoordinator(
             catalogStore: catalogStore,
             applicationSupportRootURL: root,
+            openSource: { _, _, size, digest, _ in
+                DictionaryIndexSourceCapability(
+                    sourceFileSize: size,
+                    sourceSHA256: digest,
+                    validation: { true }
+                )
+            },
             buildIndex: { _, _, _ in .failure("not used by layout smoke") },
             expectedSchemaVersion: 1
         )

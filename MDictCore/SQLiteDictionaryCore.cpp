@@ -57,22 +57,15 @@ bool endsWith(const std::string &value, const std::string &suffix) {
          value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-struct SourceMetadata {
-  uint64_t size = 0;
-  int64_t modified_seconds = 0;
-  int64_t modified_nanoseconds = 0;
-  uint64_t inode = 0;
-  uint64_t device = 0;
-};
-
-SourceMetadata sourceMetadata(const std::string &path) {
+IndexSourceMetadata sourceMetadata(const std::string &path) {
   struct stat status {};
   if (stat(path.c_str(), &status) != 0) {
     throw std::runtime_error("Cannot stat dictionary: " + path);
   }
   return {static_cast<uint64_t>(status.st_size), status.st_mtimespec.tv_sec,
           status.st_mtimespec.tv_nsec, static_cast<uint64_t>(status.st_ino),
-          static_cast<uint64_t>(status.st_dev)};
+          static_cast<uint64_t>(status.st_dev),
+          std::filesystem::path(path).filename().string(), path};
 }
 
 std::string numberString(uint64_t value) { return std::to_string(value); }
@@ -115,7 +108,7 @@ bool SQLiteDictionaryCore::indexMatchesDictionary() const {
     return false;
   }
 
-  const SourceMetadata source = sourceMetadata(dictionary_path_);
+  const IndexSourceMetadata source = sourceMetadata(dictionary_path_);
   const std::pair<const char *, std::string> expected[] = {
       {"schema_version", std::to_string(kSchemaVersion)},
       {"source_size", numberString(source.size)},
@@ -150,6 +143,25 @@ bool SQLiteDictionaryCore::indexMatchesDictionary() const {
 
 IndexBuildResult SQLiteDictionaryCore::buildIndex(
     const std::function<bool()> &cancellation_check) {
+  auto source = std::make_unique<mdict::Mdict>(dictionary_path_);
+  return buildIndexWithSource(
+      std::move(source), sourceMetadata(dictionary_path_),
+      cancellation_check);
+}
+
+IndexBuildResult SQLiteDictionaryCore::buildIndexFromFileDescriptor(
+    int source_descriptor, const IndexSourceMetadata &source_metadata,
+    const std::function<bool()> &cancellation_check) {
+  auto source = mdict::Mdict::fromFileDescriptor(
+      source_descriptor, mdict::MdictInputKind::mdx);
+  return buildIndexWithSource(
+      std::move(source), source_metadata, cancellation_check);
+}
+
+IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
+    std::unique_ptr<mdict::Mdict> source_owner,
+    const IndexSourceMetadata &source_metadata,
+    const std::function<bool()> &cancellation_check) {
   const auto cancelled = [&cancellation_check]() {
     return cancellation_check && cancellation_check();
   };
@@ -160,7 +172,7 @@ IndexBuildResult SQLiteDictionaryCore::buildIndex(
   std::error_code ignored;
   std::filesystem::remove(temporary_path, ignored);
 
-  mdict::Mdict source(dictionary_path_);
+  mdict::Mdict &source = *source_owner;
   source.init();
   if (cancelled()) throw IndexBuildCancelled();
   if (source.engineVersion() < 2.0f || source.dictionaryEncoding() != 0) {
@@ -221,16 +233,17 @@ IndexBuildResult SQLiteDictionaryCore::buildIndex(
 
     if (cancelled()) throw IndexBuildCancelled();
 
-    const SourceMetadata metadata = sourceMetadata(dictionary_path_);
     const std::pair<std::string, std::string> values[] = {
         {"schema_version", std::to_string(kSchemaVersion)},
-        {"source_path", dictionary_path_},
-        {"source_name", std::filesystem::path(dictionary_path_).filename().string()},
-        {"source_size", numberString(metadata.size)},
-        {"source_mtime_seconds", signedNumberString(metadata.modified_seconds)},
-        {"source_mtime_nanoseconds", signedNumberString(metadata.modified_nanoseconds)},
-        {"source_inode", numberString(metadata.inode)},
-        {"source_device", numberString(metadata.device)},
+        {"source_path", source_metadata.source_identifier},
+        {"source_name", source_metadata.source_name},
+        {"source_size", numberString(source_metadata.size)},
+        {"source_mtime_seconds",
+         signedNumberString(source_metadata.modified_seconds)},
+        {"source_mtime_nanoseconds",
+         signedNumberString(source_metadata.modified_nanoseconds)},
+        {"source_inode", numberString(source_metadata.inode)},
+        {"source_device", numberString(source_metadata.device)},
         {"entry_count", numberString(keys.size())},
         {"engine_version", std::to_string(source.engineVersion())},
         {"encoding", "UTF-8"}};

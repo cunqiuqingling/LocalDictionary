@@ -15,7 +15,8 @@ struct DictionaryIndexActivity: Equatable, Sendable {
 
 struct DictionaryIndexPlan: Sendable {
     let dictionaryID: String
-    let sourceURL: URL
+    let managedRootURL: URL
+    let sourceRelativePath: String
     let expectedSourceSize: UInt64
     let expectedSourceSHA256: String
     let indexDirectoryURL: URL
@@ -29,8 +30,37 @@ struct DictionaryIndexBuildProduct: Sendable {
     let reportedEntryCount: UInt64
 }
 
-typealias DictionaryIndexBuildFunction = @Sendable (
+/// A process-local lease over one already-verified managed source object.
+/// `storage` keeps the production C++ capability alive; test implementations
+/// may leave it nil. The worker never reconstructs a pathname from this lease.
+final class DictionaryIndexSourceCapability: @unchecked Sendable {
+    let sourceFileSize: UInt64
+    let sourceSHA256: String
+    let storage: AnyObject?
+    private let validation: @Sendable () -> Bool
+
+    init(sourceFileSize: UInt64, sourceSHA256: String,
+         storage: AnyObject? = nil,
+         validation: @escaping @Sendable () -> Bool) {
+        self.sourceFileSize = sourceFileSize
+        self.sourceSHA256 = sourceSHA256
+        self.storage = storage
+        self.validation = validation
+    }
+
+    var isValidForPublication: Bool { validation() }
+}
+
+typealias DictionaryIndexSourceOpenFunction = @Sendable (
     URL,
+    String,
+    UInt64,
+    String,
+    DictionaryIndexCancellationToken
+) throws -> DictionaryIndexSourceCapability
+
+typealias DictionaryIndexBuildFunction = @Sendable (
+    DictionaryIndexSourceCapability,
     URL,
     DictionaryIndexCancellationToken
 ) -> DictionaryIndexBuildOutcome
@@ -52,10 +82,17 @@ struct DictionaryIndexPreparedResult: Sendable {
     let sourceFileSize: UInt64
     let sourceSHA256: String
     let indexedAt: Date
+    let sourceCapability: DictionaryIndexSourceCapability
 }
 
 enum DictionaryIndexWorkerOutcome: Sendable {
     case prepared(DictionaryIndexPreparedResult)
+    case cancelled
+    case failed(DictionaryIndexError)
+}
+
+enum DictionaryIndexSourceOpenOutcome: Sendable {
+    case ready(DictionaryIndexSourceCapability)
     case cancelled
     case failed(DictionaryIndexError)
 }

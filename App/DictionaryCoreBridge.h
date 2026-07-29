@@ -10,6 +10,32 @@ FOUNDATION_EXPORT NSDictionary<NSString *, id> *LocalDictionaryBuildIndex(
     NSString *indexPath,
     DictionaryIndexCancellationCheck cancellationCheck);
 
+@interface LocalDictionaryManagedSourceCapability : NSObject {
+ @private
+  void *_managedSourceStorage;
+}
+
+@property(nonatomic, readonly) unsigned long long sourceFileSize;
+@property(nonatomic, copy, readonly) NSString *sourceSHA256;
+@property(nonatomic, readonly, getter=isValidForPublication)
+    BOOL validForPublication;
+
+@end
+
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *
+LocalDictionaryOpenManagedSource(
+    NSString *managedRootPath,
+    NSString *sourceRelativePath,
+    unsigned long long expectedSourceSize,
+    NSString *expectedSourceSHA256,
+    DictionaryIndexCancellationCheck cancellationCheck);
+
+FOUNDATION_EXPORT NSDictionary<NSString *, id> *
+LocalDictionaryBuildIndexFromManagedSource(
+    LocalDictionaryManagedSourceCapability *sourceCapability,
+    NSString *indexPath,
+    DictionaryIndexCancellationCheck cancellationCheck);
+
 #ifdef __cplusplus
 class DictionaryBridgeStorage;
 #endif

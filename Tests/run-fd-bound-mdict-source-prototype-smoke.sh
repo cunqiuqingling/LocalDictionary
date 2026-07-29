@@ -8,7 +8,7 @@ trap '/bin/rm -rf "$WORK"' EXIT
 MDICT="$ROOT/ThirdParty/vendor/mdict-cpp"
 MINIZ="$ROOT/ThirdParty/vendor/miniz"
 LTC="$ROOT/ThirdParty/vendor/libtomcrypt-ripemd128"
-SOURCE="$ROOT/Prototypes/FDBoundMDictSource.cpp"
+SOURCE="$ROOT/MDictCore/ManagedMDictSource.cpp"
 SMOKE="$ROOT/Tests/FDBoundMDictSourcePrototypeSmoke.cpp"
 
 SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
@@ -47,6 +47,8 @@ print -r -- "$readfile_region" | /usr/bin/grep -q \
 if /usr/bin/grep -R -q '/dev/fd' \
     "$ROOT/Prototypes/FDBoundMDictSource.h" \
     "$ROOT/Prototypes/FDBoundMDictSource.cpp" \
+    "$ROOT/MDictCore/ManagedMDictSource.h" \
+    "$ROOT/MDictCore/ManagedMDictSource.cpp" \
     "$MDICT/src/include/mdict.h" "$MDICT/src/mdict.cc"; then
   print -u2 "fd source prototype contains a /dev/fd fallback"
   exit 1
@@ -61,6 +63,7 @@ build_and_run() {
   local cflags=(-std=c17 -Wall -Wextra -Werror -isysroot "$SDKROOT"
                 "${flags[@]}")
   local cxxflags=(-std=c++17 -Wall -Wextra -Werror -pthread
+                  -DLOCALDICTIONARY_SOURCE_CAPABILITY_TESTING
                   -isysroot "$SDKROOT" "${flags[@]}")
 
   for source in miniz.c miniz_tinfl.c miniz_tdef.c; do

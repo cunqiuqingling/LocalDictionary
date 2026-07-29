@@ -23,6 +23,7 @@
 		A1000000000000000000000E /* miniz_tinfl.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* miniz_tinfl.c */; };
 		A1000000000000000000000F /* miniz_tdef.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* miniz_tdef.c */; };
 		A10000000000000000000046 /* RIPEMD128Adapter.c in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000050 /* RIPEMD128Adapter.c */; };
+		A10000000000000000000074 /* ManagedMDictSource.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000074 /* ManagedMDictSource.cpp */; };
 		A10000000000000000000012 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012 /* Cocoa.framework */; };
 		A10000000000000000000013 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* Carbon.framework */; };
 		A10000000000000000000014 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* libsqlite3.tbd */; };
@@ -119,6 +120,8 @@
 		B1000000000000000000000F /* miniz_tdef.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tdef.c; path = ../ThirdParty/vendor/miniz/miniz_tdef.c; sourceTree = "<group>"; };
 		B10000000000000000000050 /* RIPEMD128Adapter.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = RIPEMD128Adapter.c; path = ../MDictCore/RIPEMD128Adapter.c; sourceTree = "<group>"; };
 		B10000000000000000000051 /* RIPEMD128Adapter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = RIPEMD128Adapter.h; path = ../MDictCore/RIPEMD128Adapter.h; sourceTree = "<group>"; };
+		B10000000000000000000074 /* ManagedMDictSource.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = ManagedMDictSource.cpp; path = ../MDictCore/ManagedMDictSource.cpp; sourceTree = "<group>"; };
+		B10000000000000000000075 /* ManagedMDictSource.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ManagedMDictSource.h; path = ../MDictCore/ManagedMDictSource.h; sourceTree = "<group>"; };
 		B10000000000000000000012 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
 		B10000000000000000000013 /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = SDKROOT; };
 		B10000000000000000000014 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.text-based-dylib-definition; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
@@ -323,6 +326,8 @@
 				B10000000000000000000018 /* SQLiteDictionaryCore.h */,
 				B10000000000000000000050 /* RIPEMD128Adapter.c */,
 				B10000000000000000000051 /* RIPEMD128Adapter.h */,
+				B10000000000000000000074 /* ManagedMDictSource.cpp */,
+				B10000000000000000000075 /* ManagedMDictSource.h */,
 			);
 			name = MDictCore;
 			sourceTree = "<group>";
@@ -532,6 +537,7 @@
 				A1000000000000000000000B /* adler32.cc in Sources */,
 				A1000000000000000000000C /* rmd128.c in Sources */,
 				A10000000000000000000046 /* RIPEMD128Adapter.c in Sources */,
+				A10000000000000000000074 /* ManagedMDictSource.cpp in Sources */,
 				A1000000000000000000000D /* miniz.c in Sources */,
 				A1000000000000000000000E /* miniz_tinfl.c in Sources */,
 				A1000000000000000000000F /* miniz_tdef.c in Sources */,

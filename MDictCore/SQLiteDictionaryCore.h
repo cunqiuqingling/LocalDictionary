@@ -48,6 +48,16 @@ struct IndexBuildResult {
   uint64_t entry_count = 0;
 };
 
+struct IndexSourceMetadata {
+  uint64_t size = 0;
+  int64_t modified_seconds = 0;
+  int64_t modified_nanoseconds = 0;
+  uint64_t inode = 0;
+  uint64_t device = 0;
+  std::string source_name;
+  std::string source_identifier;
+};
+
 class IndexBuildCancelled final : public std::exception {
  public:
   const char *what() const noexcept override { return "index build cancelled"; }
@@ -66,6 +76,9 @@ class SQLiteDictionaryCore {
   IndexOpenResult open(bool force_rebuild = false);
   IndexOpenResult openExistingReadOnly();
   IndexBuildResult buildIndex(
+      const std::function<bool()> &cancellation_check = {});
+  IndexBuildResult buildIndexFromFileDescriptor(
+      int source_descriptor, const IndexSourceMetadata &source_metadata,
       const std::function<bool()> &cancellation_check = {});
   LookupResult lookup(const std::string &input,
                       size_t maximum_html_bytes = 0);
@@ -93,6 +106,10 @@ class SQLiteDictionaryCore {
   std::string readWithCache(const IndexedRecord &record, bool &cache_hit);
   void insertCache(const std::string &key, std::string value);
   void closeDatabase();
+  IndexBuildResult buildIndexWithSource(
+      std::unique_ptr<mdict::Mdict> source,
+      const IndexSourceMetadata &source_metadata,
+      const std::function<bool()> &cancellation_check);
 
   std::string dictionary_path_;
   std::string index_path_;
