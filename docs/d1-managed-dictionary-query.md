@@ -28,12 +28,16 @@ and index identity remain D1b-3B-3.
 Lookup order is unchanged for existing dictionaries: preferred legacy sources first, then eligible
 `managedLocal` descriptors. Only after that tier has no hits may an eligible app-managed
 OpenResource fallback be queried. Same-tier results retain stable Catalog sort order. Before an
-in-flight result returns, the coordinator atomically releases its lease and reports the drained
-generation plus post-release lifecycle state. Necessary generation-scoped eviction happens before
-the final lifecycle snapshot. That snapshot is the query path's last await; the query actor then
-rechecks the current Catalog and generation synchronously, with no later await before it either
-publishes or drops the result. Disabled, removed, or transitioned descriptors cannot publish stale
-results. Misses and runtime
+in-flight result becomes a candidate, the coordinator atomically releases its lease and reports the
+drained generation plus post-release lifecycle state. Necessary generation-scoped eviction for
+every candidate happens before one coherent batch lifecycle snapshot. That batch snapshot is the
+public lookup's last await. The query actor then synchronously compares every immutable candidate
+with its current Catalog descriptor, lifecycle generation, and canonical runtime-affecting
+identity, forms the final ordered result array, and returns without another suspension. A prior
+candidate disabled, deleted, or identity-replaced while a later dictionary is awaiting cannot
+publish. A writer that is merely queued may allow an already-started query only when generation
+and runtime identity remain unchanged. The generation-scoped runtime removal operation has no
+dictionary-wide protocol default; every runtime explicitly implements it. Misses and runtime
 errors are isolated and never auto-trigger AI. Both managed tiers use the existing generic MDict
 sanitizer, so no raw HTML, scripts, external resources, receipt contents, or paths enter the display
 result.

@@ -242,6 +242,7 @@ private actor MockRuntime: ManagedDictionaryQueryRuntime {
     }
 
     func remove(dictionaryID: String) { removed.append(dictionaryID) }
+    func remove(dictionaryID: String, generation: UInt64) { removed.append(dictionaryID) }
     func reset() {}
     func snapshot() -> (queried: [String], removed: [String]) { (queried, removed) }
 }
@@ -289,6 +290,7 @@ private actor DeferredRuntime: ManagedDictionaryQueryRuntime {
     }
 
     func remove(dictionaryID: String) { removed.append(dictionaryID) }
+    func remove(dictionaryID: String, generation: UInt64) { removed.append(dictionaryID) }
     func reset() {}
     func hasStarted() -> Bool { lookupStarted }
     func finish() { mayFinish = true }

@@ -64,15 +64,21 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-managed-dictionary-query-smoke.sh` exercises the B3 preferred-to-managed fallback policy, canonical and legacy generic formatter identifiers, B1 root-level and future `source/` managed MDX layouts, path/symlink escape rejection, stable Catalog ordering, state filtering, isolated failures, source SHA-256 and read-only SQLite validation, and safe managed dictionary snapshots for Markdown. It uses generated placeholder bytes, a temporary SQLite metadata table, and a mock managed runtime; it never opens a commercial MDX or accesses the network.
 
-`run-managed-dictionary-lifecycle-coordination-smoke.sh` covers D1b-3B-2C-R3 with synthetic
+`run-managed-dictionary-lifecycle-coordination-smoke.sh` covers D1b-3B-2C-Final with synthetic
 Catalogs and runtimes: leaseID/generation accounting, latest-wins pending transitions (including
 delete and disable), permit-first index planning/publication, removal early-return retry, FIFO
 queue-head and late-cancellation cleanup, atomic final lease-release outcomes, deterministic
-disable/delete release-window rechecks, and generation-scoped runtime eviction after the final old
-lease. The final lifecycle snapshot is the last query await; current Catalog eligibility is then
-read and finalized synchronously. It compiles its lifecycle-only validation hooks only in the smoke
-binaries; application Release builds do not define that test macro. OpenResource
-final publication while the shared keyed install permit is held. It uses deterministic actor
+disable/delete release-window rechecks, generation-scoped runtime eviction after the final old
+lease, and whole-batch identity revalidation after later dictionary awaits. The fixtures collect A,
+pause B, then disable, delete, or replace A with another eligible runtime identity; they also cover
+queued writers with unchanged/changed identities, missing snapshots, generation changes, later
+runtime failure, stable ordering, and the all-filtered offline miss. One coherent batch lifecycle
+snapshot is the public lookup's last await; current Catalog eligibility and canonical runtime
+identity are then read and finalized synchronously. The public aggregate source gate rejects
+asynchronous work after that snapshot and rejects a generation-scoped remove protocol default.
+It compiles its lifecycle-only validation hooks only in the smoke binaries; application Release
+builds do not define that test macro. It also covers OpenResource final publication while the
+shared keyed install permit is held. It uses deterministic actor
 barriers and isolated temporary roots only. These process-local leases do not provide the fd-bound
 SQLite identity guarantee deferred to D1b-3B-3; production manifest endpoints and payload hosts
 remain empty.
@@ -258,11 +264,13 @@ descriptors and runtimes. It runs Debug ASan/UBSan and optimized Release with th
 error contract. The coordinator is process-local and keyed by dictionary UUID: it verifies
 multiple leases, latest-wins A→B→C/delete/disable transitions, deterministic drain before an
 exclusive operation, generation rejection, retirement, throw/cancellation release, final Catalog
-validation reentrancy, generation-scoped runtime eviction, a real isolated `DictionaryCatalogStore` mutation, and
-the priority chain `preferred → managedLocal → openResource → offline miss`. Its category output
+validation reentrancy, generation-scoped runtime eviction, whole-batch candidate identity
+validation across a later lookup await, a real isolated `DictionaryCatalogStore` mutation, and the
+priority chain `preferred → managedLocal → openResource → offline miss`. Its category output
 separates actor state, query-runtime service, Catalog transaction, deterministic barriers,
-cancellation, and ordering/eligibility assertions; it is not a count of independent product
-features. The runner also invokes the existing isolated indexing and PendingDeletion-removal
+batch finalization, identity binding, fail-closed snapshots, cancellation, and
+ordering/eligibility assertions; it is not a count of independent product features. The runner also
+invokes the existing isolated indexing and PendingDeletion-removal
 smokes, which supply the real POSIX publication/removal integration coverage for the lifecycle
 wiring. It never reads Application Support, local configuration, private MDX/MDD/SQLite data,
 the network, or Keychain.

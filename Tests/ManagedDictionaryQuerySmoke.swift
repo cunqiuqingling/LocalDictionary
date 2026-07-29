@@ -31,6 +31,10 @@ private actor MockManagedRuntime: ManagedDictionaryQueryRuntime {
         removedIDs.append(dictionaryID)
     }
 
+    func remove(dictionaryID: String, generation: UInt64) {
+        removedIDs.append(dictionaryID)
+    }
+
     func snapshot() -> ([String], Int) { (queriedIDs, resetCount) }
 }
 

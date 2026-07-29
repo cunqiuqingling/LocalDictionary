@@ -102,12 +102,16 @@ then synchronously validate the current Catalog; stale generation caches are evi
 matching `(dictionaryID, generation)` after that generation's final lease ends. Queue-head and late
 cancellation remain process-local coordination fixtures.
 
-D1b-3B-2C-R3 closes the final query eligibility window: final-query lease release and post-release
-generation-drain information are returned by one coordinator actor operation. Any required
-generation-scoped runtime eviction precedes the final lifecycle snapshot. After that last await,
-the query actor reads the current Catalog and finalizes synchronously, so disable or deletion during
-lease release cannot publish an old result. This remains process-local; SQLite fd identity and
-cross-process payload identity remain deferred to D1b-3B-3.
+D1b-3B-2C-Final closes the result-array eligibility window across the whole query. Each asynchronous
+lookup produces only an immutable candidate bound to dictionary ID, generation, source/ownership,
+query level, and canonical runtime-affecting Catalog identity. All leases are released and any
+generation-scoped runtime eviction completes before one coherent batch snapshot from the shared
+coordinator. That snapshot is the public lookup's final await. The query actor then compares the
+entire candidate batch with its current Catalog and the snapshot in one synchronous turn, preserving
+order while dropping a prior candidate disabled, deleted, generation-changed, or identity-replaced
+during a later dictionary lookup. A purely queued writer remains compatible only while descriptor
+identity is unchanged. This remains process-local; SQLite fd identity and cross-process payload
+identity remain deferred to D1b-3B-3.
 
 These leases coordinate only this App process. They are not an fd-bound SQLite identity guarantee
 across processes; that boundary remains D1b-3B-3.

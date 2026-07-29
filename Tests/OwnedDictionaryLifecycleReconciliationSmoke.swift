@@ -488,6 +488,10 @@ private actor RemovalRuntime: ManagedDictionaryQueryRuntime {
         removed.append(dictionaryID)
     }
 
+    func remove(dictionaryID: String, generation: UInt64) async {
+        removed.append(dictionaryID)
+    }
+
     func reset() async {}
 
     func removedIDs() -> [String] { removed }

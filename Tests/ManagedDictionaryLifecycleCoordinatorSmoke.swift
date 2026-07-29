@@ -13,6 +13,9 @@ private struct Smoke {
     var runtimeEviction = 0
     var releaseBarrier = 0
     var generationDrain = 0
+    var batchFinalization = 0
+    var identityBinding = 0
+    var snapshotFailClosed = 0
 
     mutating func check(_ message: String, category: WritableKeyPath<Smoke, Int>,
                         _ condition: @autoclosure () -> Bool) throws {
@@ -65,6 +68,7 @@ private actor Runtime: ManagedDictionaryQueryRuntime {
     }
 
     func remove(dictionaryID: String) { removed.append(dictionaryID) }
+    func remove(dictionaryID: String, generation: UInt64) { removed.append(dictionaryID) }
     func reset() {}
     func snapshot() -> (queried: [String], removed: [String]) { (queried, removed) }
 }
@@ -85,10 +89,57 @@ private actor BlockingRuntime: ManagedDictionaryQueryRuntime {
     }
 
     func remove(dictionaryID: String) { removeCount += 1 }
+    func remove(dictionaryID: String, generation: UInt64) { removeCount += 1 }
     func reset() { resetCount += 1 }
 
     func snapshot() -> (resetCount: Int, removeCount: Int, lookupCount: Int) {
         (resetCount, removeCount, lookupCount)
+    }
+}
+
+/// Deterministic multi-dictionary runtime used to pause after an earlier candidate has been
+/// collected but before the complete batch reaches its final lifecycle snapshot.
+private actor BatchRuntime: ManagedDictionaryQueryRuntime {
+    let blockedLookupEntered = Gate()
+    let continueBlockedLookup = Gate()
+    private let blockedDictionaryID: String?
+    private var outcomes: [String: ManagedDictionaryRuntimeOutcome]
+    private var queried: [String] = []
+    private var scopedRemovals: [(dictionaryID: String, generation: UInt64)] = []
+    private var broadRemovals: [String] = []
+
+    init(blockedDictionaryID: String? = nil,
+         outcomes: [String: ManagedDictionaryRuntimeOutcome]) {
+        self.blockedDictionaryID = blockedDictionaryID
+        self.outcomes = outcomes
+    }
+
+    func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
+                query: String) async -> ManagedDictionaryRuntimeOutcome {
+        queried.append(descriptor.dictionaryID)
+        if descriptor.dictionaryID == blockedDictionaryID {
+            await blockedLookupEntered.open()
+            await continueBlockedLookup.wait()
+        }
+        if Task.isCancelled { return .miss }
+        return outcomes[descriptor.dictionaryID] ?? .miss
+    }
+
+    func remove(dictionaryID: String) {
+        broadRemovals.append(dictionaryID)
+    }
+
+    func remove(dictionaryID: String, generation: UInt64) {
+        scopedRemovals.append((dictionaryID, generation))
+    }
+
+    func reset() {}
+
+    func snapshot() -> (queried: [String],
+                        scopedRemovals: [(dictionaryID: String, generation: UInt64)],
+                        broadRemovals: [String]) {
+        (queried, scopedRemovals, broadRemovals)
     }
 }
 
@@ -183,6 +234,17 @@ private func hit(_ id: String) -> ManagedDictionaryQueryHit {
                               truncated: false)
 }
 
+private func replacingRuntimeIdentity(_ value: DictionaryDescriptor) -> DictionaryDescriptor {
+    var replacement = value
+    replacement.relativePaths.dictionary =
+        "Dictionaries/\(value.dictionaryID)/source/replacement.mdx"
+    replacement.indexMetadata.sourceSHA256 = String(repeating: "d", count: 64)
+    replacement.indexMetadata.sourceFileSize = 2
+    replacement.indexMetadata.indexFileSize = 2
+    replacement.updatedAt = value.updatedAt.addingTimeInterval(1)
+    return replacement
+}
+
 private func expectError(_ expected: ManagedDictionaryLifecycleError,
                          _ operation: () async throws -> Void) async throws {
     do {
@@ -252,6 +314,15 @@ private func testFinalReleaseOutcome(smoke: inout Smoke) async throws {
         .unwrap("release outcome generation")
     let first = try await coordinator.acquireQueryLease(for: item.dictionaryID)
     let second = try await coordinator.acquireQueryLease(for: item.dictionaryID)
+    let batchSnapshots = await coordinator.queryValidationSnapshots(
+        for: [item.dictionaryID, item.dictionaryID]
+    )
+    try smoke.check("batch snapshot de-duplicates IDs without changing lease state",
+                    category: \.batchFinalization,
+                    batchSnapshots.count == 1 &&
+                        batchSnapshots[item.dictionaryID]?.activeLeaseCount == 2 &&
+                        batchSnapshots[item.dictionaryID]?.runtimeIdentity ==
+                            ManagedDictionaryRuntimeIdentity(item))
     let firstOutcome = await coordinator.releaseForFinalValidation(first)
     try smoke.check("non-final release is reported atomically", category: \.generationDrain,
                     firstOutcome.wasReleased && firstOutcome.drainedGeneration == nil &&
@@ -578,7 +649,7 @@ private func testFinalValidationReentrancy(smoke: inout Smoke) async throws {
                                                 lifecycleCoordinator: lifecycle)
     let validationEntered = Gate()
     let continueValidation = Gate()
-    await lifecycle.setBeforeQueryValidationSnapshotForTesting {
+    await lifecycle.setBeforeBatchQueryValidationSnapshotForTesting {
         await validationEntered.open()
         await continueValidation.wait()
     }
@@ -605,7 +676,7 @@ private func testFinalValidationReentrancy(smoke: inout Smoke) async throws {
                                                        lifecycleCoordinator: deletedLifecycle)
     let deletedEntered = Gate()
     let continueDeleted = Gate()
-    await deletedLifecycle.setBeforeQueryValidationSnapshotForTesting {
+    await deletedLifecycle.setBeforeBatchQueryValidationSnapshotForTesting {
         await deletedEntered.open()
         await continueDeleted.wait()
     }
@@ -693,6 +764,306 @@ private func testReleaseWindowFinalValidation(smoke: inout Smoke) async throws {
         deletionRejected = error == .dictionaryRetired
     }
     try smoke.check("retired descriptor rejects a later query", category: \.ordering, deletionRejected)
+}
+
+private func testBatchFinalizationAcrossLaterLookup(smoke: inout Smoke) async throws {
+    let a = descriptor("00000000-0000-0000-0000-000000000401", position: 0)
+    let b = descriptor("00000000-0000-0000-0000-000000000402", position: 1)
+
+    let disableRuntime = BatchRuntime(
+        blockedDictionaryID: b.dictionaryID,
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .hit(hit(b.dictionaryID))]
+    )
+    let disableLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, b]))
+    let disableService = ManagedDictionaryQueryService(
+        catalog: catalog([a, b]), runtime: disableRuntime,
+        lifecycleCoordinator: disableLifecycle
+    )
+    let disableQuery = Task { await disableService.lookup("safe") }
+    await disableRuntime.blockedLookupEntered.wait()
+    var disabledA = a
+    disabledA.enabled = false
+    disabledA.updatedAt = a.updatedAt.addingTimeInterval(1)
+    await disableService.replaceCatalog(catalog([disabledA, b]))
+    await disableRuntime.continueBlockedLookup.open()
+    let disabledBatch = await disableQuery.value
+    let disabledRuntimeState = await disableRuntime.snapshot()
+    let disabledASnapshot = await disableLifecycle.snapshot(for: a.dictionaryID)
+    let disabledBSnapshot = await disableLifecycle.snapshot(for: b.dictionaryID)
+    try smoke.check("batch drops A disabled while B lookup is suspended",
+                    category: \.batchFinalization,
+                    disabledBatch.hits.map(\.dictionaryID) == [b.dictionaryID])
+    try smoke.check("batch disable fixture queries A and B exactly once",
+                    category: \.batchFinalization,
+                    disabledRuntimeState.queried == [a.dictionaryID, b.dictionaryID])
+    try smoke.check("batch disable releases every lease and suspends A",
+                    category: \.batchFinalization,
+                    disabledASnapshot?.activeLeaseCount == 0 &&
+                        disabledASnapshot?.phase == .suspended &&
+                        disabledBSnapshot?.activeLeaseCount == 0)
+    try smoke.check("batch disable never broad-evicts a runtime",
+                    category: \.runtimeEviction,
+                    disabledRuntimeState.broadRemovals.isEmpty)
+
+    let deleteRuntime = BatchRuntime(
+        blockedDictionaryID: b.dictionaryID,
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .hit(hit(b.dictionaryID))]
+    )
+    let deleteLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, b]))
+    let deleteService = ManagedDictionaryQueryService(
+        catalog: catalog([a, b]), runtime: deleteRuntime,
+        lifecycleCoordinator: deleteLifecycle
+    )
+    let deleteQuery = Task { await deleteService.lookup("safe") }
+    await deleteRuntime.blockedLookupEntered.wait()
+    await deleteService.replaceCatalog(catalog([b]))
+    await deleteRuntime.continueBlockedLookup.open()
+    let deletedBatch = await deleteQuery.value
+    let deletedRuntimeState = await deleteRuntime.snapshot()
+    let deletedASnapshot = await deleteLifecycle.snapshot(for: a.dictionaryID)
+    let deletedBSnapshot = await deleteLifecycle.snapshot(for: b.dictionaryID)
+    try smoke.check("batch drops A deleted while B lookup is suspended",
+                    category: \.batchFinalization,
+                    deletedBatch.hits.map(\.dictionaryID) == [b.dictionaryID])
+    try smoke.check("batch deletion retires A without resurrecting its descriptor",
+                    category: \.batchFinalization,
+                    deletedASnapshot?.phase == .retired &&
+                        deletedASnapshot?.activeLeaseCount == 0 &&
+                        deletedBSnapshot?.activeLeaseCount == 0)
+    try smoke.check("batch deletion does not requery either descriptor",
+                    category: \.batchFinalization,
+                    deletedRuntimeState.queried == [a.dictionaryID, b.dictionaryID])
+
+    let replaceRuntime = BatchRuntime(
+        blockedDictionaryID: b.dictionaryID,
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .hit(hit(b.dictionaryID))]
+    )
+    let replaceLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, b]))
+    let replaceService = ManagedDictionaryQueryService(
+        catalog: catalog([a, b]), runtime: replaceRuntime,
+        lifecycleCoordinator: replaceLifecycle
+    )
+    let replaceQuery = Task { await replaceService.lookup("safe") }
+    await replaceRuntime.blockedLookupEntered.wait()
+    let replacementA = replacingRuntimeIdentity(a)
+    await replaceService.replaceCatalog(catalog([replacementA, b]))
+    await replaceRuntime.continueBlockedLookup.open()
+    let replacementBatch = await replaceQuery.value
+    let firstReplacementRuntimeState = await replaceRuntime.snapshot()
+    try smoke.check("eligible A2 identity cannot authorize the old A1 result",
+                    category: \.identityBinding,
+                    replacementBatch.hits.map(\.dictionaryID) == [b.dictionaryID])
+    try smoke.check("identity replacement never automatically requeries A2",
+                    category: \.identityBinding,
+                    firstReplacementRuntimeState.queried == [a.dictionaryID, b.dictionaryID])
+    let nextBatch = await replaceService.lookup("safe")
+    let secondReplacementRuntimeState = await replaceRuntime.snapshot()
+    try smoke.check("A2 is used only by the user's next lookup",
+                    category: \.identityBinding,
+                    nextBatch.hits.map(\.dictionaryID) == [a.dictionaryID, b.dictionaryID] &&
+                        secondReplacementRuntimeState.queried ==
+                            [a.dictionaryID, b.dictionaryID, a.dictionaryID, b.dictionaryID])
+
+    let presentationRuntime = BatchRuntime(
+        blockedDictionaryID: b.dictionaryID,
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .hit(hit(b.dictionaryID))]
+    )
+    let presentationLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, b]))
+    let presentationService = ManagedDictionaryQueryService(
+        catalog: catalog([a, b]), runtime: presentationRuntime,
+        lifecycleCoordinator: presentationLifecycle
+    )
+    let presentationQuery = Task { await presentationService.lookup("safe") }
+    await presentationRuntime.blockedLookupEntered.wait()
+    var renamedA = a
+    renamedA.displayName = "Renamed synthetic dictionary"
+    renamedA.sortPosition = 99
+    renamedA.updatedAt = a.updatedAt.addingTimeInterval(3)
+    await presentationService.replaceCatalog(catalog([renamedA, b]))
+    await presentationRuntime.continueBlockedLookup.open()
+    let presentationBatch = await presentationQuery.value
+    try smoke.check("display name and sort position do not change runtime identity",
+                    category: \.identityBinding,
+                    presentationBatch.hits.map(\.dictionaryID) == [a.dictionaryID, b.dictionaryID])
+}
+
+private func testBatchSnapshotFailClosedAndGeneration(smoke: inout Smoke) async throws {
+    let a = descriptor("00000000-0000-0000-0000-000000000403", position: 0)
+    let b = descriptor("00000000-0000-0000-0000-000000000404", position: 1)
+
+    let fallback = descriptor(
+        "00000000-0000-0000-0000-000000000406",
+        sourceKind: .openResource, ownership: .appManagedOpenResource,
+        level: .fallback
+    )
+    let missingRuntime = Runtime(outcomes: [
+        a.dictionaryID: .hit(hit(a.dictionaryID)),
+        fallback.dictionaryID: .hit(hit(fallback.dictionaryID))
+    ])
+    let missingLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, fallback]))
+    await missingLifecycle.setOmittedQueryValidationSnapshotIDsForTesting([a.dictionaryID])
+    let missingService = ManagedDictionaryQueryService(
+        catalog: catalog([a, fallback]), runtime: missingRuntime,
+        lifecycleCoordinator: missingLifecycle
+    )
+    let missingBatch = await missingService.lookup("safe")
+    let missingQueries = await missingRuntime.snapshot().queried
+    try smoke.check("missing batch snapshot fails the candidate closed",
+                    category: \.snapshotFailClosed,
+                    missingBatch.hits.isEmpty &&
+                        missingBatch.unavailableDictionaryIDs.isEmpty &&
+                        !missingBatch.skippedBecausePreferredMatched &&
+                        missingQueries == [a.dictionaryID])
+
+    let generationRuntime = BatchRuntime(
+        blockedDictionaryID: b.dictionaryID,
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .hit(hit(b.dictionaryID))]
+    )
+    let generationLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, b]))
+    let generationService = ManagedDictionaryQueryService(
+        catalog: catalog([a, b]), runtime: generationRuntime,
+        lifecycleCoordinator: generationLifecycle
+    )
+    let generationQuery = Task { await generationService.lookup("safe") }
+    await generationRuntime.blockedLookupEntered.wait()
+    let generationPermit = try await generationLifecycle.acquireExclusiveOperation(
+        for: a.dictionaryID, operation: .reconcile
+    )
+    await generationLifecycle.complete(
+        generationPermit, disposition: .available(incrementGeneration: true)
+    )
+    await generationRuntime.continueBlockedLookup.open()
+    let generationBatch = await generationQuery.value
+    try smoke.check("batch drops a candidate whose generation changed while B awaited",
+                    category: \.batchFinalization,
+                    generationBatch.hits.map(\.dictionaryID) == [b.dictionaryID])
+
+    let unavailableRuntime = BatchRuntime(
+        blockedDictionaryID: b.dictionaryID,
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .unavailable]
+    )
+    let unavailableLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, b]))
+    let unavailableService = ManagedDictionaryQueryService(
+        catalog: catalog([a, b]), runtime: unavailableRuntime,
+        lifecycleCoordinator: unavailableLifecycle
+    )
+    let unavailableQuery = Task { await unavailableService.lookup("safe") }
+    await unavailableRuntime.blockedLookupEntered.wait()
+    var disabledA = a
+    disabledA.enabled = false
+    disabledA.updatedAt = a.updatedAt.addingTimeInterval(2)
+    await unavailableService.replaceCatalog(catalog([disabledA, b]))
+    await unavailableRuntime.continueBlockedLookup.open()
+    let unavailableBatch = await unavailableQuery.value
+    try smoke.check("later unavailable outcome does not bypass final validation of A",
+                    category: \.batchFinalization,
+                    unavailableBatch.hits.isEmpty &&
+                        unavailableBatch.unavailableDictionaryIDs == [b.dictionaryID])
+
+    let orderedRuntime = Runtime(
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .hit(hit(b.dictionaryID))]
+    )
+    let orderedService = ManagedDictionaryQueryService(catalog: catalog([a, b]),
+                                                       runtime: orderedRuntime)
+    let orderedBatch = await orderedService.lookup("safe")
+    try smoke.check("batch finalizer preserves stable Catalog query order",
+                    category: \.batchFinalization,
+                    orderedBatch.hits.map(\.dictionaryID) == [a.dictionaryID, b.dictionaryID])
+
+    let cancellationRuntime = BatchRuntime(
+        blockedDictionaryID: b.dictionaryID,
+        outcomes: [a.dictionaryID: .hit(hit(a.dictionaryID)),
+                   b.dictionaryID: .hit(hit(b.dictionaryID))]
+    )
+    let cancellationLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([a, b]))
+    let cancellationService = ManagedDictionaryQueryService(
+        catalog: catalog([a, b]), runtime: cancellationRuntime,
+        lifecycleCoordinator: cancellationLifecycle
+    )
+    let cancellationQuery = Task { await cancellationService.lookup("safe") }
+    await cancellationRuntime.blockedLookupEntered.wait()
+    cancellationQuery.cancel()
+    await cancellationRuntime.continueBlockedLookup.open()
+    let cancellationBatch = await cancellationQuery.value
+    let cancelledA = await cancellationLifecycle.snapshot(for: a.dictionaryID)
+    let cancelledB = await cancellationLifecycle.snapshot(for: b.dictionaryID)
+    try smoke.check("cooperative later cancellation returns only a prior final-valid candidate",
+                    category: \.cancellation,
+                    cancellationBatch.hits.map(\.dictionaryID) == [a.dictionaryID])
+    try smoke.check("cooperative later cancellation releases all batch leases",
+                    category: \.cancellation,
+                    cancelledA?.activeLeaseCount == 0 && cancelledB?.activeLeaseCount == 0)
+}
+
+private func testQueuedWriterIdentityBinding(smoke: inout Smoke) async throws {
+    let item = descriptor("00000000-0000-0000-0000-000000000405")
+    let unchangedRuntime = BlockingRuntime()
+    let unchangedLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
+    let unchangedService = ManagedDictionaryQueryService(
+        catalog: catalog([item]), runtime: unchangedRuntime,
+        lifecycleCoordinator: unchangedLifecycle
+    )
+    let unchangedQuery = Task { await unchangedService.lookup("safe") }
+    await unchangedRuntime.entered.wait()
+    let unchangedWriter = Task {
+        try await unchangedLifecycle.acquireExclusiveOperation(
+            for: item.dictionaryID, operation: .reconcile
+        )
+    }
+    let unchangedQueued = await waitForQueuedOperations(
+        1, coordinator: unchangedLifecycle, dictionaryID: item.dictionaryID
+    )
+    try smoke.check("unchanged writer fixture is deterministically queued",
+                    category: \.barriers, unchangedQueued)
+    await unchangedRuntime.continueLookup.open()
+    let unchangedPermit = try await unchangedWriter.value
+    let unchangedBatch = await unchangedQuery.value
+    try smoke.check("queued writer with unchanged identity permits the started query",
+                    category: \.identityBinding,
+                    unchangedBatch.hits.map(\.dictionaryID) == [item.dictionaryID])
+    await unchangedLifecycle.complete(
+        unchangedPermit, disposition: .available(incrementGeneration: false)
+    )
+
+    let changedRuntime = BlockingRuntime()
+    let changedLifecycle = ManagedDictionaryLifecycleCoordinator(catalog: catalog([item]))
+    let changedService = ManagedDictionaryQueryService(
+        catalog: catalog([item]), runtime: changedRuntime,
+        lifecycleCoordinator: changedLifecycle
+    )
+    let changedQuery = Task { await changedService.lookup("safe") }
+    await changedRuntime.entered.wait()
+    let changedWriter = Task {
+        try await changedLifecycle.acquireExclusiveOperation(
+            for: item.dictionaryID, operation: .reconcile
+        )
+    }
+    let changedQueued = await waitForQueuedOperations(
+        1, coordinator: changedLifecycle, dictionaryID: item.dictionaryID
+    )
+    try smoke.check("changed writer fixture is deterministically queued",
+                    category: \.barriers, changedQueued)
+    await changedService.replaceCatalog(catalog([replacingRuntimeIdentity(item)]))
+    await changedRuntime.continueLookup.open()
+    let changedPermit = try await changedWriter.value
+    let changedBatch = await changedQuery.value
+    try smoke.check("queued writer cannot authorize a different eligible identity",
+                    category: \.identityBinding, changedBatch.hits.isEmpty)
+    let changedSnapshot = await changedLifecycle.snapshot(for: item.dictionaryID)
+    try smoke.check("changed writer advances generation and releases the old lease",
+                    category: \.identityBinding,
+                    changedPermit.generation == 2 &&
+                        changedSnapshot?.activeLeaseCount == 0)
+    await changedLifecycle.complete(
+        changedPermit, disposition: .available(incrementGeneration: false)
+    )
 }
 
 private func testGenerationScopedRuntimeEviction(smoke: inout Smoke) async throws {
@@ -854,10 +1225,13 @@ struct ManagedDictionaryLifecycleCoordinatorSmoke {
         try await testCurrentCatalogRecheck(smoke: &smoke)
         try await testFinalValidationReentrancy(smoke: &smoke)
         try await testReleaseWindowFinalValidation(smoke: &smoke)
+        try await testBatchFinalizationAcrossLaterLookup(smoke: &smoke)
+        try await testBatchSnapshotFailClosedAndGeneration(smoke: &smoke)
+        try await testQueuedWriterIdentityBinding(smoke: &smoke)
         try await testGenerationScopedRuntimeEviction(smoke: &smoke)
         try await testOpenResourceFallback(smoke: &smoke)
         try await testCatalogTransaction(smoke: &smoke)
         print("Managed lifecycle/query coordination smoke: PASS (\(smoke.assertions) total runtime assertions)")
-        print("categories: actor-state=\(smoke.actorState) query-runtime=\(smoke.runtime) catalog=\(smoke.catalog) runtime-eviction=\(smoke.runtimeEviction) POSIX=0 barrier=\(smoke.barriers) release-barrier=\(smoke.releaseBarrier) generation-drain=\(smoke.generationDrain) cancellation=\(smoke.cancellation) ordering=\(smoke.ordering) helper-only=0")
+        print("categories: actor-state=\(smoke.actorState) query-runtime=\(smoke.runtime) catalog=\(smoke.catalog) runtime-eviction=\(smoke.runtimeEviction) batch-finalization=\(smoke.batchFinalization) identity-binding=\(smoke.identityBinding) snapshot-fail-closed=\(smoke.snapshotFailClosed) POSIX=0 barrier=\(smoke.barriers) release-barrier=\(smoke.releaseBarrier) generation-drain=\(smoke.generationDrain) cancellation=\(smoke.cancellation) ordering=\(smoke.ordering) helper-only=0")
     }
 }

@@ -44,6 +44,39 @@ struct ManagedDictionaryLifecyclePermit: Equatable, Sendable {
     fileprivate let operationID: UUID
 }
 
+/// Canonical runtime-affecting Catalog identity. Presentation-only fields such as display name and
+/// sort position are intentionally excluded, while every field that can change lookup eligibility
+/// or the source/index selected by a runtime is included.
+struct ManagedDictionaryRuntimeIdentity: Equatable, Sendable {
+    let sourceKind: DictionarySourceKind
+    let ownership: DictionaryStorageOwnership
+    let state: DictionaryState
+    let enabled: Bool
+    let queryLevel: DictionaryQueryLevel
+    let dictionaryPath: String?
+    let indexPath: String?
+    let indexSchemaVersion: Int?
+    let sourceDigest: String?
+    let sourceFileSize: UInt64?
+    let indexFileSize: UInt64?
+    let formatterIdentifier: String
+
+    init(_ descriptor: DictionaryDescriptor) {
+        sourceKind = descriptor.sourceKind
+        ownership = descriptor.storageOwnership
+        state = descriptor.state
+        enabled = descriptor.enabled
+        queryLevel = descriptor.queryLevel
+        dictionaryPath = descriptor.relativePaths.dictionary
+        indexPath = descriptor.relativePaths.index
+        indexSchemaVersion = descriptor.indexMetadata.schemaVersion
+        sourceDigest = descriptor.indexMetadata.sourceSHA256
+        sourceFileSize = descriptor.indexMetadata.sourceFileSize
+        indexFileSize = descriptor.indexMetadata.indexFileSize
+        formatterIdentifier = descriptor.formatterIdentifier
+    }
+}
+
 /// Immutable diagnostic state used only by synthetic tests.  It contains no file paths or
 /// descriptor content and is also useful for safe internal observability.
 struct ManagedDictionaryLifecycleSnapshot: Equatable, Sendable {
@@ -54,6 +87,7 @@ struct ManagedDictionaryLifecycleSnapshot: Equatable, Sendable {
     let phase: Phase
     let activeLeaseCount: Int
     let queuedOperationCount: Int
+    let runtimeIdentity: ManagedDictionaryRuntimeIdentity?
     /// A queued exclusive operation without a Catalog identity transition may allow an already
     /// running current-generation query to return. Pending identity transitions never do.
     let allowsCurrentGenerationResult: Bool
@@ -93,36 +127,10 @@ actor ManagedDictionaryLifecycleCoordinator {
         }
     }
 
-    private struct DescriptorIdentity: Equatable {
-        let sourceKind: DictionarySourceKind
-        let ownership: DictionaryStorageOwnership
-        let state: DictionaryState
-        let enabled: Bool
-        let dictionaryPath: String?
-        let indexPath: String?
-        let sourceDigest: String?
-        let sourceFileSize: UInt64?
-        let indexFileSize: UInt64?
-        let formatterIdentifier: String
-
-        init(_ descriptor: DictionaryDescriptor) {
-            sourceKind = descriptor.sourceKind
-            ownership = descriptor.storageOwnership
-            state = descriptor.state
-            enabled = descriptor.enabled
-            dictionaryPath = descriptor.relativePaths.dictionary
-            indexPath = descriptor.relativePaths.index
-            sourceDigest = descriptor.indexMetadata.sourceSHA256
-            sourceFileSize = descriptor.indexMetadata.sourceFileSize
-            indexFileSize = descriptor.indexMetadata.indexFileSize
-            formatterIdentifier = descriptor.formatterIdentifier
-        }
-    }
-
     /// A Catalog change that invalidates a runtime is not published over active leases.  It first
     /// drains the old generation, then advances generation exactly once at a safe boundary.
     private struct PendingTransition {
-        let identity: DescriptorIdentity?
+        let identity: ManagedDictionaryRuntimeIdentity?
         let idlePhase: Phase
     }
 
@@ -140,14 +148,14 @@ actor ManagedDictionaryLifecycleCoordinator {
         var generation: UInt64
         var phase: Phase
         var idlePhase: Phase
-        var identity: DescriptorIdentity?
+        var identity: ManagedDictionaryRuntimeIdentity?
         var activeLeases: [UUID: LeaseRecord]
         var operationQueue: [OperationWaiter]
         var pendingTransition: PendingTransition?
 
         init(generation: UInt64 = 1,
              phase: Phase = .available,
-             identity: DescriptorIdentity? = nil) {
+             identity: ManagedDictionaryRuntimeIdentity? = nil) {
             self.generation = generation
             self.phase = phase
             idlePhase = phase
@@ -165,15 +173,20 @@ actor ManagedDictionaryLifecycleCoordinator {
     private var cancelledOperationRequestIDs: Set<UUID> = []
 
 #if MANAGED_DICTIONARY_LIFECYCLE_TESTING
-    private var beforeQueryValidationSnapshotForTesting: (@Sendable () async -> Void)?
+    private var beforeBatchQueryValidationSnapshotForTesting: (@Sendable () async -> Void)?
     private var beforeFinalLeaseReleaseForTesting: (@Sendable () async -> Void)?
+    private var omittedQueryValidationSnapshotIDsForTesting: Set<String> = []
 
-    func setBeforeQueryValidationSnapshotForTesting(_ hook: (@Sendable () async -> Void)?) {
-        beforeQueryValidationSnapshotForTesting = hook
+    func setBeforeBatchQueryValidationSnapshotForTesting(_ hook: (@Sendable () async -> Void)?) {
+        beforeBatchQueryValidationSnapshotForTesting = hook
     }
 
     func setBeforeFinalLeaseReleaseForTesting(_ hook: (@Sendable () async -> Void)?) {
         beforeFinalLeaseReleaseForTesting = hook
+    }
+
+    func setOmittedQueryValidationSnapshotIDsForTesting(_ dictionaryIDs: Set<String>) {
+        omittedQueryValidationSnapshotIDsForTesting = dictionaryIDs
     }
 #endif
 
@@ -181,7 +194,7 @@ actor ManagedDictionaryLifecycleCoordinator {
         for descriptor in catalog.dictionaries {
             let phase = Self.initialPhase(for: descriptor)
             states[descriptor.dictionaryID] = State(phase: phase,
-                                                    identity: DescriptorIdentity(descriptor))
+                                                    identity: ManagedDictionaryRuntimeIdentity(descriptor))
         }
     }
 
@@ -193,7 +206,7 @@ actor ManagedDictionaryLifecycleCoordinator {
         })
 
         for (dictionaryID, descriptor) in descriptors {
-            let identity = DescriptorIdentity(descriptor)
+            let identity = ManagedDictionaryRuntimeIdentity(descriptor)
             if var existing = states[dictionaryID] {
                 switch existing.phase {
                 case .retired:
@@ -254,13 +267,25 @@ actor ManagedDictionaryLifecycleCoordinator {
 
     func generation(for dictionaryID: String) -> UInt64? { states[dictionaryID]?.generation }
 
-    /// The query actor awaits this snapshot before it synchronously checks its current Catalog.
-    /// That order closes the actor-reentrancy window in final result validation.
-    func queryValidationSnapshot(for dictionaryID: String) async -> ManagedDictionaryLifecycleSnapshot? {
+    /// Returns one coherent validation view for the whole result batch. No lease, phase, queue, or
+    /// generation is changed while collecting these snapshots.
+    func queryValidationSnapshots(
+        for dictionaryIDs: [String]
+    ) async -> [String: ManagedDictionaryLifecycleSnapshot] {
 #if MANAGED_DICTIONARY_LIFECYCLE_TESTING
-        if let hook = beforeQueryValidationSnapshotForTesting { await hook() }
+        if let hook = beforeBatchQueryValidationSnapshotForTesting { await hook() }
+        let omitted = omittedQueryValidationSnapshotIDsForTesting
 #endif
-        return snapshot(for: dictionaryID)
+        var output: [String: ManagedDictionaryLifecycleSnapshot] = [:]
+        for dictionaryID in Set(dictionaryIDs) {
+#if MANAGED_DICTIONARY_LIFECYCLE_TESTING
+            if omitted.contains(dictionaryID) { continue }
+#endif
+            if let value = snapshot(for: dictionaryID) {
+                output[dictionaryID] = value
+            }
+        }
+        return output
     }
 
     func withQueryLease<T: Sendable>(
@@ -433,6 +458,7 @@ actor ManagedDictionaryLifecycleCoordinator {
                                                    phase: state.phase.snapshot,
                                                    activeLeaseCount: state.activeLeases.count,
                                                    queuedOperationCount: state.operationQueue.count,
+                                                   runtimeIdentity: state.identity,
                                                    allowsCurrentGenerationResult:
                                                        state.phase == .available ||
                                                        (state.phase == .draining &&
@@ -534,7 +560,7 @@ actor ManagedDictionaryLifecycleCoordinator {
     }
 
     private func scheduleTransition(_ state: inout State,
-                                    identity: DescriptorIdentity?,
+                                    identity: ManagedDictionaryRuntimeIdentity?,
                                     idlePhase: Phase) {
         state.pendingTransition = PendingTransition(identity: identity, idlePhase: idlePhase)
         if state.activeLeases.isEmpty && state.operationQueue.isEmpty {

@@ -95,16 +95,21 @@ protocol ManagedDictionaryQueryRuntime: Sendable {
 }
 
 extension ManagedDictionaryQueryRuntime {
-    /// Compatibility defaults keep synthetic runtimes source-compatible. The live runtime
-    /// overrides both methods with generation-aware behaviour; production stale-result paths use
-    /// only the scoped operation below.
-    func remove(dictionaryID: String, generation: UInt64) async {
-        await remove(dictionaryID: dictionaryID)
-    }
-
     func removeAll(dictionaryID: String) async {
         await remove(dictionaryID: dictionaryID)
     }
+}
+
+private struct ManagedDictionaryQueryCandidate: Sendable {
+    let dictionaryID: String
+    let generation: UInt64
+    let runtimeIdentity: ManagedDictionaryRuntimeIdentity
+    let sourceKind: DictionarySourceKind
+    let storageOwnership: DictionaryStorageOwnership
+    let queryLevel: DictionaryQueryLevel
+    let outcome: ManagedDictionaryRuntimeOutcome
+    let release: ManagedDictionaryLeaseRelease
+    let originalOrder: Int
 }
 
 actor ManagedDictionaryQueryService {
@@ -154,30 +159,40 @@ actor ManagedDictionaryQueryService {
         guard !clean.isEmpty else { return .empty }
         let normal = catalog.sortedDictionaries.filter(Self.isManagedLocalEligible)
             .prefix(Self.maximumDictionariesPerQuery)
-        let normalResult = await lookupTier(normal, query: clean)
+        let normalCandidates = await collectTierCandidates(normal, query: clean, orderBase: 0)
+
         // Existing normal-tier aggregation is retained.  Fallback resources only run when that
-        // entire tier misses, preserving preferred → managedLocal → openResource precedence.
-        let fallbackResult: (hits: [ManagedDictionaryQueryHit], unavailable: [String])
-        if normalResult.hits.isEmpty, !Task.isCancelled {
+        // entire tier produces no hit candidate, preserving preferred → managedLocal →
+        // openResource precedence. Candidate eligibility is deliberately not committed here; it is
+        // checked once for the complete batch after the final lifecycle snapshot.
+        var candidates = normalCandidates
+        let normalProducedHit = normalCandidates.contains {
+            guard case .hit(let hit) = $0.outcome else { return false }
+            return hit.dictionaryID == $0.dictionaryID
+        }
+        if !normalProducedHit, !Task.isCancelled {
             let fallback = catalog.sortedDictionaries.filter(Self.isOpenResourceEligible)
                 .prefix(Self.maximumDictionariesPerQuery)
-            fallbackResult = await lookupTier(fallback, query: clean)
-        } else {
-            fallbackResult = ([], [])
+            candidates.append(contentsOf: await collectTierCandidates(
+                fallback, query: clean, orderBase: normal.count
+            ))
         }
-        return ManagedDictionaryQueryBatch(
-            hits: normalResult.hits + fallbackResult.hits,
-            unavailableDictionaryIDs: normalResult.unavailable + fallbackResult.unavailable,
-            skippedBecausePreferredMatched: false
+
+        // This is the entire public lookup's final suspension. Every lease release and precise
+        // generation eviction has completed before this coherent coordinator snapshot.
+        let finalSnapshots = await lifecycleCoordinator.queryValidationSnapshots(
+            for: candidates.map(\.dictionaryID)
         )
+        return finalizeBatch(candidates, lifecycleSnapshots: finalSnapshots)
     }
 
-    private func lookupTier(_ descriptors: ArraySlice<DictionaryDescriptor>,
-                            query: String) async -> (hits: [ManagedDictionaryQueryHit],
-                                                     unavailable: [String]) {
-        var hits: [ManagedDictionaryQueryHit] = []
-        var unavailable: [String] = []
-        for descriptor in descriptors {
+    private func collectTierCandidates(
+        _ descriptors: ArraySlice<DictionaryDescriptor>,
+        query: String,
+        orderBase: Int
+    ) async -> [ManagedDictionaryQueryCandidate] {
+        var candidates: [ManagedDictionaryQueryCandidate] = []
+        for (offset, descriptor) in descriptors.enumerated() {
             guard !Task.isCancelled else { break }
             guard let generation = await lifecycleCoordinator.generation(for: descriptor.dictionaryID)
             else { continue }
@@ -193,33 +208,26 @@ actor ManagedDictionaryQueryService {
                     await runtime.remove(dictionaryID: descriptor.dictionaryID,
                                          generation: drainedGeneration)
                 }
-                // This is deliberately the final suspension before result publication. After it
-                // returns, the actor synchronously reads its current Catalog and finalizes the
-                // result without retaining an eligibility decision across another await.
-                let lifecycleSnapshot = await lifecycleCoordinator.queryValidationSnapshot(
-                    for: descriptor.dictionaryID
-                )
-                guard let finalizedOutcome = finalizeQueryOutcome(
-                    outcome,
+                candidates.append(ManagedDictionaryQueryCandidate(
                     dictionaryID: descriptor.dictionaryID,
-                    expectedGeneration: generation,
+                    generation: lease.generation,
+                    runtimeIdentity: ManagedDictionaryRuntimeIdentity(descriptor),
+                    sourceKind: descriptor.sourceKind,
+                    storageOwnership: descriptor.storageOwnership,
+                    queryLevel: descriptor.queryLevel,
+                    outcome: outcome,
                     release: release,
-                    lifecycleSnapshot: lifecycleSnapshot
-                ) else { continue }
-                switch finalizedOutcome {
-                case .hit(let hit): hits.append(hit)
-                case .miss: break
-                case .unavailable: unavailable.append(descriptor.dictionaryID)
-                }
+                    originalOrder: orderBase + offset
+                ))
             } catch is CancellationError {
                 break
             } catch {
                 // A draining, stale, or malformed fallback dictionary is isolated from the next
                 // descriptor and never escalates into automatic AI.
-                unavailable.append(descriptor.dictionaryID)
+                continue
             }
         }
-        return (hits, unavailable)
+        return candidates
     }
 
     private func generationNeedingEviction(_ release: ManagedDictionaryLeaseRelease) -> UInt64? {
@@ -230,36 +238,56 @@ actor ManagedDictionaryQueryService {
         return drainedGeneration
     }
 
-    /// This synchronous finalizer is the query result's linearization point. It must be called
-    /// only after the final lifecycle await: Catalog eligibility and generation are then checked
-    /// in the same query-actor turn, with no later suspension before publication.
-    private func finalizeQueryOutcome(
-        _ outcome: ManagedDictionaryRuntimeOutcome,
-        dictionaryID: String,
-        expectedGeneration: UInt64,
-        release: ManagedDictionaryLeaseRelease,
-        lifecycleSnapshot: ManagedDictionaryLifecycleSnapshot?
-    ) -> ManagedDictionaryRuntimeOutcome? {
-        guard release.wasReleased,
-              isStillEligible(dictionaryID: dictionaryID,
-                              expectedGeneration: expectedGeneration,
-                              release: release,
-                              lifecycleSnapshot: lifecycleSnapshot) else {
-            return nil
+    /// Synchronous batch publication linearization point. The caller must return this value
+    /// immediately after the final coordinator snapshot, without another actor suspension.
+    private func finalizeBatch(
+        _ candidates: [ManagedDictionaryQueryCandidate],
+        lifecycleSnapshots: [String: ManagedDictionaryLifecycleSnapshot]
+    ) -> ManagedDictionaryQueryBatch {
+        var hits: [ManagedDictionaryQueryHit] = []
+        var unavailable: [String] = []
+        for candidate in candidates.sorted(by: { $0.originalOrder < $1.originalOrder }) {
+            guard isStillEligible(
+                candidate, lifecycleSnapshot: lifecycleSnapshots[candidate.dictionaryID]
+            ) else { continue }
+            switch candidate.outcome {
+            case .hit(let hit):
+                guard hit.dictionaryID == candidate.dictionaryID else { continue }
+                hits.append(hit)
+            case .miss: break
+            case .unavailable: unavailable.append(candidate.dictionaryID)
+            }
         }
-        return outcome
+        return ManagedDictionaryQueryBatch(
+            hits: hits,
+            unavailableDictionaryIDs: unavailable,
+            skippedBecausePreferredMatched: false
+        )
     }
 
-    private func isStillEligible(dictionaryID: String,
-                                 expectedGeneration: UInt64,
-                                 release: ManagedDictionaryLeaseRelease,
-                                 lifecycleSnapshot: ManagedDictionaryLifecycleSnapshot?) -> Bool {
-        guard let descriptor = catalog.dictionaries.first(where: { $0.dictionaryID == dictionaryID }),
+    private func isStillEligible(
+        _ candidate: ManagedDictionaryQueryCandidate,
+        lifecycleSnapshot: ManagedDictionaryLifecycleSnapshot?
+    ) -> Bool {
+        guard candidate.release.wasReleased,
+              candidate.release.lease.dictionaryID == candidate.dictionaryID,
+              candidate.release.lease.generation == candidate.generation,
+              let descriptor = catalog.dictionaries.first(where: {
+                  $0.dictionaryID == candidate.dictionaryID
+              }),
               Self.isManagedLocalEligible(descriptor) || Self.isOpenResourceEligible(descriptor),
+              descriptor.sourceKind == candidate.sourceKind,
+              descriptor.storageOwnership == candidate.storageOwnership,
+              descriptor.queryLevel == candidate.queryLevel,
+              ManagedDictionaryRuntimeIdentity(descriptor) == candidate.runtimeIdentity,
               let lifecycleSnapshot,
+              lifecycleSnapshot.dictionaryID == candidate.dictionaryID,
+              lifecycleSnapshot.runtimeIdentity == candidate.runtimeIdentity,
               lifecycleSnapshot.allowsCurrentGenerationResult ||
-                (releaseMayPublishAcrossQueuedExclusive(release, lifecycleSnapshot: lifecycleSnapshot)),
-              lifecycleSnapshot.generation == expectedGeneration else {
+                releaseMayPublishAcrossQueuedExclusive(
+                    candidate.release, lifecycleSnapshot: lifecycleSnapshot
+                ),
+              lifecycleSnapshot.generation == candidate.generation else {
             return false
         }
         return true

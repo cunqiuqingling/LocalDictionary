@@ -13,6 +13,7 @@ private actor EmptyManagedRuntime: ManagedDictionaryQueryRuntime {
                 generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome { .miss }
     func remove(dictionaryID: String) async {}
+    func remove(dictionaryID: String, generation: UInt64) async {}
     func reset() async {}
 }
 

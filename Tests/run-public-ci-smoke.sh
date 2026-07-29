@@ -49,6 +49,55 @@ PUBLIC_TESTS=(
   Tests/run-public-obsidian-note-store-smoke.sh
 )
 
+QUERY_SOURCE="$ROOT/App/ManagedDictionaryQueryModels.swift"
+FINALIZATION_TAIL="$(/usr/bin/awk '
+  /let finalSnapshots = await lifecycleCoordinator.queryValidationSnapshots/ {
+    sawSnapshot = 1
+    next
+  }
+  sawSnapshot && !capture {
+    if ($0 ~ /^[[:space:]]*\)[[:space:]]*$/) {
+      capture = 1
+    }
+    next
+  }
+  capture {
+    print
+    if ($0 ~ /return finalizeBatch/) {
+      sawReturn = 1
+      exit
+    }
+  }
+  END {
+    if (!sawSnapshot || !sawReturn) {
+      exit 1
+    }
+  }
+' "$QUERY_SOURCE")"
+if print -r -- "$FINALIZATION_TAIL" | /usr/bin/grep -Eq \
+    '(^|[^[:alnum:]_])(await|Task|async[[:space:]]+let|withCheckedContinuation)([^[:alnum:]_]|$)'; then
+  print -u2 "managed query performs asynchronous work after its final batch snapshot"
+  exit 1
+fi
+
+RUNTIME_DEFAULTS="$(/usr/bin/awk '
+  /^extension ManagedDictionaryQueryRuntime \{/ {
+    capture = 1
+  }
+  capture {
+    print
+    if ($0 ~ /^}/) {
+      exit
+    }
+  }
+' "$QUERY_SOURCE")"
+if print -r -- "$RUNTIME_DEFAULTS" | /usr/bin/grep -q 'generation:'; then
+  print -u2 "generation-scoped runtime removal must not have a protocol default"
+  exit 1
+fi
+
+print "Managed query structural gates passed"
+
 for relative_test in "${PUBLIC_TESTS[@]}"; do
   print "\n=== ${relative_test} ==="
   "$ROOT/$relative_test"
