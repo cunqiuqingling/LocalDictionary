@@ -137,14 +137,27 @@ the build; the reviewed vendored files already contain their result.
     The legacy full-record implementation below the early return in
     `decode_record_block()` is currently unreachable and must not be restored
     as a production path; a later isolated cleanup may remove that dead code.
+11. M22 / D1b-3B-3 implementation batch 2 fd-source prototype (manually
+    applied; no standalone patch file): preserves all path constructors while
+    routing parser reads through a narrow random-access reader. The new
+    `fromFileDescriptor` factory borrows its argument only while creating an
+    owned `F_DUPFD_CLOEXEC` duplicate, requires a current-user regular
+    read-only descriptor with `FD_CLOEXEC` and one link, and performs every
+    fd-backed random read with bounded exact `pread` handling. It contains no
+    pathname fallback and is not connected to an App production caller.
+    Synthetic sanitizer coverage also corrected the legacy record lookup's
+    final-entry bound: the decoder now uses the next strictly greater record
+    offset or the current block's decompressed global end, preserving shared
+    alias offsets instead of mixing compressed-section size with a local
+    start.
 
 Files modified relative to the fixed upstream commit have these original and
 vendored SHA-256 values:
 
 | Upstream path | Upstream SHA-256 | Vendored SHA-256 |
 |---|---|---|
-| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `ad7bd8f1692621d7dc886bda79d719ba4dec6f3e6b601342bb1f247225b1e764` |
-| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `a7ea81a90c71953f703ef9755fd11b60585ba17462dcec4ec76b884df2e8f780` |
+| `src/mdict.cc` | `4051e1d90d87f5a65b2b36f3ac97ae91b338deffbec4fbc20417ecabd8c8a9a7` | `1cc029883bd1c0a5263f2f19b3ab89e0a20c779abd228cecaae8a7eb6cb845cb` |
+| `src/include/mdict.h` | `e83a6a5ab53f14a000da1daf0f88d669303c6b2abddb461f4f0de0dd6ee9d6ff` | `d258c919138ab9e2be59fa40791a8fdb7c626ceab9b065baed693890c389f285` |
 | `src/include/zlib_wrapper.h` | `29d187709287366541e387cdea35cbe39c8eea6ad32cd92746276ca0c05c0b28` | `0e1e75b8ee84014cd731b033aa755991cc3d055db6f39595bcb91e18d0c5a356` |
 | `src/encode/base64.h` | `6c0264e1941fcf458b5d7200751cb561025c0e2f616c136e0e07bfdc81f5b4b5` | `19113b27ba310db9fd8cf22988de90f301825e2cc317690614019651a505be51` |
 

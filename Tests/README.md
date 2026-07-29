@@ -275,6 +275,20 @@ smokes, which supply the real POSIX publication/removal integration coverage for
 wiring. It never reads Application Support, local configuration, private MDX/MDD/SQLite data,
 the network, or Keychain.
 
+## M22 / D1b-3B-3 fd-bound MDict source prototype
+
+`Tests/run-fd-bound-mdict-source-prototype-smoke.sh` builds an isolated
+Debug ASan/UBSan binary and an optimized Release binary under `mktemp`. It
+uses only synthetic MDX bytes to compare legacy path and fd-based metadata,
+key, record, and lookup results; exercise same-size replacement, ancestor
+replacement, symlink/non-regular/closed/writable-fd rejection, short reads,
+EOF/overflow, malformed input, fd recovery, independent parsers, and
+concurrent duplicates; and report bounded parser reads, memory, timing, and
+fd observations. A source-structure gate scopes pathname-fallback checks to
+the new fd reader/factory/readfile chain so the retained legacy path API is
+not rejected. The prototype is not connected to an App production caller
+and does not read private dictionaries or configuration.
+
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.
 - Build an index, request cooperative cancellation, exercise a controlled failure and retry, and confirm pending/indexing/cancelling/ready/failed wording.

@@ -10,7 +10,6 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <memory>
 #include <string>  // std::stof
 #include <utility>
@@ -125,6 +124,18 @@
  */
 
 namespace mdict {
+
+class MdictRandomAccessReader;
+
+enum class MdictInputKind {
+  mdx,
+  mdd,
+};
+
+struct MdictSourceReadStatistics {
+  uint64_t read_calls = 0;
+  uint64_t bytes_read = 0;
+};
 
 #define ENCRYPT_NO_ENC 0
 #define ENCRYPT_RECORD_ENC 1
@@ -290,6 +301,15 @@ class Mdict {
         ResourceLimits limits) noexcept;
 
   /**
+   * Construct a dictionary backed by a duplicate of an already-open,
+   * read-only descriptor. The descriptor is borrowed for this call only;
+   * the returned parser owns an independent F_DUPFD_CLOEXEC duplicate.
+   */
+  static std::unique_ptr<Mdict> fromFileDescriptor(
+      int descriptor, MdictInputKind kind,
+      ResourceLimits limits = ResourceLimits::productionDefaults());
+
+  /**
    * deconstructor
    */
   ~Mdict();
@@ -375,6 +395,7 @@ class Mdict {
   // D1b-3A-2A: test-only accessors for limits and file size.
   const ResourceLimits &resourceLimits() const { return limits_; }
   uint64_t actualFileBytes() const { return actual_file_size_; }
+  MdictSourceReadStatistics sourceReadStatistics() const;
   int encryptionMode() const { return encrypt; }
   const std::vector<key_block_info *> &keyBlockInfoList() const {
     return key_block_info_list;
@@ -520,14 +541,19 @@ class Mdict {
   bool endsWith(const std::string &fullString, const std::string &ending);
 
  private:
+  Mdict(MdictInputKind kind, ResourceLimits limits);
+  void initializeSource();
+
   /********************************
    *     general section           *
    ********************************/
   // dictionary file name
   const std::string filename;
 
-  // file input stream
-  std::ifstream instream;
+  // Path-backed legacy callers and fd-backed callers share this narrow
+  // random-access boundary. The fd implementation owns its duplicate.
+  std::unique_ptr<MdictRandomAccessReader> source_;
+  bool fd_source_ = false;
 
   // D1b-3A-2A: immutable resource limits for this parse session.
   ResourceLimits limits_ = ResourceLimits::productionDefaults();

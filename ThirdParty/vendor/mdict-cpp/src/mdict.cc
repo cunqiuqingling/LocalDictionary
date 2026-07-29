@@ -14,16 +14,25 @@
 #include <encode/base64.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #ifdef MDICT_RESOURCE_TEST_OBSERVER
 #include <atomic>
 #endif
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <regex>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "encode/char_decoder.h"
 #include "encode/api.h"
@@ -37,7 +46,148 @@ const std::regex re_pattern("(\\s|:|\\.|,|-|_|'|\\(|\\)|#|<|>|!)");
 
 namespace mdict {
 
+class MdictRandomAccessReader {
+ public:
+  virtual ~MdictRandomAccessReader() = default;
+  virtual uint64_t size() const = 0;
+  virtual void readExact(uint64_t offset, uint64_t length, char *buffer) = 0;
+  virtual MdictSourceReadStatistics statistics() const = 0;
+};
+
 namespace {
+
+class PathRandomAccessReader final : public MdictRandomAccessReader {
+ public:
+  explicit PathRandomAccessReader(const std::string &path) {
+    if (!std::filesystem::exists(path)) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    stream_ = std::ifstream(path, std::ios::binary);
+    if (!stream_) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    stream_.seekg(0, std::ios::end);
+    const std::streamoff end = stream_.tellg();
+    if (end < 0) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    size_ = static_cast<uint64_t>(end);
+    stream_.clear();
+    stream_.seekg(0, std::ios::beg);
+    if (!stream_) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+  }
+
+  uint64_t size() const override { return size_; }
+
+  void readExact(uint64_t offset, uint64_t length, char *buffer) override {
+    const uint64_t end = checkedAddUInt64(offset, length);
+    if (end > size_) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    const std::streamoff stream_offset = checkedUInt64ToStreamoff(offset);
+    const std::streamsize stream_length = checkedUInt64ToStreamSize(length);
+    stream_.seekg(stream_offset);
+    if (!stream_) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    stream_.read(buffer, stream_length);
+    if (stream_.gcount() != stream_length) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+  }
+
+  MdictSourceReadStatistics statistics() const override { return {}; }
+
+ private:
+  std::ifstream stream_;
+  uint64_t size_ = 0;
+};
+
+class FDBoundRandomAccessReader final : public MdictRandomAccessReader {
+ public:
+  explicit FDBoundRandomAccessReader(int borrowed_descriptor) {
+    if (borrowed_descriptor < 0) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    const int descriptor_flags = fcntl(borrowed_descriptor, F_GETFD);
+    const int status_flags = fcntl(borrowed_descriptor, F_GETFL);
+    struct stat status {};
+    if (descriptor_flags < 0 || status_flags < 0 ||
+        (descriptor_flags & FD_CLOEXEC) == 0 ||
+        (status_flags & O_ACCMODE) != O_RDONLY ||
+        fstat(borrowed_descriptor, &status) != 0 ||
+        !S_ISREG(status.st_mode) || status.st_uid != geteuid() ||
+        status.st_nlink != 1 || status.st_size < 0) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    descriptor_ = fcntl(borrowed_descriptor, F_DUPFD_CLOEXEC, 0);
+    if (descriptor_ < 0) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    struct stat duplicate_status {};
+    if (fstat(descriptor_, &duplicate_status) != 0 ||
+        duplicate_status.st_dev != status.st_dev ||
+        duplicate_status.st_ino != status.st_ino ||
+        duplicate_status.st_mode != status.st_mode ||
+        duplicate_status.st_uid != status.st_uid ||
+        duplicate_status.st_nlink != status.st_nlink ||
+        duplicate_status.st_size != status.st_size) {
+      close(descriptor_);
+      descriptor_ = -1;
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    size_ = static_cast<uint64_t>(status.st_size);
+  }
+
+  ~FDBoundRandomAccessReader() override {
+    if (descriptor_ >= 0) close(descriptor_);
+  }
+
+  uint64_t size() const override { return size_; }
+
+  void readExact(uint64_t offset, uint64_t length, char *buffer) override {
+    const uint64_t end = checkedAddUInt64(offset, length);
+    if (end > size_ || (length != 0 && buffer == nullptr) ||
+        offset > static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+    uint64_t completed = 0;
+    while (completed < length) {
+      const uint64_t remaining = length - completed;
+      const size_t requested = static_cast<size_t>(
+          std::min<uint64_t>(remaining, static_cast<uint64_t>(SSIZE_MAX)));
+      const uint64_t position = checkedAddUInt64(offset, completed);
+      if (position >
+          static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+        throw ResourceException(ResourceErrorCode::numericConversionOverflow);
+      }
+      ++statistics_.read_calls;
+      const ssize_t count =
+          pread(descriptor_, buffer + checkedUInt64ToSizeT(completed),
+                requested, static_cast<off_t>(position));
+      if (count > 0) {
+        completed = checkedAddUInt64(completed,
+                                     static_cast<uint64_t>(count));
+        statistics_.bytes_read = checkedAddUInt64(
+            statistics_.bytes_read, static_cast<uint64_t>(count));
+        continue;
+      }
+      if (count < 0 && errno == EINTR) continue;
+      throw ResourceException(ResourceErrorCode::truncatedFile);
+    }
+  }
+
+  MdictSourceReadStatistics statistics() const override {
+    return statistics_;
+  }
+
+ private:
+  int descriptor_ = -1;
+  uint64_t size_ = 0;
+  MdictSourceReadStatistics statistics_;
+};
 
 // MDict stores only the Header Adler-32 field in little-endian order. Header
 // length and subsequent Key/Record checksum fields retain their own existing
@@ -204,13 +354,44 @@ Mdict::Mdict(std::string fn, std::string aff_fn, std::string dic_fn,
   (void)dic_fn;
 }
 
+Mdict::Mdict(MdictInputKind kind, ResourceLimits limits)
+    : filename(), fd_source_(true), limits_(limits) {
+  this->filetype = kind == MdictInputKind::mdd ? "MDD" : "MDX";
+}
+
+std::unique_ptr<Mdict> Mdict::fromFileDescriptor(
+    int descriptor, MdictInputKind kind, ResourceLimits limits) {
+  auto source =
+      std::make_unique<FDBoundRandomAccessReader>(descriptor);
+  auto dictionary =
+      std::unique_ptr<Mdict>(new Mdict(kind, limits));
+  dictionary->source_ = std::move(source);
+  return dictionary;
+}
+
 // distructor
 Mdict::~Mdict() {
-  instream.close();
   for (auto *item : key_block_info_list) delete item;
   for (auto *item : key_list) delete item;
   for (auto *item : record_header) delete item;
   for (auto *item : key_data) delete item;
+}
+
+void Mdict::initializeSource() {
+  if (!fd_source_) {
+    source_ = std::make_unique<PathRandomAccessReader>(filename);
+  }
+  if (!source_) {
+    throw ResourceException(ResourceErrorCode::truncatedFile);
+  }
+  actual_file_size_ = source_->size();
+  if (actual_file_size_ > limits_.maximumFileBytes) {
+    throw ResourceException(ResourceErrorCode::fileTooLarge);
+  }
+}
+
+MdictSourceReadStatistics Mdict::sourceReadStatistics() const {
+  return source_ ? source_->statistics() : MdictSourceReadStatistics{};
 }
 
 /**
@@ -425,27 +606,7 @@ void Mdict::read_header() {
 #ifdef MDICT_RESOURCE_TEST_OBSERVER
 void Mdict::readHeaderForResourceTest() {
   limits_.validate();
-  if (!std::filesystem::exists(filename)) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-  instream = std::ifstream(filename, std::ios::binary);
-  if (!instream) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-  instream.seekg(0, std::ios::end);
-  const std::streamoff end_pos = instream.tellg();
-  if (end_pos < 0) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-  actual_file_size_ = static_cast<uint64_t>(end_pos);
-  instream.clear();
-  instream.seekg(0, std::ios::beg);
-  if (!instream) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-  if (actual_file_size_ > limits_.maximumFileBytes) {
-    throw ResourceException(ResourceErrorCode::fileTooLarge);
-  }
+  initializeSource();
   read_header();
 }
 #endif
@@ -1408,14 +1569,10 @@ Mdict::decode_record_block_by_rid(unsigned long rid /* record id */) {
   }
 
   //  for (int idx = 0; idx < this->record_header.size(); idx++) {
-  uint64_t uncomp_size = record_header[idx]->decompressed_size;
-  uint64_t decomp_accu = record_header[idx]->decompressed_size_accumulator;
-  uint64_t previous_end = 0;
-  uint64_t previous_uncomp_size = 0;
-  if (idx > 0) {
-    previous_end = record_header[idx - 1]->decompressed_size_accumulator;
-    previous_uncomp_size = record_header[idx - 1]->decompressed_size;
-  }
+  const uint64_t uncomp_size = record_header[idx]->decompressed_size;
+  const uint64_t decomp_accu =
+      record_header[idx]->decompressed_size_accumulator;
+  const uint64_t block_end = checkedAddUInt64(decomp_accu, uncomp_size);
 
   const std::vector<uint8_t> record_block_uncompressed_v =
       readRecordBlockBytes(idx);
@@ -1448,27 +1605,43 @@ Mdict::decode_record_block_by_rid(unsigned long rid /* record id */) {
       break;
     }
 
-    unsigned long upbound = uncomp_size; // - this->key_list[i]->record_start;
-    unsigned long expect_end = 0;
-    auto expect_start = this->key_list[i]->record_start - decomp_accu;
-    if (i < this->key_list.size() - 1) {
-      expect_end =
-          this->key_list[i + 1]->record_start - this->key_list[i]->record_start;
-      expect_start = this->key_list[i]->record_start - decomp_accu;
-    } else {
-      // 前一个的 end + size 等于当前这个的开始
-      expect_end =
-          this->record_block_size - (previous_end + previous_uncomp_size);
+    const uint64_t expect_start =
+        static_cast<uint64_t>(this->key_list[i]->record_start) - decomp_accu;
+    uint64_t record_end = block_end;
+    for (size_t next = static_cast<size_t>(i) + 1;
+         next < this->key_list.size(); ++next) {
+      const uint64_t next_start =
+          static_cast<uint64_t>(this->key_list[next]->record_start);
+      if (next_start < static_cast<uint64_t>(record_start)) {
+        throw ResourceException(
+            ResourceErrorCode::malformedRecordBlockMetadata);
+      }
+      if (next_start > static_cast<uint64_t>(record_start)) {
+        record_end = std::min(record_end, next_start);
+        break;
+      }
     }
-    upbound = expect_end < upbound ? expect_end : upbound;
+    if (record_end <= static_cast<uint64_t>(record_start)) {
+      throw ResourceException(ResourceErrorCode::malformedRecordBlockMetadata);
+    }
+    const uint64_t record_length =
+        checkedSubtractUInt64(record_end,
+                              static_cast<uint64_t>(record_start));
+    if (expect_start > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+        record_length >
+            static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+      throw ResourceException(ResourceErrorCode::numericConversionOverflow);
+    }
 
     std::string def;
     if (this->filetype == "MDD") {
-      def = be_bin_to_utf16((char *)record_block, expect_start,
-                            upbound /* to delete null character*/);
+      def = be_bin_to_utf16(
+          reinterpret_cast<char *>(record_block),
+          static_cast<int>(expect_start), static_cast<int>(record_length));
     } else {
-      def = be_bin_to_utf8((char *)record_block, expect_start,
-                           upbound /* to delete null character*/);
+      def = be_bin_to_utf8(
+          reinterpret_cast<char *>(record_block),
+          static_cast<int>(expect_start), static_cast<int>(record_length));
     }
     std::pair<std::string, std::string> vp(key_text, def);
     vec.push_back(vp);
@@ -1934,24 +2107,11 @@ int Mdict::decode_key_block_info(char *key_block_info_buffer,
  * @param buf the target buffer
  */
 void Mdict::readfile(uint64_t offset, uint64_t len, char *buf) {
-  // Validate offset + len does not exceed actual file size
-  uint64_t endOffset = checkedAddUInt64(offset, len);
-  if (endOffset > actual_file_size_) {
+  const uint64_t endOffset = checkedAddUInt64(offset, len);
+  if (!source_ || endOffset > actual_file_size_) {
     throw ResourceException(ResourceErrorCode::truncatedFile);
   }
-
-  std::streamoff so = checkedUInt64ToStreamoff(offset);
-  std::streamsize ss = checkedUInt64ToStreamSize(len);
-
-  instream.seekg(so);
-  if (!instream) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-
-  instream.read(buf, ss);
-  if (instream.gcount() != ss) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
+  source_->readExact(offset, len, buf);
 }
 
 /***************************************
@@ -1963,32 +2123,7 @@ void Mdict::readfile(uint64_t offset, uint64_t len, char *buf) {
  */
 void Mdict::init() {
   limits_.validate();
-  if (!std::filesystem::exists(filename)) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-
-  this->instream = std::ifstream(filename, std::ios::binary);
-  if (!this->instream) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-
-  // Obtain the size from the opened stream, avoiding a separate stat-size
-  // lookup.  This does not claim complete path/open TOCTOU hardening.
-  this->instream.seekg(0, std::ios::end);
-  std::streamoff endPos = this->instream.tellg();
-  if (endPos < 0) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-  this->actual_file_size_ = static_cast<uint64_t>(endPos);
-  this->instream.clear();  // clear eofbit
-  this->instream.seekg(0, std::ios::beg);
-  if (!this->instream) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-
-  if (this->actual_file_size_ > limits_.maximumFileBytes) {
-    throw ResourceException(ResourceErrorCode::fileTooLarge);
-  }
+  initializeSource();
 
   /* indexing... */
   this->read_header();
@@ -2000,31 +2135,7 @@ void Mdict::init() {
 
 void Mdict::initMetadataOnly() {
   limits_.validate();
-  if (!std::filesystem::exists(filename)) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-  this->instream = std::ifstream(filename, std::ios::binary);
-  if (!this->instream) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-
-  // Obtain the size from the opened stream, avoiding a separate stat-size
-  // lookup.  This does not claim complete path/open TOCTOU hardening.
-  this->instream.seekg(0, std::ios::end);
-  std::streamoff endPos = this->instream.tellg();
-  if (endPos < 0) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-  this->actual_file_size_ = static_cast<uint64_t>(endPos);
-  this->instream.clear();
-  this->instream.seekg(0, std::ios::beg);
-  if (!this->instream) {
-    throw ResourceException(ResourceErrorCode::truncatedFile);
-  }
-
-  if (this->actual_file_size_ > limits_.maximumFileBytes) {
-    throw ResourceException(ResourceErrorCode::fileTooLarge);
-  }
+  initializeSource();
 
   this->read_header();
   if (this->version < 2.0) {
