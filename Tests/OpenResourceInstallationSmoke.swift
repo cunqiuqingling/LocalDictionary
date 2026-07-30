@@ -76,6 +76,109 @@ struct OpenResourceInstallationSmoke {
         try await smoke.expect("resource single instance") {
             _ = try await coordinator.install(result, dictionariesRoot: dictionaries, catalogStore: catalog)
         }
+        let publicationID = "99999999-2222-4333-8444-555555555555"
+        _ = try catalog.mutate { latest, _ in
+            guard let index = latest.dictionaries.firstIndex(where: {
+                $0.dictionaryID == identity.dictionaryID
+            }) else { throw SmokeFailure(message: "installed descriptor missing") }
+            latest.dictionaries[index].enabled = true
+            latest.dictionaries[index].state = .ready
+            latest.dictionaries[index].indexMetadata.schemaVersion = 1
+            latest.dictionaries[index].indexMetadata.entryCount = 1
+            latest.dictionaries[index].indexMetadata.indexFileSize = 4096
+            latest.dictionaries[index].indexMetadata.indexedAt = Date(timeIntervalSince1970: 2)
+            let relative = "Dictionaries/\(identity.dictionaryID)/index/dictionary.\(publicationID).sqlite"
+            latest.dictionaries[index].relativePaths.index = relative
+            latest.dictionaries[index].publishedIndexIdentity = PublishedIndexIdentity(
+                indexPublicationID: publicationID,
+                indexSHA256: String(repeating: "c", count: 64),
+                indexFileSize: 4096,
+                sourceSHA256: digest,
+                sourceFileSize: UInt64(payload.count),
+                schemaVersion: 1,
+                entryCount: 1,
+                indexedAt: Date(timeIntervalSince1970: 2),
+                relativePath: relative
+            )
+        }
+        let updatePayload = Data("synthetic mDX payload revision two".utf8)
+        let updateDigest = SHA256.hash(data: updatePayload)
+            .map { String(format: "%02x", $0) }.joined()
+        let updateIdentity = try OpenResourceInstallationIdentity(
+            dictionaryID: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+            resourceID: identity.resourceID,
+            resourceRevision: 2,
+            resourceVersion: "2.0",
+            manifestVersion: 2,
+            manifestSHA256: String(repeating: "b", count: 64),
+            verifiedKeyID: "test-key",
+            payloadSHA256: updateDigest,
+            payloadBytes: UInt64(updatePayload.count),
+            languages: ["en"],
+            license: identity.license,
+            sourceProject: identity.sourceProject,
+            officialPageReference: identity.officialPageReference,
+            expectedEntryCount: identity.expectedEntryCount,
+            installedAt: Date(timeIntervalSince1970: 3),
+            displayName: "Synthetic Open v2"
+        )
+        let updatePlan = ResourcePayloadDownloadPlan(
+            resourceID: updateIdentity.resourceID,
+            resourceRevision: updateIdentity.resourceRevision,
+            downloadURL: URL(string: "https://example.test/payload-v2.mdx")!,
+            signedFileName: "payload-v2.mdx",
+            expectedBytes: UInt64(updatePayload.count),
+            maximumBytes: UInt64(updatePayload.count),
+            expectedSHA256: updateDigest,
+            allowedHosts: ["example.test"],
+            stagingRoot: staging,
+            policy: policy,
+            installationIdentity: updateIdentity
+        )
+        let updateOperation = try ResourcePayloadStagingStore().prepare(plan: updatePlan)
+        _ = try updateOperation.append(
+            updatePayload,
+            maximumBytes: UInt64(updatePayload.count),
+            expectedBytes: UInt64(updatePayload.count)
+        )
+        let updateCompleted = try updateOperation.finish(
+            expectedBytes: UInt64(updatePayload.count),
+            expectedSHA256: updateDigest
+        )
+        let updateResult = VerifiedPayloadStagingResult(
+            resourceID: updateIdentity.resourceID,
+            resourceRevision: updateIdentity.resourceRevision,
+            operationID: updateOperation.operationID,
+            verifiedFileURL: updateOperation.verifiedFile,
+            signedFileName: updatePlan.signedFileName,
+            actualByteCount: updateCompleted.bytes,
+            verifiedSHA256: updateCompleted.digest,
+            stagingRootURL: updateOperation.stagingRootURL,
+            verifiedDirectoryComponent: updateOperation.verifiedDirectoryComponent,
+            payloadComponent: updateOperation.publishedPayloadComponent,
+            sidecarComponent: updateOperation.publishedSidecarComponent,
+            installationIdentity: updateIdentity
+        )
+        let updateDescriptor = try await coordinator.install(
+            updateResult,
+            dictionariesRoot: dictionaries,
+            catalogStore: catalog,
+            mode: .update(replacingDictionaryID: identity.dictionaryID)
+        )
+        let transition = try catalog.load().validated()
+        try smoke.check("update keeps both identity-bound versions",
+                        transition.dictionaries.count == 2)
+        try smoke.check("update keeps current version ready and enabled",
+                        transition.dictionaries.contains {
+                            $0.dictionaryID == identity.dictionaryID &&
+                                $0.state == .ready && $0.enabled
+                        })
+        try smoke.check("update replacement starts disabled and pending",
+                        updateDescriptor.state == .pendingIndex && !updateDescriptor.enabled)
+        try smoke.check("update preserves query sort position",
+                        updateDescriptor.sortPosition == descriptor.sortPosition)
+        try smoke.check("update uses signed display name",
+                        updateDescriptor.displayName == "Synthetic Open v2")
         let illegal = DictionaryDescriptor(dictionaryID: UUID().uuidString.lowercased(), displayName: "bad", sourceKind: .openResource,
                                            queryLevel: .fallback, sortPosition: 0, enabled: true, state: .pendingIndex,
                                            indexMetadata: DictionaryIndexMetadata(schemaVersion: nil, entryCount: nil, indexFileSize: nil,

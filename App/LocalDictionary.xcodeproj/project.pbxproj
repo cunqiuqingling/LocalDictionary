@@ -98,6 +98,10 @@
 		A10000000000000000000072 /* OwnedDictionaryLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */; };
 		A10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift */; };
 		A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */; };
+		A10000000000000000000080 /* ResourceCenterProductionConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000080 /* ResourceCenterProductionConfiguration.swift */; };
+		A10000000000000000000081 /* ResourceCenterModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000081 /* ResourceCenterModels.swift */; };
+		A10000000000000000000082 /* ResourceCenterController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000082 /* ResourceCenterController.swift */; };
+		A10000000000000000000083 /* ResourceCenterViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000083 /* ResourceCenterViewController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -205,6 +209,10 @@
 		B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnedDictionaryLifecycle.swift; sourceTree = "<group>"; };
 		B10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedDictionaryLifecycleCoordinator.swift; sourceTree = "<group>"; };
 		B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadDownloadCoordinator.swift; sourceTree = "<group>"; };
+		B10000000000000000000080 /* ResourceCenterProductionConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterProductionConfiguration.swift; sourceTree = "<group>"; };
+		B10000000000000000000081 /* ResourceCenterModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000082 /* ResourceCenterController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterController.swift; sourceTree = "<group>"; };
+		B10000000000000000000083 /* ResourceCenterViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterViewController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -313,6 +321,10 @@
 				B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */,
 				B10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift */,
 				B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */,
+				B10000000000000000000080 /* ResourceCenterProductionConfiguration.swift */,
+				B10000000000000000000081 /* ResourceCenterModels.swift */,
+				B10000000000000000000082 /* ResourceCenterController.swift */,
+				B10000000000000000000083 /* ResourceCenterViewController.swift */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -540,6 +552,10 @@
 				A10000000000000000000072 /* OwnedDictionaryLifecycle.swift in Sources */,
 				A10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift in Sources */,
 				A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */,
+				A10000000000000000000080 /* ResourceCenterProductionConfiguration.swift in Sources */,
+				A10000000000000000000081 /* ResourceCenterModels.swift in Sources */,
+				A10000000000000000000082 /* ResourceCenterController.swift in Sources */,
+				A10000000000000000000083 /* ResourceCenterViewController.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,

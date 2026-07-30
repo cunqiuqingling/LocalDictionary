@@ -23,8 +23,8 @@ enum DictionaryImportSmoke {
         defer { try? FileManager.default.removeItem(at: root) }
 
         let fixture = try makeFixture(at: root.appendingPathComponent("fixture", isDirectory: true))
-        try testSinglePreviewAndUniqueMDD(fixture: fixture)
-        try testFolderScanAndStrictMDDPairing(fixture: fixture)
+        try testSinglePreviewDoesNotInspectSiblingMDD(fixture: fixture)
+        try testFolderSelectionRejected(fixture: fixture)
         try await testImportWithoutMDD(fixture: fixture, root: root)
         try await testCancelledImport(fixture: fixture, root: root)
         try await testInsufficientSpace(fixture: fixture, root: root)
@@ -63,7 +63,7 @@ enum DictionaryImportSmoke {
         return Fixture(directory: directory, alphaMDX: alpha, gammaMDX: gamma)
     }
 
-    private static func testSinglePreviewAndUniqueMDD(fixture: Fixture) throws {
+    private static func testSinglePreviewDoesNotInspectSiblingMDD(fixture: Fixture) throws {
         let previews = try MDictImportInspector().previews(for: fixture.alphaMDX)
         try expect(previews.count == 1, "single MDX did not produce one preview")
         guard let preview = previews.first else { return }
@@ -72,26 +72,22 @@ enum DictionaryImportSmoke {
         try expect(preview.header.encoding == "UTF-8", "encoding missing")
         try expect(preview.header.compression == .compressed, "compression marker missing")
         try expect(!preview.header.isEncrypted, "unencrypted fixture reported encryption")
-        try expect(preview.mddCandidates.map(\.fileName) == ["Alpha Dictionary.mdd"],
-                   "unique normalized MDD candidate was not identified")
-        try expect(preview.automaticallySelectedMDDIDs.count == 1,
-                   "unique MDD candidate was not selected")
+        try expect(preview.mddCandidates.isEmpty,
+                   "single-MDX import inspected a sibling MDD")
+        try expect(preview.automaticallySelectedMDDIDs.isEmpty,
+                   "single-MDX import selected an unsupported MDD")
         try expect(preview.queryLevel == .normal && preview.enabled &&
                    preview.state == .pendingIndex,
                    "preview defaults changed")
     }
 
-    private static func testFolderScanAndStrictMDDPairing(fixture: Fixture) throws {
-        let previews = try MDictImportInspector().previews(for: fixture.directory)
-        try expect(previews.count == 3, "folder did not scan all immediate MDX files")
-        let beta = previews.first { $0.originalFileName == "Beta Dictionary.mdx" }
-        try expect(beta?.mddCandidates.count == 2,
-                   "split MDD candidates with the same normalized base were not found")
-        try expect(beta?.automaticallySelectedMDDIDs.isEmpty == true,
-                   "multiple MDD candidates were selected automatically")
-        let gamma = previews.first { $0.originalFileName == "Gamma Dictionary.mdx" }
-        try expect(gamma?.mddCandidates.isEmpty == true,
-                   "same-directory unrelated MDD was paired")
+    private static func testFolderSelectionRejected(fixture: Fixture) throws {
+        do {
+            _ = try MDictImportInspector().previews(for: fixture.directory)
+            throw ImportSmokeFailure.failed("folder selection unexpectedly scanned MDX files")
+        } catch DictionaryImportError.invalidSelection {
+            // M23 reads only the one MDX explicitly selected by the user.
+        }
     }
 
     private static func testImportWithoutMDD(fixture: Fixture, root: URL) async throws {
@@ -184,6 +180,14 @@ enum DictionaryImportSmoke {
         }
         try expect(environment.store.load().dictionaries.count == 1,
                    "duplicate attempt changed the Catalog")
+        let independent = try await environment.service.importSelections(
+            [selection],
+            into: first,
+            allowDuplicateContent: true,
+            now: fixedDate.addingTimeInterval(1)
+        )
+        try expect(independent.dictionaries.count == 2,
+                   "explicit independent duplicate import was not honored")
     }
 
     private static func testRelativeCatalogAndManagedFiles(fixture: Fixture,

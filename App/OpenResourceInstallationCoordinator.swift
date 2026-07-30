@@ -2,6 +2,11 @@ import CryptoKit
 import Darwin
 import Foundation
 
+enum OpenResourceInstallationMode: Equatable, Sendable {
+    case newInstallation
+    case update(replacingDictionaryID: String)
+}
+
 /// Owns only the short verified-to-final installation step.  It deliberately does not reconcile
 /// orphaned directories or expose open resources to indexing/query code; those are later phases.
 actor OpenResourceInstallationCoordinator {
@@ -14,7 +19,9 @@ actor OpenResourceInstallationCoordinator {
 
     func install(_ verified: VerifiedPayloadStagingResult,
                  dictionariesRoot: URL,
-                 catalogStore: DictionaryCatalogStore) async throws -> DictionaryDescriptor {
+                 catalogStore: DictionaryCatalogStore,
+                 mode: OpenResourceInstallationMode = .newInstallation) async throws
+        -> DictionaryDescriptor {
         let resourceID = verified.installationIdentity.resourceID
         guard activeResourceIDs.insert(resourceID).inserted else {
             throw OpenResourceInstallationError.installationInProgress
@@ -37,8 +44,33 @@ actor OpenResourceInstallationCoordinator {
             let descriptor = try await MainActor.run {
             do {
                 let mutation = try catalogStore.mutate { catalog, _ in
-                    guard !catalog.dictionaries.contains(where: { $0.openResourceMetadata?.resourceID == prepared.identity.resourceID }) else {
-                        throw OpenResourceInstallationError.resourceAlreadyInstalled
+                    let existing = catalog.dictionaries.filter {
+                        $0.openResourceMetadata?.resourceID == prepared.identity.resourceID
+                    }
+                    let enabled: Bool
+                    let sortPosition: Int64
+                    switch mode {
+                    case .newInstallation:
+                        guard existing.isEmpty else {
+                            throw OpenResourceInstallationError.resourceAlreadyInstalled
+                        }
+                        // Installation is never query eligible before a sealed index commits.
+                        enabled = false
+                        sortPosition = Self.nextFallbackPosition(in: catalog)
+                    case .update(let replacingDictionaryID):
+                        guard existing.count == 1,
+                              let current = existing.first,
+                              current.dictionaryID == replacingDictionaryID,
+                              current.state == .ready,
+                              let metadata = current.openResourceMetadata,
+                              prepared.identity.resourceRevision > metadata.resourceRevision,
+                              prepared.identity.payloadSHA256 != metadata.payloadSHA256 else {
+                            throw OpenResourceInstallationError.invalidIdentity
+                        }
+                        // The old ready descriptor remains query eligible until this disabled
+                        // replacement has a sealed index and the Resource Center switches them.
+                        enabled = false
+                        sortPosition = current.sortPosition
                     }
                     guard !catalog.dictionaries.contains(where: { $0.dictionaryID == prepared.identity.dictionaryID }) else {
                         throw OpenResourceInstallationError.dictionaryIDConflict
@@ -46,11 +78,11 @@ actor OpenResourceInstallationCoordinator {
                     let now = Date()
                     let descriptor = DictionaryDescriptor(
                         dictionaryID: prepared.identity.dictionaryID,
-                        displayName: prepared.identity.resourceID,
+                        displayName: prepared.identity.displayName,
                         sourceKind: .openResource,
                         queryLevel: .fallback,
-                        sortPosition: Self.nextFallbackPosition(in: catalog),
-                        enabled: false,
+                        sortPosition: sortPosition,
+                        enabled: enabled,
                         state: .pendingIndex,
                         indexMetadata: DictionaryIndexMetadata(schemaVersion: nil, entryCount: nil,
                                                                indexFileSize: nil, sourceFileSize: prepared.identity.payloadBytes,

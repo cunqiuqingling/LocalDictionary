@@ -101,6 +101,19 @@ production manifest endpoints and payload hosts remain empty.
 
 `run-resource-manifest-network-smoke.sh` covers the offline D1b-2A HTTPS transport with an injected `URLProtocol`. It verifies exact-host URL and redirect policy, bounded chunked signature/Manifest delivery, status/content rules, cancellation, one-refresh-at-a-time behavior, cookie/cache isolation, raw-byte verifier handoff, and disabled production endpoint/trust defaults. It uses only synthetic `example.test` URLs and runtime-generated TEST-ONLY Ed25519 keys; it performs no DNS or network access and writes no resource, Catalog, or rollback state.
 
+`run-resource-center-smoke.sh` covers the M23 product state model with synthetic manifest and
+Catalog values: safe empty production configuration, installable/license presentation, explicit
+update detection, same-revision/different-SHA rejection, and the disabled-new-version Catalog v3
+transition that keeps at most one revision query eligible, preserves an explicitly disabled
+resource, and retains its sort position. It uses no network, dictionary file, or real Application
+Support data.
+
+`run-m23-resource-center-structural-gates.sh` proves that production endpoint/hosts/trust remain at
+the single empty configuration point, UI installation uses the signed manifest/download/install
+chain, manual import has no network and no sibling MDD scan, preferred ordering is not rewritten,
+the generic formatter retains its fail-closed limits, and no MDX/MDD/SQLite payload is present in
+the repository.
+
 `run-resource-payload-download-smoke.sh` covers the offline D1b-2B single-MDX payload boundary. It verifies signed/App exact-host intersection, UInt64 size and disk-capacity limits, chunk-by-chunk POSIX writes, incremental SHA-256, HTTP and redirect policy, cancellation and single-flight behavior, `0700`/`0600` staging permissions, failure cleanup, and fsync/atomic publication from `.partial-*` to `verified-*`. It uses only synthetic bytes, temporary directories, and an injected `URLProtocol`; production payload hosts remain empty and no Catalog, index, query, AppDelegate, UI, real resource, or Keychain is involved.
 
 `run-resource-payload-staging-security-smoke.sh` covers D1b-3B-1's directory-fd staging boundary in Debug (Address/Undefined Behavior Sanitizers) and Release. It uses only synthetic payloads and isolated temporary roots to verify single-component rejection, root and payload type/`0600` permission checks, fd-bound byte/SHA accounting, partial-file substitution, symlink and hardlink rejection, operation-directory substitution, static and real `RENAME_EXCL` publication races, durability-boundary cleanup, inode preservation, and non-recursive cleanup. Its output is total runtime assertions, including fixture/setup assertions; that count is not a count of independent security behaviours. The fixtures intentionally cover genuine POSIX no-replace races, injected fsync and cross-device failures, and known-component cleanup; true short-write/EINTR, fd-close, owner-mismatch, nested-symlink, and fd-bound-capacity fixtures remain deferred. Production builds contain no test fixture or fault-injection state. Orphan recovery, Catalog/open-resource installation, indexing, and production payload hosts remain outside this stage.

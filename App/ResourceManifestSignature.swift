@@ -119,8 +119,8 @@ struct TrustedManifestKey: Equatable, Sendable {
 }
 
 struct TrustedManifestKeyStore: Equatable, Sendable {
-    /// D1b-1 intentionally ships with no production trust root. A later reviewed
-    /// App version must inject production public keys explicitly.
+    /// Compatibility constant for security tests. Product composition uses the single
+    /// `ResourceCenterProductionConfiguration` injection point.
     static let productionDefault = TrustedManifestKeyStore(keysByID: [:])
 
     private let keysByID: [String: TrustedManifestKey]

@@ -47,7 +47,16 @@ xcrun --sdk macosx swiftc \
   "$ROOT_DIR/App/ResourceManifestSignature.swift" \
   "$ROOT_DIR/App/ResourceManifestVerifier.swift" \
   "$ROOT_DIR/App/VerifiedManifestStateStore.swift" \
+  "$ROOT_DIR/App/ResourceNetworkModels.swift" \
+  "$ROOT_DIR/App/ResourceNetworkURLPolicy.swift" \
+  "$ROOT_DIR/App/BoundedHTTPSDataFetcher.swift" \
+  "$ROOT_DIR/App/ResourceManifestRemoteLoader.swift" \
   "$ROOT_DIR/App/OpenResourceInstallationModels.swift" \
+  "$ROOT_DIR/App/ResourcePayloadDownloadModels.swift" \
+  "$ROOT_DIR/App/ResourcePayloadStagingStore.swift" \
+  "$ROOT_DIR/App/ResourcePayloadFileDownloader.swift" \
+  "$ROOT_DIR/App/ResourcePayloadDownloadCoordinator.swift" \
+  "$ROOT_DIR/App/OpenResourceInstallationCoordinator.swift" \
   "$ROOT_DIR/App/DictionaryCatalogOrdering.swift" \
   "$ROOT_DIR/App/DictionaryManagerPresentation.swift" \
   "$ROOT_DIR/App/DictionaryImportModels.swift" \
@@ -58,6 +67,10 @@ xcrun --sdk macosx swiftc \
   "$ROOT_DIR/App/DictionaryIndexingService.swift" \
   "$ROOT_DIR/App/ManagedDictionaryQueryModels.swift" \
   "$ROOT_DIR/App/ManagedDictionaryRemoval.swift" \
+  "$ROOT_DIR/App/ResourceCenterProductionConfiguration.swift" \
+  "$ROOT_DIR/App/ResourceCenterModels.swift" \
+  "$ROOT_DIR/App/ResourceCenterController.swift" \
+  "$ROOT_DIR/App/ResourceCenterViewController.swift" \
   "$ROOT_DIR/App/DictionaryManagerWindowController.swift" \
   "$ROOT_DIR/Tests/DictionaryManagerLayoutSmoke.swift" \
   -framework AppKit \

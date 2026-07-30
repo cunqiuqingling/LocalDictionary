@@ -25,6 +25,7 @@ final class DictionaryManagerWindowController: NSWindowController,
     private let importService: DictionaryImportService
     private let indexCoordinator: ManagedDictionaryIndexCoordinator
     private let removalCoordinator: ManagedDictionaryRemovalCoordinator
+    private let resourceCenterController: ResourceCenterController
     private let onCatalogChanged: (DictionaryCatalog) -> Void
     private var previewAccessory: DictionaryImportPreviewAccessory?
     private let tableView = NSTableView()
@@ -38,6 +39,7 @@ final class DictionaryManagerWindowController: NSWindowController,
     private var shouldCenterOnFirstShow: Bool
     private var removingDictionaryID: String?
     private var cancellingDictionaryID: String?
+    private var resourceCenterSheet: NSWindow?
     private static let dictionaryPasteboardType = NSPasteboard.PasteboardType(
         "com.localdict.dictionary-catalog-id"
     )
@@ -48,6 +50,7 @@ final class DictionaryManagerWindowController: NSWindowController,
          importService: DictionaryImportService? = nil,
          indexCoordinator: ManagedDictionaryIndexCoordinator,
          removalCoordinator: ManagedDictionaryRemovalCoordinator,
+         resourceCenterController: ResourceCenterController,
          onCatalogChanged: @escaping (DictionaryCatalog) -> Void = { _ in }) {
         self.catalog = catalog
         self.catalogStore = catalogStore
@@ -58,6 +61,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         self.importService = importService ?? DictionaryImportService(catalogStore: catalogStore)
         self.indexCoordinator = indexCoordinator
         self.removalCoordinator = removalCoordinator
+        self.resourceCenterController = resourceCenterController
         self.onCatalogChanged = onCatalogChanged
         let window = NSWindow(
             contentRect: NSRect(
@@ -102,6 +106,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         let selectedID = selectedDictionary?.dictionaryID
         self.catalog = catalog
         orderCoordinator.synchronize(catalog: catalog)
+        resourceCenterController.synchronize(catalog: catalog)
         dictionaries = catalog.sortedDictionaries
         if let cancellingDictionaryID,
            !dictionaries.contains(where: {
@@ -132,6 +137,7 @@ final class DictionaryManagerWindowController: NSWindowController,
             button.identifier = NSUserInterfaceItemIdentifier(dictionary.dictionaryID)
             button.state = dictionary.enabled ? .on : .off
             button.isEnabled = (dictionary.sourceKind == .managedLocal ||
+                dictionary.sourceKind == .openResource ||
                 dictionary.sourceKind == .legacyReference) &&
                 removingDictionaryID != dictionary.dictionaryID
             button.toolTip = dictionary.sourceKind == .legacyReference
@@ -181,6 +187,11 @@ final class DictionaryManagerWindowController: NSWindowController,
                ) {
                 detail += "\n" + failure
             }
+            if let metadata = dictionary.openResourceMetadata {
+                detail += "\n版本：\(metadata.resourceVersion)"
+                detail += "\n许可证：\(metadata.license.name) \(metadata.license.version)"
+                detail += "\n来源项目：\(metadata.sourceProject)"
+            }
             cell.toolTip = detail
         } else {
             cell.toolTip = nil
@@ -199,7 +210,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         heading.translatesAutoresizingMaskIntoConstraints = false
 
         let explanation = NSTextField(wrappingLabelWithString:
-            "可安全托管本地 MDX/MDD、建立独立索引，并调整同级词典的查询顺序。")
+            "可安全托管用户选择的 MDX、管理开放资源、建立独立索引，并调整同级词典顺序。")
         explanation.textColor = .secondaryLabelColor
         explanation.translatesAutoresizingMaskIntoConstraints = false
 
@@ -222,7 +233,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         orderingActions.distribution = .fill
 
         let resourceActions = NSStackView(views: [
-            futureButton(title: "获取开放词典"),
+            resourceCenterButton(),
             importButton()
         ])
         resourceActions.orientation = .horizontal
@@ -318,7 +329,7 @@ final class DictionaryManagerWindowController: NSWindowController,
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.alignment = .center
         let detail = NSTextField(wrappingLabelWithString:
-            "可以导入本地 MDX/MDD。开放词库将在后续版本提供；AI 功能仍可独立使用。")
+            "可以导入一个本地 MDX，或打开 Resource Center 查看经过验证的开放资源。")
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         detail.maximumNumberOfLines = 3
@@ -329,30 +340,26 @@ final class DictionaryManagerWindowController: NSWindowController,
         emptyStateView.addArrangedSubview(title)
         emptyStateView.addArrangedSubview(detail)
         let importButton = importButton()
-        importButton.setAccessibilityLabel("导入本地 MDX 或 MDD")
+        importButton.setAccessibilityLabel("导入本地 MDX")
         emptyStateView.addArrangedSubview(importButton)
-        let future = NSTextField(labelWithString: "获取开放词典 · 查询顺序与显示规则（后续提供）")
-        future.textColor = .tertiaryLabelColor
-        future.font = .systemFont(ofSize: 11)
-        future.alignment = .center
-        emptyStateView.addArrangedSubview(future)
+        emptyStateView.addArrangedSubview(resourceCenterButton())
     }
 
-    private func futureButton(title: String) -> NSButton {
-        let button = NSButton(title: title + "（后续提供）", target: self,
-                              action: #selector(showFuturePhaseNotice(_:)))
+    private func resourceCenterButton() -> NSButton {
+        let button = NSButton(title: "开放资源中心…", target: self,
+                              action: #selector(showResourceCenter))
         button.bezelStyle = .rounded
-        button.toolTip = "该功能将在后续阶段提供。"
-        button.setAccessibilityLabel(title + "，后续提供")
+        button.toolTip = "查看经过签名和许可证验证的开放词典资源。"
+        button.setAccessibilityLabel("打开开放资源中心")
         return button
     }
 
     private func importButton() -> NSButton {
-        let button = NSButton(title: "导入本地 MDX/MDD…", target: self,
+        let button = NSButton(title: "导入本地 MDX…", target: self,
                               action: #selector(beginImport))
         button.bezelStyle = .rounded
-        button.toolTip = "选择一个 MDX 文件或包含 MDX 的文件夹，检查后安全复制到 App 托管目录。"
-        button.setAccessibilityLabel("导入本地 MDX 或 MDD")
+        button.toolTip = "选择一个 MDX 文件，确认本机使用权后安全复制到 App 托管目录。"
+        button.setAccessibilityLabel("导入本地 MDX")
         return button
     }
 
@@ -421,7 +428,9 @@ final class DictionaryManagerWindowController: NSWindowController,
             : "所选词典已经位于当前查询级别的最后面。"
         let isRemoving = removingDictionaryID == selectedDictionary.dictionaryID ||
             removalCoordinator.isRemoving(selectedDictionary.dictionaryID)
-        removeButton.isEnabled = selectedDictionary.sourceKind == .managedLocal && !isRemoving
+        removeButton.isEnabled =
+            (selectedDictionary.sourceKind == .managedLocal ||
+             selectedDictionary.sourceKind == .openResource) && !isRemoving
         if selectedDictionary.sourceKind == .legacyReference {
             removeButton.toolTip = "该词典来自旧配置引用。LocalDictionary 不会删除其原始文件，可通过停用来停止查询。"
         } else if isRemoving {
@@ -549,7 +558,8 @@ final class DictionaryManagerWindowController: NSWindowController,
 
     @objc private func confirmRemoveSelectedDictionary() {
         guard let window, let dictionary = selectedDictionary else { return }
-        guard dictionary.sourceKind == .managedLocal else {
+        guard dictionary.sourceKind == .managedLocal ||
+              dictionary.sourceKind == .openResource else {
             showInformation(title: "不能移除旧配置词典",
                             message: "该词典来自旧配置引用。LocalDictionary 不会删除其原始文件，可通过停用来停止查询。")
             return
@@ -562,7 +572,9 @@ final class DictionaryManagerWindowController: NSWindowController,
         }
         let alert = NSAlert()
         alert.messageText = "移除词典“\(dictionary.displayName)”？"
-        alert.informativeText = "将从 LocalDictionary 中移除该词典，并删除 App 托管目录中的 MDX 副本和 SQLite 索引。用户最初选择导入的原始文件不会被修改；已保存的收藏正文快照仍可阅读。此操作不可撤销。"
+        alert.informativeText = dictionary.sourceKind == .openResource
+            ? "将经过现有 receipt、Catalog identity 和受控 inventory 边界移除该开放资源及其索引。身份不明文件不会被删除。此操作不可撤销。"
+            : "将从 LocalDictionary 中移除该词典，并删除 App 托管目录中的 MDX 副本和 SQLite 索引。用户最初选择导入的原始文件不会被修改；已保存的收藏正文快照仍可阅读。此操作不可撤销。"
         alert.alertStyle = .critical
         alert.addButton(withTitle: "移除词典")
         alert.addButton(withTitle: "取消")
@@ -620,13 +632,23 @@ final class DictionaryManagerWindowController: NSWindowController,
         }
     }
 
-    @objc private func showFuturePhaseNotice(_ sender: NSButton) {
-        let alert = NSAlert()
-        alert.messageText = sender.title
-        alert.informativeText = "将在后续阶段提供。"
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "好")
-        if let window { alert.beginSheetModal(for: window) }
+    @objc private func showResourceCenter() {
+        guard let window else { return }
+        if let existing = resourceCenterSheet {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        let content = ResourceCenterViewController(controller: resourceCenterController)
+        let sheet = NSWindow(contentViewController: content)
+        sheet.title = "开放资源中心"
+        sheet.styleMask = [.titled, .closable, .resizable]
+        sheet.minSize = NSSize(width: 760, height: 500)
+        sheet.setContentSize(NSSize(width: 900, height: 620))
+        resourceCenterSheet = sheet
+        window.beginSheet(sheet) { [weak self] _ in
+            self?.resourceCenterSheet = nil
+        }
+        resourceCenterController.refresh()
     }
 
     @objc private func enabledStateChanged(_ sender: NSButton) {
@@ -634,6 +656,7 @@ final class DictionaryManagerWindowController: NSWindowController,
               let index = catalog.dictionaries.firstIndex(where: {
                   $0.dictionaryID == identifier &&
                       ($0.sourceKind == .managedLocal ||
+                       $0.sourceKind == .openResource ||
                        $0.sourceKind == .legacyReference)
               }) else { return }
         let previous = catalog
@@ -722,10 +745,10 @@ final class DictionaryManagerWindowController: NSWindowController,
         guard let window else { return }
         let panel = NSOpenPanel()
         panel.title = "选择本地 MDict 词典"
-        panel.message = "请选择一个 .mdx 文件，或包含一个或多个 .mdx 的文件夹。"
+        panel.message = "请选择一个你有权在本机使用的 .mdx 文件。不会扫描其他目录或上传内容。"
         panel.prompt = "检查"
         panel.canChooseFiles = true
-        panel.canChooseDirectories = true
+        panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.canCreateDirectories = false
         if let mdxType = UTType(filenameExtension: "mdx") {
@@ -760,7 +783,7 @@ final class DictionaryManagerWindowController: NSWindowController,
             else { return nil }
             return (preview, descriptor)
         }).first {
-            presentDuplicateNotice(existing: duplicate.1)
+            presentDuplicateNotice(previews: previews, existing: duplicate.1)
             return
         }
 
@@ -768,20 +791,31 @@ final class DictionaryManagerWindowController: NSWindowController,
         previewAccessory = accessory
         let alert = NSAlert()
         alert.messageText = previews.count == 1 ? "导入预览" : "导入预览（\(previews.count) 本词典）"
-        alert.informativeText = "仅检查必要元数据。确认后将安全复制文件，并显示为“等待建立索引”。"
+        alert.informativeText = "仅检查必要元数据。确认后将安全复制文件，并显示为“等待建立索引”。这不代表拥有再分发权。"
         alert.alertStyle = .informational
         alert.accessoryView = accessory.view
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "我有权在本机使用该词典文件"
+        alert.suppressionButton?.state = .off
         alert.addButton(withTitle: "导入")
         alert.addButton(withTitle: "取消")
         alert.beginSheetModal(for: window) { [weak self, accessory] response in
             guard let self else { return }
             self.previewAccessory = nil
             guard response == .alertFirstButtonReturn else { return }
+            guard alert.suppressionButton?.state == .on else {
+                self.showInformation(
+                    title: "需要确认本机使用权",
+                    message: "只有在确认“我有权在本机使用该词典文件”后才能导入。此确认不授予或声明再分发权。"
+                )
+                return
+            }
             self.performImport(accessory.selections)
         }
     }
 
-    private func performImport(_ selections: [DictionaryImportSelection]) {
+    private func performImport(_ selections: [DictionaryImportSelection],
+                               allowDuplicateContent: Bool = false) {
         guard let window else { return }
         let totalBytes = selections.reduce(UInt64(0)) {
             $0 &+ $1.preview.mdxFileSize &+
@@ -813,7 +847,8 @@ final class DictionaryManagerWindowController: NSWindowController,
                         Task { @MainActor in
                             progressPresenter.update(completedBytes: completed)
                         }
-                    }
+                    },
+                    allowDuplicateContent: allowDuplicateContent
                 )
                 if progressAlert.window.sheetParent != nil {
                     window.endSheet(progressAlert.window)
@@ -846,17 +881,37 @@ final class DictionaryManagerWindowController: NSWindowController,
         }
     }
 
-    private func presentDuplicateNotice(existing: DictionaryDescriptor) {
+    private func presentDuplicateNotice(previews: [DictionaryImportPreview],
+                                        existing: DictionaryDescriptor) {
         guard let window else { return }
         let alert = NSAlert()
         alert.messageText = "该词典可能已导入"
-        alert.informativeText = "已安装列表中已有内容相同的词典“\(existing.displayName)”。本次不会重复复制。"
+        alert.informativeText = "已安装列表中已有内容相同的词典“\(existing.displayName)”。可以取消、显示现有词典，或明确作为独立词典导入。当前安全模型不支持用手动文件原地替换现有词典。"
         alert.alertStyle = .warning
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "我有权在本机使用该词典文件"
+        alert.suppressionButton?.state = .off
         alert.addButton(withTitle: "显示现有词典")
+        alert.addButton(withTitle: "作为独立词典")
         alert.addButton(withTitle: "取消")
         alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
             if response == .alertFirstButtonReturn {
-                self?.selectDictionary(id: existing.dictionaryID)
+                self.selectDictionary(id: existing.dictionaryID)
+            } else if response == .alertSecondButtonReturn {
+                guard alert.suppressionButton?.state == .on else {
+                    self.showInformation(
+                        title: "需要确认本机使用权",
+                        message: "只有确认本机使用权后，才能把相同内容作为独立词典导入。"
+                    )
+                    return
+                }
+                self.performImport(
+                    previews.map {
+                        DictionaryImportSelection(preview: $0, selectedMDDIDs: [])
+                    },
+                    allowDuplicateContent: true
+                )
             }
         }
     }

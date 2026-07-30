@@ -103,6 +103,11 @@ private enum DictionaryManagerUIStateSmoke {
         try expect(DictionaryManagerPresentation.indexAction(
             for: descriptor(state: .ready, source: .legacyReference)
         ) == nil, "legacy dictionary must not expose managed index action")
+        let openResource = DictionaryManagerPresentation.indexAction(
+            for: descriptor(state: .pendingIndex, source: .openResource, level: .fallback)
+        )
+        try expect(openResource?.action == .start,
+                   "open resource must reuse managed sealed-index action")
 
         try expect(DictionaryManagerPresentation.totalColumnWidth + 40 <=
             DictionaryManagerPresentation.defaultWindowWidth,

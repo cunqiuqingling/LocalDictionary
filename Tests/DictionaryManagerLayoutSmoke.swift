@@ -91,6 +91,21 @@ private enum DictionaryManagerLayoutSmoke {
             queryService: queryService,
             isIndexing: { _ in false }
         )
+        let resourceCenterController = ResourceCenterController(
+            catalog: .empty(),
+            catalogStore: catalogStore,
+            installationCoordinator: OpenResourceInstallationCoordinator(
+                lifecycleCoordinator: queryService.lifecycleCoordinator
+            ),
+            indexCoordinator: indexCoordinator,
+            removalCoordinator: removalCoordinator,
+            applicationSupportRoot: root,
+            manifestStateStore: VerifiedManifestStateStore(
+                directoryURL: root.appendingPathComponent(
+                    "ManifestState", isDirectory: true
+                )
+            )
+        )
         let importService = DictionaryImportService(
             dictionariesRootURL: root.appendingPathComponent("Dictionaries", isDirectory: true),
             catalogStore: catalogStore
@@ -100,7 +115,8 @@ private enum DictionaryManagerLayoutSmoke {
             catalogStore: catalogStore,
             importService: importService,
             indexCoordinator: indexCoordinator,
-            removalCoordinator: removalCoordinator
+            removalCoordinator: removalCoordinator,
+            resourceCenterController: resourceCenterController
         )
         guard let window = controller.window, let content = window.contentView else {
             throw LayoutSmokeError.failed("manager window missing")
@@ -112,6 +128,9 @@ private enum DictionaryManagerLayoutSmoke {
         try layoutExpect(allSubviews(of: content).compactMap { $0 as? NSTextField }
             .contains(where: { $0.stringValue == "当前没有可用的本地词典" }),
             "friendly empty state missing")
+        try layoutExpect(allSubviews(of: content).compactMap { $0 as? NSButton }
+            .contains(where: { $0.title == "开放资源中心…" }),
+            "Resource Center entry missing")
 
         var catalog = DictionaryCatalog.empty(now: Date(timeIntervalSince1970: 1_700_000_000))
         catalog.dictionaries = [layoutDescriptor(state: .pendingIndex)]

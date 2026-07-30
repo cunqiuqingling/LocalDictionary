@@ -48,6 +48,7 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
 
     let dictionaryID: String
     let resourceID: String
+    let displayName: String
     let resourceRevision: UInt64
     let resourceVersion: String
     let manifestVersion: UInt64
@@ -80,6 +81,7 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
         }
         self.dictionaryID = dictionaryID.lowercased()
         self.resourceID = resource.resourceID
+        displayName = resource.displayName
         resourceRevision = resource.resourceRevision
         resourceVersion = resource.version
         manifestVersion = verifiedManifest.validated.manifest.manifestVersion
@@ -103,7 +105,9 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
          payloadSHA256: String, payloadBytes: UInt64, languages: [String],
          license: OpenResourceLicenseMetadata, sourceProject: String,
          officialPageReference: String, expectedEntryCount: OpenResourceEntryCountMetadata,
-         installedAt: Date, formatterIdentifier: String = DictionaryFormatterIdentifier.genericMDictV1) throws {
+         installedAt: Date,
+         formatterIdentifier: String = DictionaryFormatterIdentifier.genericMDictV1,
+         displayName: String? = nil) throws {
         guard OpenResourceInstallationMetadata.isCanonicalUUID(dictionaryID),
               OpenResourceInstallationMetadata.isSafeToken(resourceID), resourceRevision > 0,
               manifestVersion > 0, OpenResourceInstallationMetadata.isSHA256(manifestSHA256),
@@ -113,7 +117,13 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
               DictionaryFormatterIdentifier.supportsGenericMDictV1(formatterIdentifier) else {
             throw OpenResourceInstallationError.invalidIdentity
         }
+        let resolvedDisplayName = displayName ?? resourceID
+        guard !resolvedDisplayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              resolvedDisplayName.utf8.count <= 512 else {
+            throw OpenResourceInstallationError.invalidIdentity
+        }
         self.dictionaryID = dictionaryID.lowercased(); self.resourceID = resourceID
+        self.displayName = resolvedDisplayName
         self.resourceRevision = resourceRevision; self.resourceVersion = resourceVersion
         self.manifestVersion = manifestVersion; self.manifestSHA256 = manifestSHA256
         self.verifiedKeyID = verifiedKeyID; self.payloadSHA256 = payloadSHA256

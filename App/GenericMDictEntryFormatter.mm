@@ -75,7 +75,8 @@ bool isDiscarded(const std::string &name) {
   static const std::set<std::string> discarded = {
       "script", "style", "link", "iframe", "object", "embed", "form",
       "input", "button", "video", "audio", "img", "svg", "canvas",
-      "meta", "base", "source", "track", "noscript", "template", "head"};
+      "meta", "base", "source", "track", "noscript", "template", "head",
+      "frame", "frameset", "applet"};
   return discarded.count(name) != 0;
 }
 

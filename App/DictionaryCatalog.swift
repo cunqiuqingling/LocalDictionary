@@ -404,14 +404,41 @@ struct DictionaryCatalog: Codable, Equatable, Sendable {
             throw DictionaryCatalogValidationError.unsupportedSchemaVersion
         }
         var identifiers: Set<String> = []
-        var openResourceIDs: Set<String> = []
+        var openResourcesByID: [String: [DictionaryDescriptor]] = [:]
         for dictionary in dictionaries {
             try dictionary.validate()
             guard identifiers.insert(dictionary.dictionaryID).inserted else {
                 throw DictionaryCatalogValidationError.duplicateDictionaryID
             }
-            if let resourceID = dictionary.openResourceMetadata?.resourceID,
-               !openResourceIDs.insert(resourceID).inserted {
+            if let resourceID = dictionary.openResourceMetadata?.resourceID {
+                openResourcesByID[resourceID, default: []].append(dictionary)
+            }
+        }
+        for values in openResourcesByID.values where values.count > 1 {
+            // A signed update may coexist with the current ready version only while the newer
+            // descriptor is disabled and pending/indexing/failed (or ready but not yet switched).
+            // This preserves the old query-eligible object until the new sealed index commits.
+            guard values.count == 2,
+                  let older = values.min(by: {
+                      $0.openResourceMetadata!.resourceRevision <
+                          $1.openResourceMetadata!.resourceRevision
+                  }),
+                  let newer = values.max(by: {
+                      $0.openResourceMetadata!.resourceRevision <
+                          $1.openResourceMetadata!.resourceRevision
+                  }),
+                  older.openResourceMetadata!.resourceRevision <
+                      newer.openResourceMetadata!.resourceRevision,
+                  older.queryLevel == .fallback,
+                  newer.queryLevel == .fallback,
+                  older.state == .ready,
+                  older.sortPosition == newer.sortPosition,
+                  (
+                    (!newer.enabled &&
+                     [.pendingIndex, .indexing, .failed, .ready].contains(newer.state)) ||
+                    (!older.enabled && newer.enabled && newer.state == .ready)
+                  )
+            else {
                 throw DictionaryCatalogValidationError.duplicateOpenResourceID
             }
         }

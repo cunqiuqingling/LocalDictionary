@@ -117,7 +117,8 @@ struct ResourcePayloadDownloadPolicy: Equatable, Sendable {
     static let absoluteHardLimit: UInt64 = 512 * 1024 * 1024
     static let defaultDiskSafetyMargin: UInt64 = 64 * 1024 * 1024
 
-    /// D1b-2B intentionally ships without a production payload host allowlist.
+    /// Compatibility constant for security tests. Product composition uses the single
+    /// `ResourceCenterProductionConfiguration` injection point.
     static let productionAllowedHosts: [String] = []
 
     let applicationAllowedHosts: [String]

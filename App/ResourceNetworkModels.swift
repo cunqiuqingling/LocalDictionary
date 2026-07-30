@@ -87,7 +87,8 @@ struct ResourceNetworkPolicy: Equatable, Sendable {
 }
 
 struct ResourceManifestEndpoint: Equatable, Sendable {
-    /// D1b-2A intentionally has no production URL or host trust configuration.
+    /// Compatibility constant for security tests. Product composition uses the single
+    /// `ResourceCenterProductionConfiguration` injection point.
     static let productionDefault: ResourceManifestEndpoint? = nil
 
     let manifestURL: URL

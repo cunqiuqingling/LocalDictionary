@@ -9,8 +9,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let dictionaryCatalogStore = DictionaryCatalogStore()
     private let managedDictionaryLifecycleCoordinator =
         ManagedDictionaryLifecycleCoordinator()
-    // The Resource Center has no product UI in this stage, but its future installation entry
-    // must use this same process-local coordinator rather than creating a second state source.
     private lazy var openResourceInstallationCoordinator = OpenResourceInstallationCoordinator(
         lifecycleCoordinator: managedDictionaryLifecycleCoordinator
     )
@@ -26,6 +24,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildIndex: liveDictionaryIndexBuilder,
         expectedSchemaVersion: Int(liveDictionaryIndexSchemaVersion),
         lifecycleCoordinator: managedDictionaryLifecycleCoordinator
+    )
+    private lazy var resourceCenterController = ResourceCenterController(
+        catalog: dictionaryCatalog,
+        catalogStore: dictionaryCatalogStore,
+        installationCoordinator: openResourceInstallationCoordinator,
+        indexCoordinator: dictionaryIndexCoordinator,
+        onCatalogChanged: { [weak self] catalog in
+            self?.applyCatalogChange(catalog)
+        }
     )
     private var hotKey: GlobalHotKey?
     private let selectionReader = AccessibilitySelectionReader()
@@ -350,6 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.applyCatalogChange(updated, replaceManagedCatalog: false)
         }
         dictionaryRemovalCoordinator = removalCoordinator
+        resourceCenterController.setRemovalCoordinator(removalCoordinator)
 
         dictionaryIndexCoordinator.onCatalogChanged = { [weak self] updated in
             self?.applyCatalogChange(updated)
@@ -362,6 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dictionaryCatalog = catalog
         dictionaryIndexCoordinator.synchronize(catalog: catalog)
         dictionaryRemovalCoordinator?.synchronize(catalog: catalog)
+        resourceCenterController.synchronize(catalog: catalog)
         dictionaryManagerController?.update(catalog: catalog)
         panelController?.updateDictionaryCatalog(catalog)
         if replaceManagedCatalog, let service = managedDictionaryQueryService {
@@ -378,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 catalogStore: dictionaryCatalogStore,
                 indexCoordinator: dictionaryIndexCoordinator,
                 removalCoordinator: dictionaryRemovalCoordinator,
+                resourceCenterController: resourceCenterController,
                 onCatalogChanged: { [weak self] catalog in
                     self?.applyCatalogChange(catalog)
                 }

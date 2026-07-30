@@ -75,6 +75,12 @@ Xcode Scheme 的 Release 构建也会运行 Bundle 敏感内容审计。日常�
 
 仓库不包含五本开发者本地商业词典、商业 MDX/MDD、索引或词典正文。用户必须自行确认所导入词典的合法来源与使用权限。专用 formatter 只是解析和展示代码，不授予任何商业词典内容权利。
 
+开放资源中心位于“词典管理”，复用已签名 manifest、精确 host allowlist、SHA-256、
+receipt、Catalog v3、fd-bound 建索引与查询链。当前 production endpoint、payload hosts
+和 trust store 均为空，因此默认显示安全空状态，不影响手动导入或已有词典。使用说明和
+部署所需输入见 [docs/resource-center.md](docs/resource-center.md) 与
+[docs/resource-center-deployment.md](docs/resource-center-deployment.md)。
+
 `managedLocal` 导入会把用户明确选择的 MDX 复制到 `~/Library/Application Support/LocalDictionary/Dictionaries/` 下的 App 托管目录。五本开发者本地 `legacyReference` 只通过本机私有兼容配置使用；该 `local.json` 位于 `~/Library/Application Support/LocalDictionary/LegacyConfig/`，不是普通用户构建要求，也不会进入 App Bundle。项目不提供商业词典下载链接。
 
 LocalDictionary 的 GPL-3.0-only 不覆盖用户导入的词典数据。未来 D1 只考虑经过许可证审核的开放资源；准入规则见 [docs/d1-resource-policy.md](docs/d1-resource-policy.md)。

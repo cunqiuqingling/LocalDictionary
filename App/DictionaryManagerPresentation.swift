@@ -131,7 +131,8 @@ enum DictionaryManagerPresentation {
 
     static func indexAction(for dictionary: DictionaryDescriptor,
                             activity: Activity = .idle) -> IndexActionPresentation? {
-        guard dictionary.sourceKind == .managedLocal else { return nil }
+        guard dictionary.sourceKind == .managedLocal ||
+              dictionary.sourceKind == .openResource else { return nil }
         if activity == .removing {
             return IndexActionPresentation(
                 action: .none,
