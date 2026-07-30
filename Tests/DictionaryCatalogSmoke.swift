@@ -34,6 +34,7 @@ enum DictionaryCatalogSmoke {
         try testLoadedBackupMutationPreservesPreviousBackup(root: root)
         try testTwoStoreMutationsMergeLatestCatalog(root: root)
         try testExplicitV1Migration(root: root)
+        try testV2ToV3Migration(root: root)
         try testMissingLegacyConfiguration(root: root)
         try testLegacyAdaptationAndIdempotence(root: root)
         try testStableSort()
@@ -46,6 +47,110 @@ enum DictionaryCatalogSmoke {
         let loaded = store.load()
         try expect(loaded.schemaVersion == DictionaryCatalog.currentSchemaVersion && loaded.dictionaries.isEmpty,
                    "empty catalog did not load")
+    }
+
+    private static func testV2ToV3Migration(root: URL) throws {
+        let store = makeStore(root: root, name: "v2-v3-migration")
+        try FileManager.default.createDirectory(
+            at: store.directoryURL, withIntermediateDirectories: true
+        )
+        let original = sampleCatalog()
+        let v2 = try catalogData(original, schemaVersion: 2,
+                                 removePublishedIdentity: true)
+        try v2.write(to: store.catalogURL)
+        let loaded = store.loadResult()
+        try expect(loaded.provenance == .migratedFromV2,
+                   "v2 primary did not enter explicit v3 migration")
+        let migrated = try require(loaded.catalog, "v2 migration omitted Catalog")
+        let descriptor = try require(
+            migrated.dictionaries.first, "v2 migration omitted descriptor"
+        )
+        try expect(migrated.schemaVersion == 3 &&
+                   descriptor.state == .pendingIndex,
+                   "v2 ready descriptor was not downgraded")
+        try expect(descriptor.relativePaths.index == nil &&
+                   descriptor.publishedIndexIdentity == nil &&
+                   descriptor.indexMetadata.schemaVersion == nil &&
+                   descriptor.indexMetadata.entryCount == nil &&
+                   descriptor.indexMetadata.indexFileSize == nil &&
+                   descriptor.indexMetadata.indexedAt == nil,
+                   "v2 migration retained query-eligible index fields")
+        try expect(descriptor.relativePaths.dictionary ==
+                   original.dictionaries[0].relativePaths.dictionary &&
+                   descriptor.enabled == original.dictionaries[0].enabled &&
+                   descriptor.indexMetadata.sourceSHA256 ==
+                    original.dictionaries[0].indexMetadata.sourceSHA256 &&
+                   descriptor.indexMetadata.sourceFileSize ==
+                    original.dictionaries[0].indexMetadata.sourceFileSize,
+                   "v2 migration lost preserved source/order state")
+
+        _ = try store.mutate { catalog, _ in
+            catalog.updatedAt = catalog.updatedAt.addingTimeInterval(1)
+        }
+        let primarySchema = try schema(in: store.catalogURL)
+        let backupSchema = try schema(in: store.backupURL)
+        try expect(primarySchema == 3 && backupSchema == 3,
+                   "migration did not establish v3 backup barrier before primary")
+
+        let mixed = makeStore(root: root, name: "v2-primary-v3-backup")
+        try FileManager.default.createDirectory(
+            at: mixed.directoryURL, withIntermediateDirectories: true
+        )
+        var backupCatalog = migrated
+        backupCatalog.dictionaries[0].displayName = "v3-backup-authority"
+        try v2.write(to: mixed.catalogURL)
+        try encoded(backupCatalog).write(to: mixed.backupURL)
+        try expect(mixed.loadResult().catalog?.dictionaries[0].displayName ==
+                   "v3-backup-authority",
+                   "v2 primary overrode v3 migration backup barrier")
+
+        let reverse = makeStore(root: root, name: "v3-primary-v2-backup")
+        try FileManager.default.createDirectory(
+            at: reverse.directoryURL, withIntermediateDirectories: true
+        )
+        try encoded(backupCatalog).write(to: reverse.catalogURL)
+        try v2.write(to: reverse.backupURL)
+        try expect(reverse.loadResult().provenance == .loadedPrimary,
+                   "v3 primary did not remain authoritative over v2 backup")
+    }
+
+    private static func catalogData(
+        _ catalog: DictionaryCatalog,
+        schemaVersion: Int,
+        removePublishedIdentity: Bool
+    ) throws -> Data {
+        var object = try JSONSerialization.jsonObject(
+            with: encoded(catalog)
+        ) as! [String: Any]
+        object["schemaVersion"] = schemaVersion
+        if removePublishedIdentity,
+           var dictionaries = object["dictionaries"] as? [[String: Any]] {
+            for index in dictionaries.indices {
+                dictionaries[index].removeValue(forKey: "publishedIndexIdentity")
+            }
+            object["dictionaries"] = dictionaries
+        }
+        return try JSONSerialization.data(
+            withJSONObject: object, options: [.sortedKeys]
+        )
+    }
+
+    private static func encoded(_ catalog: DictionaryCatalog) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        return try encoder.encode(catalog)
+    }
+
+    private static func schema(in url: URL) throws -> Int {
+        let object = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: url)
+        ) as! [String: Any]
+        return object["schemaVersion"] as! Int
+    }
+
+    private static func require<T>(_ value: T?, _ message: String) throws -> T {
+        guard let value else { throw SmokeFailure.failed(message) }
+        return value
     }
 
     private static func testAtomicSaveAndReload(root: URL) throws {
@@ -413,7 +518,12 @@ enum DictionaryCatalogSmoke {
 
     private static func descriptor(id: String, level: DictionaryQueryLevel,
                                    position: Int64, now: Date) -> DictionaryDescriptor {
-        DictionaryDescriptor(
+        let publicationID = "00000000-0000-0000-0000-000000000003"
+        let sourceSHA = String(repeating: "a", count: 64)
+        let indexSHA = String(repeating: "b", count: 64)
+        let indexPath =
+            "Dictionaries/\(id)/index/dictionary.\(publicationID).sqlite"
+        return DictionaryDescriptor(
             dictionaryID: id,
             displayName: "Sample \(id)",
             sourceKind: .managedLocal,
@@ -424,14 +534,25 @@ enum DictionaryCatalogSmoke {
             indexMetadata: DictionaryIndexMetadata(
                 schemaVersion: 1, entryCount: 12, indexFileSize: 4096,
                 sourceFileSize: 1024, sourceModifiedAt: now,
-                sourceSHA256: nil, indexedAt: now),
+                sourceSHA256: sourceSHA, indexedAt: now),
             formatterIdentifier: "generic-safe.v1",
             capabilities: .unknown,
             relativePaths: DictionaryRelativePaths(
                 dictionary: "Dictionaries/\(id)/source/dictionary.mdx",
-                resources: [], index: "Indexes/\(id).sqlite"),
+                resources: [], index: indexPath),
             createdAt: now,
-            updatedAt: now)
+            updatedAt: now,
+            publishedIndexIdentity: PublishedIndexIdentity(
+                indexPublicationID: publicationID,
+                indexSHA256: indexSHA,
+                indexFileSize: 4096,
+                sourceSHA256: sourceSHA,
+                sourceFileSize: 1024,
+                schemaVersion: 1,
+                entryCount: 12,
+                indexedAt: now,
+                relativePath: indexPath
+            ))
     }
 
     private static func makeStore(root: URL, name: String) -> DictionaryCatalogStore {

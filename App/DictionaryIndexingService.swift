@@ -1,6 +1,5 @@
 import Darwin
 import Foundation
-import SQLite3
 
 struct DictionaryIndexingHooks: Sendable {
     let availableCapacity: @Sendable (URL) throws -> UInt64
@@ -27,6 +26,7 @@ struct DictionaryIndexingHooks: Sendable {
 struct ManagedDictionaryIndexWorker: Sendable {
     let openSource: DictionaryIndexSourceOpenFunction
     let buildIndex: DictionaryIndexBuildFunction
+    let createCandidate: DictionaryIndexCandidateFactory
     let hooks: DictionaryIndexingHooks
 
     func establishSource(
@@ -64,6 +64,7 @@ struct ManagedDictionaryIndexWorker: Sendable {
         cancellationToken: DictionaryIndexCancellationToken
     ) -> DictionaryIndexWorkerOutcome {
         let fileManager = FileManager()
+        var candidate: DictionaryIndexCandidateCapability?
         do {
             try checkCancellation(cancellationToken)
             guard sourceCapability.isValidForPublication else {
@@ -79,26 +80,36 @@ struct ManagedDictionaryIndexWorker: Sendable {
                                                                  available: available)
             }
 
-            cleanupBuildArtifacts(plan, fileManager: fileManager)
             try checkCancellation(cancellationToken)
-            switch buildIndex(sourceCapability, plan.candidateIndexURL,
-                              cancellationToken) {
+            let createdCandidate = try createCandidate(plan)
+            candidate = createdCandidate
+            let request = DictionaryIndexBuildRequest(
+                candidateIndexURL: createdCandidate.candidateIndexURL,
+                dictionaryID: plan.dictionaryID,
+                publicationID: plan.publicationID,
+                sourceSHA256: plan.expectedSourceSHA256,
+                sourceFileSize: plan.expectedSourceSize,
+                candidateStorage: createdCandidate.storage
+            )
+            let product: DictionaryIndexBuildProduct
+            switch buildIndex(sourceCapability, request, cancellationToken) {
             case .cancelled:
-                cleanupBuildArtifacts(plan, fileManager: fileManager)
+                createdCandidate.discard()
                 return .cancelled
             case .failure(let reason):
-                cleanupBuildArtifacts(plan, fileManager: fileManager)
+                createdCandidate.discard()
                 return .failed(.builderFailed(reason))
-            case .success:
-                break
+            case .success(let value):
+                product = value
             }
 
             try checkCancellation(cancellationToken)
             guard sourceCapability.isValidForPublication else {
                 throw DictionaryIndexError.sourceChanged
             }
-            let validated = try validateSQLite(at: plan.candidateIndexURL,
-                                               schemaVersion: plan.expectedSchemaVersion)
+            let validated = try createdCandidate.seal(
+                entryCount: product.reportedEntryCount
+            )
             try checkCancellation(cancellationToken)
             try hooks.beforePublish()
             guard sourceCapability.isValidForPublication else {
@@ -107,34 +118,33 @@ struct ManagedDictionaryIndexWorker: Sendable {
 
             return .prepared(DictionaryIndexPreparedResult(
                 dictionaryID: plan.dictionaryID,
-                candidateIndexURL: plan.candidateIndexURL,
-                finalIndexURL: plan.finalIndexURL,
+                publicationID: plan.publicationID,
                 relativeIndexPath: plan.relativeIndexPath,
                 schemaVersion: plan.expectedSchemaVersion,
                 entryCount: validated.entryCount,
-                indexFileSize: validated.fileSize,
+                indexFileSize: validated.indexFileSize,
+                indexSHA256: validated.indexSHA256,
                 sourceFileSize: plan.expectedSourceSize,
                 sourceSHA256: sourceCapability.sourceSHA256,
+                sourceRelativePath: plan.sourceRelativePath,
                 indexedAt: Date(),
-                sourceCapability: sourceCapability
+                sourceCapability: sourceCapability,
+                candidateCapability: createdCandidate
             ))
         } catch is CancellationError {
-            cleanupBuildArtifacts(plan, fileManager: fileManager)
+            candidate?.discard()
             return .cancelled
         } catch let error as DictionaryIndexError {
-            cleanupBuildArtifacts(plan, fileManager: fileManager)
+            candidate?.discard()
             return .failed(error)
         } catch {
-            cleanupBuildArtifacts(plan, fileManager: fileManager)
+            candidate?.discard()
             return .failed(.builderFailed("索引建立失败。"))
         }
     }
 
     func discardPrepared(_ prepared: DictionaryIndexPreparedResult) {
-        let fileManager = FileManager()
-        try? fileManager.removeItem(at: prepared.candidateIndexURL)
-        try? fileManager.removeItem(at: URL(fileURLWithPath:
-            prepared.candidateIndexURL.path + ".building"))
+        prepared.candidateCapability.discard()
     }
 
     private func requiredCapacity(sourceSize: UInt64) -> UInt64 {
@@ -145,60 +155,10 @@ struct ManagedDictionaryIndexWorker: Sendable {
             : base + 128 * 1024 * 1024
     }
 
-    private func validateSQLite(at url: URL,
-                                schemaVersion: Int) throws -> (entryCount: UInt64,
-                                                               fileSize: UInt64) {
-        let fileManager = FileManager()
-        let attributes = try fileManager.attributesOfItem(atPath: url.path)
-        let fileSize = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
-        guard fileSize > 0 else { throw DictionaryIndexError.emptyIndex }
-
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &database,
-                              SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
-              let database else {
-            if let database { sqlite3_close(database) }
-            throw DictionaryIndexError.invalidSQLite
-        }
-        defer { sqlite3_close(database) }
-
-        guard queryText(database, sql: "PRAGMA integrity_check")?.lowercased() == "ok" else {
-            throw DictionaryIndexError.integrityCheckFailed
-        }
-        guard queryText(database,
-                        sql: "SELECT value FROM metadata WHERE key='schema_version' LIMIT 1")
-                == String(schemaVersion) else {
-            throw DictionaryIndexError.schemaMismatch
-        }
-        guard let value = queryText(database,
-                                    sql: "SELECT COUNT(*) FROM entries"),
-              let entryCount = UInt64(value) else {
-            throw DictionaryIndexError.missingEntryCount
-        }
-        guard entryCount > 0 else { throw DictionaryIndexError.emptyIndex }
-        return (entryCount, fileSize)
-    }
-
-    private func queryText(_ database: OpaquePointer, sql: String) -> String? {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-              let statement else { return nil }
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW,
-              let text = sqlite3_column_text(statement, 0) else { return nil }
-        return String(cString: text)
-    }
-
     private func checkCancellation(_ token: DictionaryIndexCancellationToken) throws {
         if token.isCancelled { throw CancellationError() }
     }
 
-    private func cleanupBuildArtifacts(_ plan: DictionaryIndexPlan,
-                                       fileManager: FileManager) {
-        try? fileManager.removeItem(at: plan.candidateIndexURL)
-        try? fileManager.removeItem(at: URL(fileURLWithPath:
-            plan.candidateIndexURL.path + ".building"))
-    }
 }
 
 @MainActor
@@ -225,6 +185,7 @@ final class ManagedDictionaryIndexCoordinator {
         applicationSupportRootURL: URL = DictionaryImportService.defaultApplicationSupportRootURL(),
         openSource: @escaping DictionaryIndexSourceOpenFunction,
         buildIndex: @escaping DictionaryIndexBuildFunction,
+        createCandidate: @escaping DictionaryIndexCandidateFactory,
         expectedSchemaVersion: Int,
         hooks: DictionaryIndexingHooks = .live,
         lifecycleCoordinator: ManagedDictionaryLifecycleCoordinator =
@@ -237,6 +198,7 @@ final class ManagedDictionaryIndexCoordinator {
         self.expectedSchemaVersion = expectedSchemaVersion
         worker = ManagedDictionaryIndexWorker(openSource: openSource,
                                               buildIndex: buildIndex,
+                                              createCandidate: createCandidate,
                                               hooks: hooks)
         self.lifecycleCoordinator = lifecycleCoordinator
         self.runtimeInvalidator = runtimeInvalidator
@@ -434,7 +396,8 @@ final class ManagedDictionaryIndexCoordinator {
 
         var updated = catalog
         let now = Date()
-        var publication: IndexPublication?
+        var publication: DictionaryIndexCandidateCapability?
+        var preparedSourceRelativePath: String?
         switch outcome {
         case .cancelled:
             updated.dictionaries[index].state = .pendingIndex
@@ -446,6 +409,7 @@ final class ManagedDictionaryIndexCoordinator {
             clearPublishedMetadata(&updated.dictionaries[index])
             failureMessages[dictionaryID] = error.localizedDescription
         case .prepared(let prepared):
+            preparedSourceRelativePath = prepared.sourceRelativePath
             guard !cancellationTokenIsSet else {
                 let worker = self.worker
                 await Task.detached(priority: .utility) { worker.discardPrepared(prepared) }.value
@@ -467,7 +431,8 @@ final class ManagedDictionaryIndexCoordinator {
                 break
             }
             do {
-                publication = try publish(prepared)
+                try prepared.candidateCapability.publish()
+                publication = prepared.candidateCapability
                 updated.dictionaries[index].state = .ready
                 updated.dictionaries[index].relativePaths.index = prepared.relativeIndexPath
                 updated.dictionaries[index].indexMetadata = DictionaryIndexMetadata(
@@ -479,6 +444,18 @@ final class ManagedDictionaryIndexCoordinator {
                     sourceSHA256: prepared.sourceSHA256,
                     indexedAt: prepared.indexedAt
                 )
+                updated.dictionaries[index].publishedIndexIdentity =
+                    PublishedIndexIdentity(
+                        indexPublicationID: prepared.publicationID,
+                        indexSHA256: prepared.indexSHA256,
+                        indexFileSize: prepared.indexFileSize,
+                        sourceSHA256: prepared.sourceSHA256,
+                        sourceFileSize: prepared.sourceFileSize,
+                        schemaVersion: prepared.schemaVersion,
+                        entryCount: prepared.entryCount,
+                        indexedAt: prepared.indexedAt,
+                        relativePath: prepared.relativeIndexPath
+                    )
             } catch {
                 let worker = self.worker
                 await Task.detached(priority: .utility) {
@@ -498,23 +475,62 @@ final class ManagedDictionaryIndexCoordinator {
             let mutation = try catalogStore.mutate { latest, _ -> Bool in
                 guard let latestIndex = latest.dictionaries.firstIndex(where: {
                     $0.dictionaryID == dictionaryID && isIndexable($0)
-                }) else { throw DictionaryIndexError.catalogWriteFailed }
+                }),
+                latest.dictionaries[latestIndex].state == .indexing,
+                preparedSourceRelativePath == nil ||
+                    (latest.dictionaries[latestIndex].relativePaths.dictionary ==
+                        preparedSourceRelativePath &&
+                     latest.dictionaries[latestIndex].indexMetadata.sourceSHA256?.lowercased() ==
+                        target.indexMetadata.sourceSHA256?.lowercased() &&
+                     latest.dictionaries[latestIndex].indexMetadata.sourceFileSize ==
+                        target.indexMetadata.sourceFileSize) else {
+                    throw DictionaryIndexError.catalogWriteFailed
+                }
                 latest.dictionaries[latestIndex].state = target.state
                 latest.dictionaries[latestIndex].relativePaths.index = target.relativePaths.index
                 latest.dictionaries[latestIndex].indexMetadata = target.indexMetadata
+                latest.dictionaries[latestIndex].publishedIndexIdentity =
+                    target.publishedIndexIdentity
                 latest.dictionaries[latestIndex].updatedAt = now
                 latest.updatedAt = now
                 return latest.dictionaries[latestIndex].enabled && target.state == .ready
             }
-            if let publication { commit(publication) }
             catalog = mutation.catalog
+            if let publication {
+                do {
+                    try publication.commit()
+                } catch {
+                    publication.discard()
+                    failureMessages[dictionaryID] =
+                        DictionaryIndexError.indexIdentityMismatch.localizedDescription
+                    do {
+                        let repaired = try catalogStore.mutate { latest, _ in
+                            guard let latestIndex = latest.dictionaries.firstIndex(
+                                where: { $0.dictionaryID == dictionaryID }
+                            ) else { throw DictionaryIndexError.catalogWriteFailed }
+                            latest.dictionaries[latestIndex].state = .pendingIndex
+                            latest.dictionaries[latestIndex].relativePaths.index = nil
+                            clearPublishedMetadata(&latest.dictionaries[latestIndex])
+                            latest.dictionaries[latestIndex].updatedAt = Date()
+                            latest.updatedAt = Date()
+                        }
+                        catalog = repaired.catalog
+                        onCatalogChanged?(repaired.catalog)
+                    } catch {
+                        // The lifecycle remains suspended. Startup reconciliation
+                        // will fail closed against the durable ready identity.
+                    }
+                    return .suspended(incrementGeneration: true)
+                }
+            }
             onCatalogChanged?(mutation.catalog)
             return mutation.value
                 ? .available(incrementGeneration: true)
                 : .suspended(incrementGeneration: true)
         } catch {
-            if let publication { rollback(publication) }
-            failureMessages[dictionaryID] = DictionaryIndexError.catalogWriteFailed.localizedDescription
+            publication?.discard()
+            failureMessages[dictionaryID] =
+                DictionaryIndexError.catalogWriteFailed.localizedDescription
             var inMemoryFallback = updated
             inMemoryFallback.dictionaries[index].state = .failed
             inMemoryFallback.dictionaries[index].relativePaths.index = nil
@@ -538,20 +554,23 @@ final class ManagedDictionaryIndexCoordinator {
             }
             throw DictionaryIndexError.unsafeCatalogPath
         }
+        let publicationID = UUID().uuidString.lowercased()
         let base = "Dictionaries/\(descriptor.dictionaryID)/index"
-        let relativeIndexPath = "\(base)/dictionary.sqlite"
+        let candidateName = ".dictionary.\(publicationID).candidate"
+        let finalName = "dictionary.\(publicationID).sqlite"
+        let relativeIndexPath = "\(base)/\(finalName)"
         let indexDirectoryURL = applicationSupportRootURL.appendingPathComponent(base,
                                                                                   isDirectory: true)
         return DictionaryIndexPlan(
             dictionaryID: descriptor.dictionaryID,
+            publicationID: publicationID,
             managedRootURL: applicationSupportRootURL,
             sourceRelativePath: sourceRelativePath,
             expectedSourceSize: expectedSourceSize,
             expectedSourceSHA256: expectedSHA256,
             indexDirectoryURL: indexDirectoryURL,
-            candidateIndexURL: indexDirectoryURL
-                .appendingPathComponent("dictionary.sqlite.building"),
-            finalIndexURL: indexDirectoryURL.appendingPathComponent("dictionary.sqlite"),
+            candidateName: candidateName,
+            finalName: finalName,
             relativeIndexPath: relativeIndexPath,
             expectedSchemaVersion: expectedSchemaVersion
         )
@@ -573,75 +592,11 @@ final class ManagedDictionaryIndexCoordinator {
         )?.isIndexable == true
     }
 
-    private struct IndexPublication {
-        let finalURL: URL
-        let backupURL: URL
-        let hadExisting: Bool
-    }
-
-    private func publish(_ prepared: DictionaryIndexPreparedResult) throws -> IndexPublication {
-        let fileManager = FileManager()
-        guard fileManager.fileExists(atPath: prepared.candidateIndexURL.path) else {
-            throw DictionaryIndexError.publicationFailed
-        }
-        let backupURL = URL(fileURLWithPath: prepared.finalIndexURL.path + ".previous")
-        try? fileManager.removeItem(at: backupURL)
-        let hadExisting = fileManager.fileExists(atPath: prepared.finalIndexURL.path)
-        if hadExisting {
-            try renameAtomically(source: prepared.finalIndexURL, destination: backupURL)
-        }
-        do {
-            try renameAtomically(source: prepared.candidateIndexURL,
-                                 destination: prepared.finalIndexURL)
-            synchronizeDirectory(prepared.finalIndexURL.deletingLastPathComponent())
-            return IndexPublication(finalURL: prepared.finalIndexURL,
-                                    backupURL: backupURL,
-                                    hadExisting: hadExisting)
-        } catch {
-            try? fileManager.removeItem(at: prepared.finalIndexURL)
-            if hadExisting { try? renameAtomically(source: backupURL,
-                                                   destination: prepared.finalIndexURL) }
-            throw DictionaryIndexError.publicationFailed
-        }
-    }
-
-    private func commit(_ publication: IndexPublication) {
-        try? FileManager().removeItem(at: publication.backupURL)
-        synchronizeDirectory(publication.finalURL.deletingLastPathComponent())
-    }
-
-    private func rollback(_ publication: IndexPublication) {
-        let fileManager = FileManager()
-        try? fileManager.removeItem(at: publication.finalURL)
-        if publication.hadExisting {
-            try? renameAtomically(source: publication.backupURL,
-                                  destination: publication.finalURL)
-        } else {
-            try? fileManager.removeItem(at: publication.backupURL)
-        }
-        synchronizeDirectory(publication.finalURL.deletingLastPathComponent())
-    }
-
-    private func renameAtomically(source: URL, destination: URL) throws {
-        let result = source.path.withCString { sourcePath in
-            destination.path.withCString { destinationPath in
-                Darwin.rename(sourcePath, destinationPath)
-            }
-        }
-        guard result == 0 else { throw POSIXError(.init(rawValue: errno) ?? .EIO) }
-    }
-
-    private func synchronizeDirectory(_ url: URL) {
-        let descriptor = Darwin.open(url.path, O_RDONLY)
-        guard descriptor >= 0 else { return }
-        defer { Darwin.close(descriptor) }
-        _ = Darwin.fsync(descriptor)
-    }
-
     private func clearPublishedMetadata(_ descriptor: inout DictionaryDescriptor) {
         descriptor.indexMetadata.schemaVersion = nil
         descriptor.indexMetadata.entryCount = nil
         descriptor.indexMetadata.indexFileSize = nil
         descriptor.indexMetadata.indexedAt = nil
+        descriptor.publishedIndexIdentity = nil
     }
 }

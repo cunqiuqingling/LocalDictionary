@@ -263,6 +263,33 @@ struct DictionaryIndexMetadata: Codable, Equatable, Sendable {
     var indexedAt: Date?
 }
 
+/// Durable content identity for one app-managed, query-eligible SQLite
+/// publication. POSIX inode and timestamp fields are deliberately excluded.
+struct PublishedIndexIdentity: Codable, Equatable, Sendable {
+    var indexPublicationID: String
+    var indexSHA256: String
+    var indexFileSize: UInt64
+    var sourceSHA256: String
+    var sourceFileSize: UInt64
+    var schemaVersion: Int
+    var entryCount: UInt64
+    var indexedAt: Date
+    var relativePath: String
+
+    fileprivate func validate(dictionaryID: String) throws {
+        guard OpenResourceInstallationMetadata.isCanonicalUUID(indexPublicationID),
+              OpenResourceInstallationMetadata.isSHA256(indexSHA256),
+              OpenResourceInstallationMetadata.isSHA256(sourceSHA256),
+              indexFileSize > 0, sourceFileSize > 0,
+              schemaVersion > 0, entryCount > 0,
+              relativePath ==
+                "Dictionaries/\(dictionaryID)/index/dictionary.\(indexPublicationID).sqlite"
+        else {
+            throw DictionaryCatalogValidationError.invalidPublishedIndexFields
+        }
+    }
+}
+
 struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
     var dictionaryID: String
     var displayName: String
@@ -279,6 +306,7 @@ struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
     var updatedAt: Date
     var storageOwnership: DictionaryStorageOwnership = .appManagedImported
     var openResourceMetadata: OpenResourceInstallationMetadata?
+    var publishedIndexIdentity: PublishedIndexIdentity? = nil
 
     var id: String { dictionaryID }
 
@@ -303,11 +331,49 @@ struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
         } else if openResourceMetadata != nil {
             throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
         }
+        if DictionaryOwnershipPolicy.policy(
+            for: sourceKind, ownership: storageOwnership
+        )?.isAppManaged == true {
+            if state == .ready {
+                guard let publishedIndexIdentity else {
+                    throw DictionaryCatalogValidationError
+                        .invalidPublishedIndexBinding("missing")
+                }
+                guard relativePaths.index == publishedIndexIdentity.relativePath else {
+                    throw DictionaryCatalogValidationError
+                        .invalidPublishedIndexBinding("path")
+                }
+                guard indexMetadata.schemaVersion == publishedIndexIdentity.schemaVersion else {
+                    throw DictionaryCatalogValidationError
+                        .invalidPublishedIndexBinding("schema")
+                }
+                guard indexMetadata.entryCount == publishedIndexIdentity.entryCount else {
+                    throw DictionaryCatalogValidationError
+                        .invalidPublishedIndexBinding("entryCount")
+                }
+                guard indexMetadata.indexFileSize == publishedIndexIdentity.indexFileSize else {
+                    throw DictionaryCatalogValidationError
+                        .invalidPublishedIndexBinding("indexSize")
+                }
+                guard indexMetadata.sourceFileSize == publishedIndexIdentity.sourceFileSize else {
+                    throw DictionaryCatalogValidationError
+                        .invalidPublishedIndexBinding("sourceSize")
+                }
+                guard indexMetadata.sourceSHA256?.lowercased() ==
+                        publishedIndexIdentity.sourceSHA256 else {
+                    throw DictionaryCatalogValidationError
+                        .invalidPublishedIndexBinding("sourceSHA")
+                }
+                try publishedIndexIdentity.validate(dictionaryID: dictionaryID)
+            } else if relativePaths.index != nil || publishedIndexIdentity != nil {
+                throw DictionaryCatalogValidationError.invalidPublishedIndexIdentity
+            }
+        }
     }
 }
 
 struct DictionaryCatalog: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     var schemaVersion: Int
     var createdAt: Date
@@ -361,6 +427,9 @@ enum DictionaryCatalogValidationError: LocalizedError {
     case invalidStorageOwnership
     case invalidOpenResourceMetadata
     case duplicateOpenResourceID
+    case invalidPublishedIndexIdentity
+    case invalidPublishedIndexFields
+    case invalidPublishedIndexBinding(String)
 
     var errorDescription: String? {
         switch self {
@@ -371,6 +440,10 @@ enum DictionaryCatalogValidationError: LocalizedError {
         case .invalidStorageOwnership: return "词典目录包含不兼容的存储所有权。"
         case .invalidOpenResourceMetadata: return "开放词典安装身份无效。"
         case .duplicateOpenResourceID: return "开放词典资源已存在安装实例。"
+        case .invalidPublishedIndexIdentity: return "托管词典的已发布索引身份无效。"
+        case .invalidPublishedIndexFields: return "托管词典的已发布索引字段无效。"
+        case .invalidPublishedIndexBinding(let field):
+            return "托管词典的索引元数据绑定无效：\(field)。"
         }
     }
 }

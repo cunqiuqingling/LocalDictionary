@@ -5,7 +5,7 @@ An open resource has two deliberately separate authorities:
 - `resource-installation.json` is the immutable, verified installation identity. It records the
   local installation UUID, signed resource/manifest identity, payload hash and byte count,
   formatter, language and licence metadata. It never records lifecycle or query settings.
-- Catalog v2 is the mutable lifecycle authority. Its first installed record is a disabled,
+- Catalog v3 is the mutable lifecycle authority. Its first installed record is a disabled,
   fallback, `pendingIndex` `openResource` descriptor with
   `appManagedOpenResource` ownership.
 
@@ -24,9 +24,13 @@ and the operation reports a recoverable post-publication error. D1b-3B-2B startu
 now revalidates and registers that final orphan as disabled / fallback / pending-index when its full
 payload identity remains valid.
 
-Catalog v2 uses `catalog-v2.json` and `catalog-v2.backup.json`. It preserves v1 files without
-rewriting them, explicitly migrates legacy and locally imported descriptors in memory, and rejects
-v1 open-resource records because they do not carry a trusted receipt identity.
+Catalog v3 retains the existing `catalog-v2.json` and
+`catalog-v2.backup.json` authority slots so migration is coordinated through
+one primary/backup pair. It preserves older evidence, migrates v1/v2 purely
+from Catalog bytes, and downgrades any app-managed ready/indexing descriptor
+to `pendingIndex` because the older schema cannot prove a sealed publication.
+Open-resource installation itself still begins as pending and does not invent
+index identity from the receipt.
 
 ## R1 transaction and publication rules
 

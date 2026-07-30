@@ -18,12 +18,28 @@ Catalog transaction and one explicit disposition publish available, suspended, o
 exclusive operations are FIFO per dictionary; cancellation removes a waiter and shutdown resumes
 all queued waiters with a fixed error. Different dictionary IDs remain independent.
 
-Runtime cache identity is `(dictionaryID, generation)`. Removal or a successful index publication
-increments generation after its drain; old cache entries are not used by a later lease. This is a
-process-local safety boundary, not a cross-process SQLite file-identity guarantee. A Catalog
-transition never clears a runtime while an old query lease is active; after the final lease for a
-stale generation releases, only that `(dictionaryID, generation)` cache entry is evicted. fd-bound source
-and index identity remain D1b-3B-3.
+Runtime cache identity is `(dictionaryID, generation, indexPublicationID,
+indexSHA256)`. Removal or a successful index publication increments generation
+after its drain; a later publication cannot reuse an old runtime even if other
+descriptor fields happen to match. A Catalog transition never clears a runtime
+while an old query lease is active; after the final lease for a stale
+generation releases, only that exact cache entry is evicted.
+
+An app-managed runtime opens the source and versioned final index from the
+controlled root with component-by-component, no-follow descriptor
+capabilities. Source size/SHA and ancestor/name binding must match Catalog v3.
+The index must be a `0400`, single-link regular file whose size/SHA, publication
+ID, dictionary ID, source identity, schema and actual entry count all match the
+same Catalog identity. SQLite opens the index only through the production
+fd-bound read-only VFS; no managed query path calls the default SQLite VFS or
+falls back to a disk pathname. The bridge retains both capabilities for the
+runtime lifetime and rechecks their descriptor and name bindings on every
+lookup, including cache hits.
+
+An identity mismatch is a typed fail-closed result. After the current lease is
+released, query coordination evicts the affected runtimes and publishes a
+suspended generation before final batch validation. It never returns the
+possibly stale lookup and never repairs Catalog while holding a query lease.
 
 Lookup order is unchanged for existing dictionaries: preferred legacy sources first, then eligible
 `managedLocal` descriptors. Only after that tier has no hits may an eligible app-managed
@@ -41,3 +57,9 @@ dictionary-wide protocol default; every runtime explicitly implements it. Misses
 errors are isolated and never auto-trigger AI. Both managed tiers use the existing generic MDict
 sanitizer, so no raw HTML, scripts, external resources, receipt contents, or paths enter the display
 result.
+
+The production VFS keeps mmap disabled and rejects write, create, auxiliary
+database, journal, WAL and SHM operations. Its whole-file shared `fcntl` lock
+is not equivalent to the default Unix VFS byte-range locking protocol. The
+design does not claim to defeat an arbitrary malicious same-UID process that
+continually writes an already-open inode.

@@ -59,6 +59,8 @@ struct ManagedDictionaryRuntimeIdentity: Equatable, Sendable {
     let sourceDigest: String?
     let sourceFileSize: UInt64?
     let indexFileSize: UInt64?
+    let indexPublicationID: String?
+    let indexDigest: String?
     let formatterIdentifier: String
 
     init(_ descriptor: DictionaryDescriptor) {
@@ -73,6 +75,8 @@ struct ManagedDictionaryRuntimeIdentity: Equatable, Sendable {
         sourceDigest = descriptor.indexMetadata.sourceSHA256
         sourceFileSize = descriptor.indexMetadata.sourceFileSize
         indexFileSize = descriptor.indexMetadata.indexFileSize
+        indexPublicationID = descriptor.publishedIndexIdentity?.indexPublicationID
+        indexDigest = descriptor.publishedIndexIdentity?.indexSHA256
         formatterIdentifier = descriptor.formatterIdentifier
     }
 }

@@ -148,7 +148,10 @@ private func writeOpenDirectory(parent: URL,
 private func openDescriptor(_ identity: OpenResourceInstallationIdentity,
                             state: DictionaryState = .pendingIndex,
                             enabled: Bool = true) -> DictionaryDescriptor {
-    DictionaryDescriptor(
+    let publicationID = "00000000-0000-0000-0000-000000000003"
+    let indexPath =
+        "Dictionaries/\(identity.dictionaryID)/index/dictionary.\(publicationID).sqlite"
+    return DictionaryDescriptor(
         dictionaryID: identity.dictionaryID,
         displayName: identity.resourceID,
         sourceKind: .openResource,
@@ -171,20 +174,34 @@ private func openDescriptor(_ identity: OpenResourceInstallationIdentity,
             dictionary: "Dictionaries/\(identity.dictionaryID)/payload.mdx",
             resources: [],
             index: state == .ready
-                ? "Dictionaries/\(identity.dictionaryID)/index/dictionary.sqlite"
+                ? indexPath
                 : nil
         ),
         createdAt: fixedDate,
         updatedAt: fixedDate,
         storageOwnership: .appManagedOpenResource,
-        openResourceMetadata: identity.catalogMetadata
+        openResourceMetadata: identity.catalogMetadata,
+        publishedIndexIdentity: state == .ready ? PublishedIndexIdentity(
+            indexPublicationID: publicationID,
+            indexSHA256: String(repeating: "b", count: 64),
+            indexFileSize: 6,
+            sourceSHA256: identity.payloadSHA256,
+            sourceFileSize: identity.payloadBytes,
+            schemaVersion: 1,
+            entryCount: 3,
+            indexedAt: fixedDate,
+            relativePath: indexPath
+        ) : nil
     )
 }
 
 private func managedDescriptor(_ dictionaryID: String,
                                state: DictionaryState,
                                source: Data) -> DictionaryDescriptor {
-    DictionaryDescriptor(
+    let publicationID = "00000000-0000-0000-0000-000000000003"
+    let indexPath =
+        "Dictionaries/\(dictionaryID)/index/dictionary.\(publicationID).sqlite"
+    return DictionaryDescriptor(
         dictionaryID: dictionaryID,
         displayName: "Managed \(dictionaryID)",
         sourceKind: .managedLocal,
@@ -207,13 +224,24 @@ private func managedDescriptor(_ dictionaryID: String,
             dictionary: "Dictionaries/\(dictionaryID)/dictionary.mdx",
             resources: [],
             index: state == .ready
-                ? "Dictionaries/\(dictionaryID)/index/dictionary.sqlite"
+                ? indexPath
                 : nil
         ),
         createdAt: fixedDate,
         updatedAt: fixedDate,
         storageOwnership: .appManagedImported,
-        openResourceMetadata: nil
+        openResourceMetadata: nil,
+        publishedIndexIdentity: state == .ready ? PublishedIndexIdentity(
+            indexPublicationID: publicationID,
+            indexSHA256: String(repeating: "b", count: 64),
+            indexFileSize: 6,
+            sourceSHA256: digest(source),
+            sourceFileSize: UInt64(source.count),
+            schemaVersion: 1,
+            entryCount: 2,
+            indexedAt: fixedDate,
+            relativePath: indexPath
+        ) : nil
     )
 }
 
@@ -919,7 +947,11 @@ private func testFinalAndIndexRecovery(base: URL, smoke: inout Smoke) async thro
     try writeManagedDirectory(root: root, descriptor: readyMissing, source: source)
     try writeManagedDirectory(
         root: root, descriptor: pendingWithFinal, source: source,
-        indexFiles: ["dictionary.sqlite"]
+        indexFiles: [
+            "dictionary.sqlite",
+            "dictionary.00000000-0000-0000-0000-000000000003.sqlite",
+            ".dictionary.00000000-0000-0000-0000-000000000004.candidate"
+        ]
     )
     let missingPayload = Data("missing open".utf8)
     let missingIdentity = try makeIdentity(
@@ -976,6 +1008,25 @@ private func testFinalAndIndexRecovery(base: URL, smoke: inout Smoke) async thro
                     values[readyMissing.dictionaryID]?.relativePaths.index == nil)
     try smoke.check("pending final not promoted", category: \.catalogTransactions,
                     values[pendingWithFinal.dictionaryID]?.state == .pendingIndex)
+    let pendingIndexDirectory = root.appendingPathComponent(
+        "Dictionaries/\(pendingWithFinal.dictionaryID)/index"
+    )
+    try smoke.check(
+        "versioned orphan final preserved", category: \.posix,
+        FileManager.default.fileExists(
+            atPath: pendingIndexDirectory.appendingPathComponent(
+                "dictionary.00000000-0000-0000-0000-000000000003.sqlite"
+            ).path
+        )
+    )
+    try smoke.check(
+        "versioned candidate preserved", category: \.posix,
+        FileManager.default.fileExists(
+            atPath: pendingIndexDirectory.appendingPathComponent(
+                ".dictionary.00000000-0000-0000-0000-000000000004.candidate"
+            ).path
+        )
+    )
     try smoke.check("missing owned disabled", category: \.catalogTransactions,
                     values[missing.dictionaryID]?.state == .missingResources &&
                     values[missing.dictionaryID]?.enabled == false)

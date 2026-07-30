@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import SQLite3
 import Synchronization
@@ -23,12 +24,13 @@ private final class ScriptedBuilder: Sendable {
         self.builders = Mutex(builders)
     }
 
-    func next(source: DictionaryIndexSourceCapability, index: URL,
+    func next(source: DictionaryIndexSourceCapability,
+              request: DictionaryIndexBuildRequest,
               token: DictionaryIndexCancellationToken) -> DictionaryIndexBuildOutcome {
         let builder = builders.withLock { builders in
             builders.isEmpty ? nil : builders.removeFirst()
         }
-        return builder?(source, index, token) ?? .failure("测试 Builder 已耗尽。")
+        return builder?(source, request, token) ?? .failure("测试 Builder 已耗尽。")
     }
 }
 
@@ -71,8 +73,92 @@ private func execute(_ database: OpaquePointer, _ sql: String) throws {
     }
 }
 
+private final class SyntheticCandidateState: @unchecked Sendable {
+    let candidate: URL
+    let final: URL
+    var current: URL
+
+    init(candidate: URL, final: URL) {
+        self.candidate = candidate
+        self.final = final
+        current = candidate
+    }
+}
+
+private let syntheticCandidateFactory: DictionaryIndexCandidateFactory = { plan in
+    let candidate = plan.indexDirectoryURL.appendingPathComponent(plan.candidateName)
+    let final = plan.indexDirectoryURL.appendingPathComponent(plan.finalName)
+    guard FileManager.default.createFile(
+        atPath: candidate.path, contents: Data(), attributes: [.posixPermissions: 0o600]
+    ) else {
+        throw DictionaryIndexError.candidateCreationFailed
+    }
+    let state = SyntheticCandidateState(candidate: candidate, final: final)
+    return DictionaryIndexCandidateCapability(
+        publicationID: plan.publicationID,
+        candidateIndexURL: candidate,
+        finalName: plan.finalName,
+        storage: state,
+        seal: { expectedCount in
+            var database: OpaquePointer?
+            guard sqlite3_open_v2(
+                candidate.path, &database,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil
+            ) == SQLITE_OK, let database else {
+                if let database { sqlite3_close(database) }
+                throw DictionaryIndexError.invalidSQLite
+            }
+            defer { sqlite3_close(database) }
+            guard sqliteText(database, "PRAGMA integrity_check") == "ok" else {
+                throw DictionaryIndexError.integrityCheckFailed
+            }
+            guard sqliteText(database,
+                    "SELECT value FROM metadata WHERE key='schema_version' LIMIT 1"
+                  ) == String(plan.expectedSchemaVersion),
+                  sqliteText(database, "SELECT COUNT(*) FROM entries") ==
+                    String(expectedCount) else {
+                throw DictionaryIndexError.indexIdentityMismatch
+            }
+            let data = try Data(contentsOf: candidate)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o400], ofItemAtPath: candidate.path
+            )
+            return DictionaryIndexSealResult(
+                entryCount: expectedCount,
+                indexFileSize: UInt64(data.count),
+                indexSHA256: sha256(data)
+            )
+        },
+        publish: {
+            guard candidate.path.withCString({ source in
+                final.path.withCString { destination in
+                    Darwin.renameatx_np(
+                        AT_FDCWD, source, AT_FDCWD, destination, UInt32(RENAME_EXCL)
+                    )
+                }
+            }) == 0 else {
+                throw DictionaryIndexError.publicationFailed
+            }
+            state.current = final
+        },
+        discard: { try? FileManager.default.removeItem(at: state.current) },
+        commit: {}
+    )
+}
+
+private func sqliteText(_ database: OpaquePointer, _ sql: String) -> String? {
+    var statement: OpaquePointer?
+    guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+          let statement else { return nil }
+    defer { sqlite3_finalize(statement) }
+    guard sqlite3_step(statement) == SQLITE_ROW,
+          let text = sqlite3_column_text(statement, 0) else { return nil }
+    return String(cString: text)
+}
+
 private func validBuilder(entries: Int = 3) -> DictionaryIndexBuildFunction {
-    { _, indexURL, token in
+    { _, request, token in
+        let indexURL = request.candidateIndexURL
         if token.isCancelled { return .cancelled }
         var database: OpaquePointer?
         guard sqlite3_open_v2(indexURL.path, &database,
@@ -95,10 +181,12 @@ private func validBuilder(entries: Int = 3) -> DictionaryIndexBuildFunction {
 }
 
 private func invalidIntegrityBuilder() -> DictionaryIndexBuildFunction {
-    { source, index, token in
-        let outcome = validBuilder()(source, index, token)
+    { source, request, token in
+        let outcome = validBuilder()(source, request, token)
         guard case .success = outcome else { return outcome }
-        guard let handle = try? FileHandle(forWritingTo: index) else {
+        guard let handle = try? FileHandle(
+            forWritingTo: request.candidateIndexURL
+        ) else {
             return .failure("无法损坏测试索引。")
         }
         defer { try? handle.close() }
@@ -195,6 +283,7 @@ private struct Fixture {
             applicationSupportRootURL: root,
             openSource: openSource,
             buildIndex: builder,
+            createCandidate: syntheticCandidateFactory,
             expectedSchemaVersion: 1,
             hooks: DictionaryIndexingHooks(
                 availableCapacity: { _ in capacity },
@@ -228,13 +317,18 @@ private func testSuccessfulStateMachine() async throws {
                "pendingIndex should start")
     try await waitUntilIdle(coordinator)
     let descriptor = coordinator.catalog.dictionaries[0]
-    try expect(descriptor.state == .ready, "successful index should become ready")
+    try expect(
+        descriptor.state == .ready,
+        "successful index should become ready: " +
+            (coordinator.failureMessage(for: fixture.dictionaryID) ?? "no failure")
+    )
     try expect(descriptor.indexMetadata.entryCount == 4, "entry count should be validated")
     try expect(descriptor.indexMetadata.schemaVersion == 1, "schema should be recorded")
     try expect(descriptor.indexMetadata.indexFileSize ?? 0 > 0, "index size should be recorded")
-    try expect(descriptor.relativePaths.index ==
-               "Dictionaries/\(fixture.dictionaryID)/index/dictionary.sqlite",
-               "Catalog index path must be relative")
+    try expect(descriptor.relativePaths.index?.hasPrefix(
+        "Dictionaries/\(fixture.dictionaryID)/index/dictionary."
+    ) == true && descriptor.relativePaths.index?.hasSuffix(".sqlite") == true,
+               "Catalog index path must be versioned and relative")
     try expect(!(descriptor.relativePaths.index?.hasPrefix("/") ?? true),
                "Catalog must not store an absolute index path")
     try expect(fixture.catalogStore.load().dictionaries.first?.state == .ready,
@@ -254,8 +348,8 @@ private func testFailureAndRetry() async throws {
     let scripted = ScriptedBuilder([
         { _, _, _ in .failure("测试构建失败。") }, validBuilder(entries: 2)
     ])
-    let coordinator = fixture.coordinator(builder: { source, index, token in
-        scripted.next(source: source, index: index, token: token)
+    let coordinator = fixture.coordinator(builder: { source, request, token in
+        scripted.next(source: source, request: request, token: token)
     })
     try expect(coordinator.start(dictionaryID: fixture.dictionaryID) == .started,
                "failed test should start")
@@ -293,6 +387,7 @@ private func testCancellationAndConcurrency() async throws {
         applicationSupportRootURL: first.root,
         openSource: syntheticSourceOpener(),
         buildIndex: blockingBuilder(),
+        createCandidate: syntheticCandidateFactory,
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max },
                                        beforePublish: {})
@@ -409,9 +504,9 @@ private func testPlanUsesLatestDescriptorAfterPermit() async throws {
         dictionaries: [deletionActive]
     ))
     let buildCount = Mutex(0)
-    let deletionCoordinator = deletion.coordinator(builder: { source, index, token in
+    let deletionCoordinator = deletion.coordinator(builder: { source, request, token in
         buildCount.withLock { $0 += 1 }
-        return validBuilder()(source, index, token)
+        return validBuilder()(source, request, token)
     }, lifecycleCoordinator: deletionLifecycle)
     let deletionLease = try await deletionLifecycle.acquireQueryLease(for: deletion.dictionaryID)
     try expect(deletionCoordinator.start(dictionaryID: deletion.dictionaryID) == .started,
@@ -449,6 +544,7 @@ private func testDisabledReadyPublishesSuspended() async throws {
         applicationSupportRootURL: fixture.root,
         openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
+        createCandidate: syntheticCandidateFactory,
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max }, beforePublish: {}),
         lifecycleCoordinator: lifecycle
@@ -569,9 +665,9 @@ private func testSourceOpensBeforeRuntimeInvalidation() async throws {
     let opener = syntheticSourceOpener { _ in
         events.withLock { $0.append("source") }
     }
-    let builder: DictionaryIndexBuildFunction = { source, index, token in
+    let builder: DictionaryIndexBuildFunction = { source, request, token in
         events.withLock { $0.append("build") }
-        return validBuilder(entries: 2)(source, index, token)
+        return validBuilder(entries: 2)(source, request, token)
     }
     let coordinator = fixture.coordinator(
         builder: builder,
@@ -680,6 +776,7 @@ private func testOwnershipPolicyEligibility() async throws {
         applicationSupportRootURL: root,
         openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
+        createCandidate: syntheticCandidateFactory,
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(
             availableCapacity: { _ in UInt64.max }, beforePublish: {}
@@ -707,6 +804,7 @@ private func testOwnershipPolicyEligibility() async throws {
         applicationSupportRootURL: root,
         openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
+        createCandidate: syntheticCandidateFactory,
         expectedSchemaVersion: 1
     )
     if case .unavailable = externalCoordinator.start(dictionaryID: dictionaryID) {
@@ -772,6 +870,7 @@ private func testB1B2B3Compatibility() async throws {
         applicationSupportRootURL: root,
         openSource: syntheticSourceOpener(),
         buildIndex: validBuilder(entries: 2),
+        createCandidate: syntheticCandidateFactory,
         expectedSchemaVersion: 1,
         hooks: DictionaryIndexingHooks(availableCapacity: { _ in UInt64.max },
                                        beforePublish: {})
@@ -787,8 +886,7 @@ private func testB1B2B3Compatibility() async throws {
     ).validate(ready)
     try expect(plan.dictionaryID == fixedID.uuidString.lowercased(),
                "B1 root layout and legacy formatter should pass B3 validation")
-    try expect(plan.sourceURL.standardizedFileURL ==
-               root.appendingPathComponent(ready.relativePaths.dictionary!).standardizedFileURL,
+    try expect(plan.sourceRelativePath == ready.relativePaths.dictionary,
                "B3 validation must preserve the imported B1 managed MDX location")
 }
 

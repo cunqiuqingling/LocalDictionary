@@ -1,5 +1,6 @@
 #include "SQLiteDictionaryCore.h"
 
+#include "FDBoundSQLiteReadOnlyVFS.h"
 #include "mdict.h"
 
 #include <sqlite3.h>
@@ -77,6 +78,51 @@ void bindText(sqlite3_stmt *statement, int position, const std::string &value) {
                                 static_cast<int>(value.size()), SQLITE_TRANSIENT),
               sqlite3_db_handle(statement), "bind text");
 }
+
+std::string metadataValue(sqlite3 *database, const char *key) {
+  sqlite3_stmt *statement = nullptr;
+  checkSQLite(sqlite3_prepare_v2(
+                  database,
+                  "SELECT value FROM metadata WHERE key=?1 LIMIT 1",
+                  -1, &statement, nullptr),
+              database, "prepare metadata query");
+  sqlite3_bind_text(statement, 1, key, -1, SQLITE_STATIC);
+  std::string value;
+  if (sqlite3_step(statement) == SQLITE_ROW) {
+    const auto *text = sqlite3_column_text(statement, 0);
+    if (text) value = reinterpret_cast<const char *>(text);
+  }
+  sqlite3_finalize(statement);
+  return value;
+}
+
+void validateTableColumns(
+    sqlite3 *database, const char *table,
+    const std::vector<std::pair<std::string, std::string>> &expected) {
+  const std::string sql = "PRAGMA table_info('" + std::string(table) + "')";
+  sqlite3_stmt *statement = nullptr;
+  checkSQLite(sqlite3_prepare_v2(database, sql.c_str(), -1, &statement,
+                                nullptr),
+              database, "prepare schema inspection");
+  std::size_t position = 0;
+  while (sqlite3_step(statement) == SQLITE_ROW) {
+    const auto *name = sqlite3_column_text(statement, 1);
+    const auto *type = sqlite3_column_text(statement, 2);
+    if (position >= expected.size() || !name || !type ||
+        expected[position].first !=
+            reinterpret_cast<const char *>(name) ||
+        expected[position].second !=
+            reinterpret_cast<const char *>(type)) {
+      sqlite3_finalize(statement);
+      throw std::runtime_error("Managed dictionary index schema mismatch");
+    }
+    ++position;
+  }
+  sqlite3_finalize(statement);
+  if (position != expected.size()) {
+    throw std::runtime_error("Managed dictionary index schema mismatch");
+  }
+}
 }  // namespace
 
 SQLiteDictionaryCore::SQLiteDictionaryCore(std::string dictionary_path,
@@ -146,6 +192,7 @@ IndexBuildResult SQLiteDictionaryCore::buildIndex(
   auto source = std::make_unique<mdict::Mdict>(dictionary_path_);
   return buildIndexWithSource(
       std::move(source), sourceMetadata(dictionary_path_),
+      nullptr, false,
       cancellation_check);
 }
 
@@ -155,12 +202,25 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexFromFileDescriptor(
   auto source = mdict::Mdict::fromFileDescriptor(
       source_descriptor, mdict::MdictInputKind::mdx);
   return buildIndexWithSource(
-      std::move(source), source_metadata, cancellation_check);
+      std::move(source), source_metadata, nullptr, false, cancellation_check);
+}
+
+IndexBuildResult SQLiteDictionaryCore::buildManagedIndexFromFileDescriptor(
+    int source_descriptor, const IndexSourceMetadata &source_metadata,
+    const PublishedIndexMetadata &published_metadata,
+    const std::function<bool()> &cancellation_check) {
+  auto source = mdict::Mdict::fromFileDescriptor(
+      source_descriptor, mdict::MdictInputKind::mdx);
+  return buildIndexWithSource(std::move(source), source_metadata,
+                              &published_metadata, true,
+                              cancellation_check);
 }
 
 IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
     std::unique_ptr<mdict::Mdict> source_owner,
     const IndexSourceMetadata &source_metadata,
+    const PublishedIndexMetadata *published_metadata,
+    bool use_precreated_destination,
     const std::function<bool()> &cancellation_check) {
   const auto cancelled = [&cancellation_check]() {
     return cancellation_check && cancellation_check();
@@ -168,9 +228,13 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
   if (cancelled()) throw IndexBuildCancelled();
   const std::filesystem::path index_path(index_path_);
   std::filesystem::create_directories(index_path.parent_path());
-  const std::filesystem::path temporary_path = index_path.string() + ".building";
+  const std::filesystem::path temporary_path =
+      use_precreated_destination ? index_path
+                                 : std::filesystem::path(index_path.string() + ".building");
   std::error_code ignored;
-  std::filesystem::remove(temporary_path, ignored);
+  if (!use_precreated_destination) {
+    std::filesystem::remove(temporary_path, ignored);
+  }
 
   mdict::Mdict &source = *source_owner;
   source.init();
@@ -184,7 +248,8 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
 
   sqlite3 *database = nullptr;
   checkSQLite(sqlite3_open_v2(temporary_path.c_str(), &database,
-                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                              SQLITE_OPEN_READWRITE |
+                                  (use_precreated_destination ? 0 : SQLITE_OPEN_CREATE) |
                                   SQLITE_OPEN_FULLMUTEX,
                               nullptr),
               database, "create index database");
@@ -208,6 +273,7 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
                     "VALUES(?1, ?2, ?3, ?4)",
                     -1, &insert_entry, nullptr),
                 database, "prepare entry insert");
+    uint64_t inserted_entry_count = 0;
     for (size_t i = 0; i < keys.size(); ++i) {
       if ((i & 0xff) == 0 && cancelled()) throw IndexBuildCancelled();
       if (!keys[i]) continue;
@@ -226,6 +292,7 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
       sqlite3_bind_int64(insert_entry, 3, static_cast<sqlite3_int64>(start));
       sqlite3_bind_int64(insert_entry, 4, static_cast<sqlite3_int64>(end));
       checkSQLite(sqlite3_step(insert_entry), database, "insert entry");
+      ++inserted_entry_count;
       sqlite3_reset(insert_entry);
       sqlite3_clear_bindings(insert_entry);
     }
@@ -244,7 +311,7 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
          signedNumberString(source_metadata.modified_nanoseconds)},
         {"source_inode", numberString(source_metadata.inode)},
         {"source_device", numberString(source_metadata.device)},
-        {"entry_count", numberString(keys.size())},
+        {"entry_count", numberString(inserted_entry_count)},
         {"engine_version", std::to_string(source.engineVersion())},
         {"encoding", "UTF-8"}};
     sqlite3_stmt *insert_metadata = nullptr;
@@ -259,6 +326,22 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
       sqlite3_reset(insert_metadata);
       sqlite3_clear_bindings(insert_metadata);
     }
+    if (published_metadata) {
+      const std::pair<std::string, std::string> published_values[] = {
+          {"dictionary_id", published_metadata->dictionary_id},
+          {"publication_id", published_metadata->publication_id},
+          {"source_sha256", published_metadata->source_sha256},
+          {"builder_format_version",
+           published_metadata->builder_format_version}};
+      for (const auto &item : published_values) {
+        bindText(insert_metadata, 1, item.first);
+        bindText(insert_metadata, 2, item.second);
+        checkSQLite(sqlite3_step(insert_metadata), database,
+                    "insert published metadata");
+        sqlite3_reset(insert_metadata);
+        sqlite3_clear_bindings(insert_metadata);
+      }
+    }
     sqlite3_finalize(insert_metadata);
     if (cancelled()) throw IndexBuildCancelled();
     execute(database, "COMMIT");
@@ -269,12 +352,16 @@ IndexBuildResult SQLiteDictionaryCore::buildIndexWithSource(
     database = nullptr;
 
     if (cancelled()) throw IndexBuildCancelled();
-    std::filesystem::remove(index_path, ignored);
-    std::filesystem::rename(temporary_path, index_path);
-    return IndexBuildResult{static_cast<uint64_t>(keys.size())};
+    if (!use_precreated_destination) {
+      std::filesystem::remove(index_path, ignored);
+      std::filesystem::rename(temporary_path, index_path);
+    }
+    return IndexBuildResult{inserted_entry_count};
   } catch (...) {
     if (database) sqlite3_close(database);
-    std::filesystem::remove(temporary_path, ignored);
+    if (!use_precreated_destination) {
+      std::filesystem::remove(temporary_path, ignored);
+    }
     throw;
   }
 }
@@ -288,6 +375,12 @@ void SQLiteDictionaryCore::openReadOnlyIndex() {
                               nullptr),
               database_, "open read-only index");
   execute(database_, "PRAGMA query_only=ON");
+  validateTableColumns(
+      database_, "metadata", {{"key", "TEXT"}, {"value", "TEXT"}});
+  validateTableColumns(
+      database_, "entries",
+      {{"id", "INTEGER"}, {"headword", "TEXT"}, {"folded", "TEXT"},
+       {"record_start", "INTEGER"}, {"record_end", "INTEGER"}});
 }
 
 IndexOpenResult SQLiteDictionaryCore::openExistingReadOnly() {
@@ -328,6 +421,71 @@ IndexOpenResult SQLiteDictionaryCore::openExistingReadOnly() {
     result.entry_count = static_cast<uint64_t>(sqlite3_column_int64(statement, 0));
   }
   sqlite3_finalize(statement);
+  result.startup_milliseconds = milliseconds(total_start, Clock::now());
+  return result;
+}
+
+IndexOpenResult SQLiteDictionaryCore::openManagedReadOnly(
+    int source_descriptor,
+    const fdsqlite::FDBoundReadOnlyFileCapability &index_capability,
+    const PublishedIndexMetadata &expected_metadata) {
+  const auto total_start = Clock::now();
+  closeDatabase();
+  if (fdsqlite::EnsureFDBoundReadOnlyVFSRegistered() != SQLITE_OK) {
+    throw std::runtime_error("Cannot register fd-bound SQLite VFS");
+  }
+  fdsqlite::FDBoundRegisteredToken token(index_capability);
+  checkSQLite(sqlite3_open_v2(
+                  token.value().c_str(), &database_,
+                  SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                  fdsqlite::FDBoundReadOnlyVFSName()),
+              database_, "open fd-bound read-only index");
+  execute(database_, "PRAGMA query_only=ON");
+  validateTableColumns(
+      database_, "metadata", {{"key", "TEXT"}, {"value", "TEXT"}});
+  validateTableColumns(
+      database_, "entries",
+      {{"id", "INTEGER"}, {"headword", "TEXT"}, {"folded", "TEXT"},
+       {"record_start", "INTEGER"}, {"record_end", "INTEGER"}});
+  const std::pair<const char *, std::string> expected[] = {
+      {"dictionary_id", expected_metadata.dictionary_id},
+      {"publication_id", expected_metadata.publication_id},
+      {"source_sha256", expected_metadata.source_sha256},
+      {"source_size", numberString(expected_metadata.source_size)},
+      {"schema_version", std::to_string(expected_metadata.schema_version)},
+      {"entry_count", numberString(expected_metadata.entry_count)},
+      {"builder_format_version", expected_metadata.builder_format_version}};
+  for (const auto &item : expected) {
+    if (metadataValue(database_, item.first) != item.second) {
+      closeDatabase();
+      throw std::runtime_error("Managed dictionary index metadata mismatch");
+    }
+  }
+  sqlite3_stmt *statement = nullptr;
+  checkSQLite(sqlite3_prepare_v2(database_, "SELECT COUNT(*) FROM entries", -1,
+                                &statement, nullptr),
+              database_, "prepare entry count");
+  uint64_t actual_entry_count = 0;
+  if (sqlite3_step(statement) == SQLITE_ROW) {
+    actual_entry_count =
+        static_cast<uint64_t>(sqlite3_column_int64(statement, 0));
+  }
+  sqlite3_finalize(statement);
+  if (actual_entry_count != expected_metadata.entry_count) {
+    closeDatabase();
+    throw std::runtime_error("Managed dictionary entry count mismatch");
+  }
+  auto dictionary = mdict::Mdict::fromFileDescriptor(
+      source_descriptor, mdict::MdictInputKind::mdx);
+  dictionary->initMetadataOnly();
+  if (metadataValue(database_, "engine_version") !=
+      std::to_string(dictionary->engineVersion())) {
+    closeDatabase();
+    throw std::runtime_error("Managed dictionary engine metadata mismatch");
+  }
+  dictionary_ = std::move(dictionary);
+  IndexOpenResult result;
+  result.entry_count = actual_entry_count;
   result.startup_milliseconds = milliseconds(total_start, Clock::now());
   return result;
 }

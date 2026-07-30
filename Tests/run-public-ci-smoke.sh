@@ -39,6 +39,8 @@ PUBLIC_TESTS=(
   Tests/run-dictionary-catalog-smoke.sh
   Tests/run-dictionary-import-smoke.sh
   Tests/run-dictionary-indexing-smoke.sh
+  Tests/run-fd-bound-sqlite-vfs-prototype-smoke.sh
+  Tests/run-fd-bound-mdict-source-prototype-smoke.sh
   Tests/run-managed-source-indexing-production-smoke.sh
   Tests/run-managed-dictionary-query-smoke.sh
   Tests/run-managed-dictionary-lifecycle-coordination-smoke.sh
@@ -51,6 +53,16 @@ PUBLIC_TESTS=(
 )
 
 QUERY_SOURCE="$ROOT/App/ManagedDictionaryQueryModels.swift"
+QUERY_RUNTIME="$ROOT/App/ManagedDictionaryQueryRuntime.swift"
+INDEX_ADAPTER="$ROOT/App/DictionaryIndexBuilderAdapter.swift"
+INDEX_SERVICE="$ROOT/App/DictionaryIndexingService.swift"
+BRIDGE_SOURCE="$ROOT/App/DictionaryCoreBridge.mm"
+CATALOG_MODEL="$ROOT/App/DictionaryCatalog.swift"
+CATALOG_STORE="$ROOT/App/DictionaryCatalogStore.swift"
+RECONCILIATION_SOURCE="$ROOT/App/OwnedDictionaryLifecycle.swift"
+STARTUP_VERIFIER="$ROOT/App/PublishedIndexIdentityAdapter.swift"
+VFS_SOURCE="$ROOT/MDictCore/FDBoundSQLiteReadOnlyVFS.cpp"
+SQLITE_CORE="$ROOT/MDictCore/SQLiteDictionaryCore.cpp"
 FINALIZATION_TAIL="$(/usr/bin/awk '
   /let finalSnapshots = await lifecycleCoordinator.queryValidationSnapshots/ {
     sawSnapshot = 1
@@ -97,7 +109,70 @@ if print -r -- "$RUNTIME_DEFAULTS" | /usr/bin/grep -q 'generation:'; then
   exit 1
 fi
 
-print "Managed query structural gates passed"
+if ! /usr/bin/grep -q 'LocalDictionarySealManagedIndex' "$INDEX_ADAPTER" ||
+   ! /usr/bin/grep -q 'LocalDictionaryPublishManagedIndex' "$INDEX_ADAPTER" ||
+   ! /usr/bin/grep -q 'openManagedReadOnly' "$SQLITE_CORE" ||
+   ! /usr/bin/grep -q 'FDBoundReadOnlyVFSName' "$SQLITE_CORE"; then
+  print -u2 "managed candidate/query chain is not bound to the production fd VFS"
+  exit 1
+fi
+
+if /usr/bin/grep -q 'sqlite3_open_v2' "$QUERY_SOURCE" "$QUERY_RUNTIME" ||
+   /usr/bin/grep -q '/dev/fd' "$BRIDGE_SOURCE" "$VFS_SOURCE" "$SQLITE_CORE" ||
+   /usr/bin/grep -q 'sqlite3_vfs_find' "$VFS_SOURCE"; then
+  print -u2 "managed production chain contains a forbidden pathname/default-VFS fallback"
+  exit 1
+fi
+
+if ! /usr/bin/grep -q 'managedReadOnlyWithRootPath' "$QUERY_RUNTIME" ||
+   ! /usr/bin/grep -q 'indexPublicationID: String' "$QUERY_RUNTIME" ||
+   ! /usr/bin/grep -q 'indexSHA256: String' "$QUERY_RUNTIME"; then
+  print -u2 "managed runtime or cache key is missing persistent publication identity"
+  exit 1
+fi
+
+if ! /usr/bin/grep -q 'static let currentSchemaVersion = 3' "$CATALOG_MODEL" ||
+   ! /usr/bin/grep -q 'guard let publishedIndexIdentity' "$CATALOG_MODEL" ||
+   ! /usr/bin/grep -Fq 'dictionary.\(publicationID).sqlite' "$INDEX_SERVICE"; then
+  print -u2 "Catalog v3 ready identity or versioned final-name gate is missing"
+  exit 1
+fi
+
+if ! /usr/bin/grep -q 'renameatx_np' "$BRIDGE_SOURCE" ||
+   ! /usr/bin/grep -q 'RENAME_EXCL' "$BRIDGE_SOURCE" ||
+   ! /usr/bin/grep -q 'NameStillMatches' "$BRIDGE_SOURCE"; then
+  print -u2 "index publication/cleanup lacks no-replace or capability-rebind enforcement"
+  exit 1
+fi
+
+MIGRATION_BODY="$(/usr/bin/awk '
+  /private func migrateV2/ { capture = 1 }
+  capture {
+    print
+    if ($0 ~ /private struct CatalogV1/) {
+      exit
+    }
+  }
+' "$CATALOG_STORE")"
+if print -r -- "$MIGRATION_BODY" | /usr/bin/grep -Eq \
+    'Data[(]contentsOf|FileManager|sqlite3|LocalDictionary|sourceURL|indexURL'; then
+  print -u2 "Catalog v2 migration performs source/index I/O"
+  exit 1
+fi
+
+if ! /usr/bin/grep -q 'isVersionedIndexEntry' "$RECONCILIATION_SOURCE" ||
+   ! /usr/bin/grep -q 'publishedIndexIdentity = nil' "$RECONCILIATION_SOURCE" ||
+   /usr/bin/grep -Eq 'LocalDictionaryOpenManagedSource|sourceRelativePath|payload\\.mdx' \
+      "$STARTUP_VERIFIER"; then
+  print -u2 "startup reconciliation promotes or reads outside the sealed index authority"
+  exit 1
+fi
+
+print "Managed sealed-index structural gates passed"
+
+if [[ "${LOCALDICTIONARY_STRUCTURAL_GATES_ONLY:-0}" == "1" ]]; then
+  exit 0
+fi
 
 for relative_test in "${PUBLIC_TESTS[@]}"; do
   print "\n=== ${relative_test} ==="

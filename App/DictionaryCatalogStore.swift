@@ -6,6 +6,7 @@ enum DictionaryCatalogLoadProvenance: Equatable, Sendable {
     case loadedPrimary
     case loadedBackup
     case migratedFromV1
+    case migratedFromV2
     case corrupt
     case unsupportedVersion
 }
@@ -87,11 +88,24 @@ final class DictionaryCatalogStore {
     func loadResult() -> DictionaryCatalogLoadResult {
         let primary = decodeV2(at: catalogURL)
         let backup = decodeV2(at: backupURL)
+        // A v3 backup beside a v2 primary is the durable migration barrier:
+        // the old primary must never regain authority after that point.
+        if schemaVersion(at: catalogURL) == 2,
+           schemaVersion(at: backupURL) == DictionaryCatalog.currentSchemaVersion,
+           case let .valid(catalog) = backup {
+            return DictionaryCatalogLoadResult(
+                catalog: catalog, provenance: .loadedBackup
+            )
+        }
         switch selectPeer(primary: primary, backup: backup) {
         case .primary(let catalog):
-            return DictionaryCatalogLoadResult(catalog: catalog, provenance: .loadedPrimary)
+            let provenance: DictionaryCatalogLoadProvenance =
+                schemaVersion(at: catalogURL) == 2 ? .migratedFromV2 : .loadedPrimary
+            return DictionaryCatalogLoadResult(catalog: catalog, provenance: provenance)
         case .backup(let catalog):
-            return DictionaryCatalogLoadResult(catalog: catalog, provenance: .loadedBackup)
+            let provenance: DictionaryCatalogLoadProvenance =
+                schemaVersion(at: backupURL) == 2 ? .migratedFromV2 : .loadedBackup
+            return DictionaryCatalogLoadResult(catalog: catalog, provenance: provenance)
         case .unsupported:
             return DictionaryCatalogLoadResult(catalog: nil, provenance: .unsupportedVersion)
         case .corrupt:
@@ -201,7 +215,7 @@ final class DictionaryCatalogStore {
             unlinkAt(directoryFD, temporaryBackup)
         }
 
-        if provenance == .loadedPrimary {
+        if provenance == .loadedPrimary || provenance == .migratedFromV2 {
             let previousData = try encoder.encode(previous.validated())
             try writeExclusive(previousData, directoryFD: directoryFD, component: temporaryBackup)
             try replace(directoryFD: directoryFD, source: temporaryBackup,
@@ -246,9 +260,54 @@ final class DictionaryCatalogStore {
         guard fileManager.fileExists(atPath: url.path) else { return .missing }
         guard let data = try? Data(contentsOf: url) else { return .corrupt }
         guard let catalog = try? decoder.decode(DictionaryCatalog.self, from: data) else { return .corrupt }
-        do { return .valid(try catalog.validated()) }
-        catch DictionaryCatalogValidationError.unsupportedSchemaVersion { return .unsupported }
-        catch { return .corrupt }
+        do {
+            switch catalog.schemaVersion {
+            case DictionaryCatalog.currentSchemaVersion:
+                return .valid(try catalog.validated())
+            case 2:
+                return .valid(try migrateV2(catalog))
+            default:
+                return .unsupported
+            }
+        } catch {
+            return .corrupt
+        }
+    }
+
+    private struct SchemaEnvelope: Decodable {
+        let schemaVersion: Int
+    }
+
+    private func schemaVersion(at url: URL) -> Int? {
+        guard let data = try? Data(contentsOf: url),
+              let envelope = try? decoder.decode(SchemaEnvelope.self, from: data)
+        else { return nil }
+        return envelope.schemaVersion
+    }
+
+    /// Catalog-only migration. It deliberately performs no source/index I/O,
+    /// hashing, rebuilding, promotion, or cleanup.
+    private func migrateV2(_ legacy: DictionaryCatalog) throws -> DictionaryCatalog {
+        var migrated = legacy
+        migrated.schemaVersion = DictionaryCatalog.currentSchemaVersion
+        for index in migrated.dictionaries.indices {
+            let policy = DictionaryOwnershipPolicy.policy(
+                for: migrated.dictionaries[index].sourceKind,
+                ownership: migrated.dictionaries[index].storageOwnership
+            )
+            guard policy?.isAppManaged == true else { continue }
+            if migrated.dictionaries[index].state == .ready ||
+                migrated.dictionaries[index].state == .indexing {
+                migrated.dictionaries[index].state = .pendingIndex
+            }
+            migrated.dictionaries[index].relativePaths.index = nil
+            migrated.dictionaries[index].indexMetadata.schemaVersion = nil
+            migrated.dictionaries[index].indexMetadata.entryCount = nil
+            migrated.dictionaries[index].indexMetadata.indexFileSize = nil
+            migrated.dictionaries[index].indexMetadata.indexedAt = nil
+            migrated.dictionaries[index].publishedIndexIdentity = nil
+        }
+        return try migrated.validated()
     }
 
     private struct CatalogV1: Codable, Equatable {
@@ -304,10 +363,12 @@ final class DictionaryCatalogStore {
                                             storageOwnership: ownership,
                                             openResourceMetadata: nil)
             }
-            let catalog = DictionaryCatalog(schemaVersion: DictionaryCatalog.currentSchemaVersion,
+            let catalog = DictionaryCatalog(schemaVersion: 2,
                                             createdAt: legacy.createdAt, updatedAt: legacy.updatedAt,
                                             dictionaries: dictionaries)
-            return DictionaryCatalogLoadResult(catalog: try catalog.validated(), provenance: .migratedFromV1)
+            return DictionaryCatalogLoadResult(
+                catalog: try migrateV2(catalog), provenance: .migratedFromV1
+            )
         } catch DictionaryCatalogStoreError.unsupportedLegacyOpenResource {
             return DictionaryCatalogLoadResult(catalog: nil, provenance: .unsupportedVersion)
         } catch { return DictionaryCatalogLoadResult(catalog: nil, provenance: .corrupt) }

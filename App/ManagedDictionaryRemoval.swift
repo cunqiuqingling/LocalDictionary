@@ -824,7 +824,11 @@ struct ManagedDictionaryRemovalWorker: Sendable {
                         return ext == "mdx" || ext == "mdd"
                     })
                 }
-                guard childEntries.isSubset(of: allowed) else {
+                guard entry != "index"
+                    ? childEntries.isSubset(of: allowed)
+                    : childEntries.allSatisfy({
+                        allowed.contains($0) || isVersionedIndexEntry($0)
+                    }) else {
                     Darwin.close(child)
                     throw ManagedDictionaryRemovalError.unsafeManagedPath
                 }
@@ -944,7 +948,7 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             "dictionary.sqlite.previous", "dictionary.sqlite-wal",
             "dictionary.sqlite-shm"
         ]
-        guard entries.isSubset(of: allowed) else {
+        guard entries.allSatisfy({ allowed.contains($0) || isVersionedIndexEntry($0) }) else {
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
         for entry in entries {
@@ -953,6 +957,20 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             )
             Darwin.close(descriptor)
         }
+    }
+
+    private func isVersionedIndexEntry(_ entry: String) -> Bool {
+        let publication: String
+        if entry.hasPrefix("dictionary."), entry.hasSuffix(".sqlite") {
+            publication = String(entry.dropFirst("dictionary.".count)
+                .dropLast(".sqlite".count))
+        } else if entry.hasPrefix(".dictionary."), entry.hasSuffix(".candidate") {
+            publication = String(entry.dropFirst(".dictionary.".count)
+                .dropLast(".candidate".count))
+        } else {
+            return false
+        }
+        return UUID(uuidString: publication)?.uuidString.lowercased() == publication
     }
 
     private static func isDirectDescendant(_ candidate: URL, of directory: URL) -> Bool {

@@ -16,17 +16,17 @@ adapter_region="$(/usr/bin/awk \
   '/let liveDictionaryIndexBuilder/,/^}/' \
   "$ROOT/App/DictionaryIndexBuilderAdapter.swift")"
 bridge_region="$(/usr/bin/awk \
-  '/LocalDictionaryBuildIndexFromManagedSource/,/^}/' \
+  '/LocalDictionaryBuildManagedIndex/,/^}/' \
   "$ROOT/App/DictionaryCoreBridge.mm")"
 core_region="$(/usr/bin/awk \
-  '/SQLiteDictionaryCore::buildIndexFromFileDescriptor/,/^}/' \
+  '/SQLiteDictionaryCore::buildManagedIndexFromFileDescriptor/,/^}/' \
   "$ROOT/MDictCore/SQLiteDictionaryCore.cpp")"
 worker_region="$(/usr/bin/awk \
   '/struct ManagedDictionaryIndexWorker/,/^}/' \
   "$ROOT/App/DictionaryIndexingService.swift")"
 
 print -r -- "$adapter_region" | /usr/bin/grep -q \
-  'LocalDictionaryBuildIndexFromManagedSource' || {
+  'LocalDictionaryBuildManagedIndex' || {
   print -u2 "managed adapter does not call the fd bridge"
   exit 1
 }
@@ -36,7 +36,7 @@ if print -r -- "$adapter_region" | /usr/bin/grep -Eq \
   exit 1
 fi
 print -r -- "$bridge_region" | /usr/bin/grep -q \
-  'buildIndexFromFileDescriptor' || {
+  'buildManagedIndexFromFileDescriptor' || {
   print -u2 "managed bridge does not call the fd core API"
   exit 1
 }
@@ -105,7 +105,7 @@ build_and_run() {
       -I"$MDICT/src/include" -I"$ROOT/ThirdParty/vendor" \
       -c "$MDICT/src/$source" -o "$directory/${source%.cc}.o"
   done
-  for source in ManagedMDictSource.cpp SQLiteDictionaryCore.cpp; do
+  for source in ManagedMDictSource.cpp FDBoundSQLiteReadOnlyVFS.cpp SQLiteDictionaryCore.cpp; do
     "$CXX" "${cxxflags[@]}" -x c++ -I"$ROOT/MDictCore" -I"$MDICT/src" \
       -I"$MDICT/src/include" -I"$ROOT/ThirdParty/vendor" \
       -c "$ROOT/MDictCore/$source" -o "$directory/${source%.cpp}.o"
@@ -122,6 +122,7 @@ build_and_run() {
 
   "$CXX" "${cxxflags[@]}" "$directory/smoke.o" "$directory/bridge.o" \
     "$directory/ManagedMDictSource.o" "$directory/SQLiteDictionaryCore.o" \
+    "$directory/FDBoundSQLiteReadOnlyVFS.o" \
     "$directory/mdict.o" "$directory/binutils.o" "$directory/adler32.o" \
     "$directory/rmd128.o" "$directory/ripemd128-adapter.o" \
     "$directory/miniz.o" "$directory/miniz_tinfl.o" \

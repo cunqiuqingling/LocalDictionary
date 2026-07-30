@@ -17,6 +17,9 @@ class Mdict;
 }
 
 namespace localdict {
+namespace fdsqlite {
+class FDBoundReadOnlyFileCapability;
+}
 
 struct IndexOpenResult {
   bool rebuilt = false;
@@ -58,6 +61,16 @@ struct IndexSourceMetadata {
   std::string source_identifier;
 };
 
+struct PublishedIndexMetadata {
+  std::string dictionary_id;
+  std::string publication_id;
+  std::string source_sha256;
+  uint64_t source_size = 0;
+  int schema_version = 0;
+  uint64_t entry_count = 0;
+  std::string builder_format_version;
+};
+
 class IndexBuildCancelled final : public std::exception {
  public:
   const char *what() const noexcept override { return "index build cancelled"; }
@@ -80,6 +93,14 @@ class SQLiteDictionaryCore {
   IndexBuildResult buildIndexFromFileDescriptor(
       int source_descriptor, const IndexSourceMetadata &source_metadata,
       const std::function<bool()> &cancellation_check = {});
+  IndexBuildResult buildManagedIndexFromFileDescriptor(
+      int source_descriptor, const IndexSourceMetadata &source_metadata,
+      const PublishedIndexMetadata &published_metadata,
+      const std::function<bool()> &cancellation_check = {});
+  IndexOpenResult openManagedReadOnly(
+      int source_descriptor,
+      const fdsqlite::FDBoundReadOnlyFileCapability &index_capability,
+      const PublishedIndexMetadata &expected_metadata);
   LookupResult lookup(const std::string &input,
                       size_t maximum_html_bytes = 0);
   CacheStats cacheStats() const;
@@ -109,6 +130,8 @@ class SQLiteDictionaryCore {
   IndexBuildResult buildIndexWithSource(
       std::unique_ptr<mdict::Mdict> source,
       const IndexSourceMetadata &source_metadata,
+      const PublishedIndexMetadata *published_metadata,
+      bool use_precreated_destination,
       const std::function<bool()> &cancellation_check);
 
   std::string dictionary_path_;

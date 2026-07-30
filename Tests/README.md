@@ -50,7 +50,7 @@ Phase 2 was exercised against the selected real Oxford MDX with the documented 2
 
 `run-multidictionary-smoke.sh` reads the ignored machine-local configuration and tests all five fixed dictionaries through the production SQLite core and native formatters. It writes only ignored fixtures and temporary Markdown notes below `.build/`; no dictionary or user note is copied or modified. The smoke test also verifies multi-source Markdown sections, duplicate prevention, and isolation of a missing dictionary path.
 
-`run-dictionary-catalog-smoke.sh` tests the versioned catalog model, atomic primary/backup persistence, corruption recovery, relative-path validation, optional legacy configuration loading, stable priority sorting, and idempotent five-dictionary legacy adaptation. It uses only temporary placeholder files and a minimal temporary SQLite metadata table; it never opens a real MDX or invokes the production index builder.
+`run-dictionary-catalog-smoke.sh` tests Catalog v3, atomic primary/backup persistence, corruption recovery, v1/v2 fail-closed migration, mixed-version peer selection, the v3 backup migration barrier, sealed publication identity and relative-path validation, optional legacy configuration loading, stable priority sorting, and idempotent five-dictionary legacy adaptation. It uses only temporary placeholder files and synthetic metadata; it never opens a real MDX or invokes the production index builder.
 
 Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's user Application Support `LocalDictionary/Catalog` directory. The app starts with an empty catalog when the developer-only external `LegacyConfig/local.json` is absent; when it is present, the existing five dictionaries remain on the unchanged legacy query dispatcher and are represented only by path-free `legacyReference` catalog records. The private file is never copied into Debug or Release App Bundles.
 
@@ -60,7 +60,7 @@ Stage A stores `catalog-v1.json` and `catalog-v1.backup.json` under the app's us
 
 `run-dictionary-import-smoke.sh` exercises the macOS-only B1 managed import boundary with generated header-only MDX fixtures and small placeholder MDD files. It covers strict MDD basename pairing, preview metadata, cancellation, disk-space rejection, disappearing sources, SHA-256 duplicate detection, staging rollback, relative Catalog paths, and the absence of index artifacts. B1 only copies files and creates `pendingIndex` records; imported dictionaries are not connected to production queries.
 
-`run-dictionary-indexing-smoke.sh` exercises the B2 managed-index state machine with generated source bytes and an injected SQLite builder. It covers success, failure and retry, cooperative cancellation, one-at-a-time execution, source fingerprint and disk-space rejection, integrity validation, interrupted-build recovery, relative Catalog paths, and protection of an existing final index. B2 produces verified independent indexes only after explicit user action; ready managed dictionaries are still excluded from production queries.
+`run-dictionary-indexing-smoke.sh` exercises the managed-index state machine with generated source bytes and an injected sealed-candidate capability. It covers success, failure and retry, cooperative cancellation, one-at-a-time execution, source fingerprint and disk-space rejection, interrupted-build recovery, versioned Catalog paths, no-replace publication and post-Catalog capability rebind. Only a fully sealed Catalog v3 publication can become ready; ready managed dictionaries are connected to the fd-bound production query runtime.
 
 `run-managed-dictionary-query-smoke.sh` exercises the B3 preferred-to-managed fallback policy, canonical and legacy generic formatter identifiers, B1 root-level and future `source/` managed MDX layouts, path/symlink escape rejection, stable Catalog ordering, state filtering, isolated failures, source SHA-256 and read-only SQLite validation, and safe managed dictionary snapshots for Markdown. It uses generated placeholder bytes, a temporary SQLite metadata table, and a mock managed runtime; it never opens a commercial MDX or accesses the network.
 
@@ -79,9 +79,9 @@ asynchronous work after that snapshot and rejects a generation-scoped remove pro
 It compiles its lifecycle-only validation hooks only in the smoke binaries; application Release
 builds do not define that test macro. It also covers OpenResource final publication while the
 shared keyed install permit is held. It uses deterministic actor
-barriers and isolated temporary roots only. These process-local leases do not provide the fd-bound
-SQLite identity guarantee deferred to D1b-3B-3; production manifest endpoints and payload hosts
-remain empty.
+barriers and isolated temporary roots only. These process-local leases are
+combined with, but do not replace, the fd-bound SQLite/source capabilities;
+production manifest endpoints and payload hosts remain empty.
 
 `run-generic-mdict-formatter-security-smoke.sh` validates the B3 libxml2 safety boundary with synthetic HTML. It verifies basic headings, paragraphs, lists, emphasis and code while discarding scripts, embedded content, hidden nodes and URL-bearing attributes, and enforcing raw-byte and DOM-depth limits.
 
@@ -293,18 +293,25 @@ security-critical primitive.
 
 `Tests/run-managed-source-indexing-production-smoke.sh` builds the production
 Objective-C++ bridge, fd-based SQLite index builder, shared managed-source
-capability, and vendored parser in Debug with ASan/UBSan and optimized
+and index capabilities, custom read-only SQLite VFS, and vendored parser in
+Debug with ASan/UBSan and optimized
 Release, all with warnings-as-errors. Its synthetic-only matrix covers
 managedLocal and openResource success, expected size/SHA mismatch, hash
 cancellation, canonical and same-size replacement, ancestor replacement,
 source/ancestor symlinks, non-regular input, parser/build failure cleanup,
-parallel dictionary isolation, fd recovery, and the retained legacy path
-builder. Static gates require the managed adapter → bridge → core chain to
+parallel dictionary isolation, fd recovery, canonical publication IDs,
+exclusive versioned final publication, candidate substitution/hardlink and
+SQLite auxiliary-file rejection, persistent metadata mismatch, startup
+verification, query cache hits and post-open final replacement, plus the
+retained legacy path builder. Static gates require the managed adapter →
+bridge → core chain to
 call `Mdict::fromFileDescriptor` without `/dev/fd`, a pathname parser
-fallback, or source-path metadata reopening. The Swift indexing smoke also
-requires the capability to remain valid through the final pre-publication
-check; mismatch cannot publish a candidate, mark Catalog ready, or restore
-the lifecycle to available.
+fallback, source-path metadata reopening, default SQLite VFS fallback, or
+managed auxiliary files. The Swift indexing smoke also requires the sealed
+capability to remain valid through final publication, Catalog commit and the
+post-commit rebind; mismatch cannot mark Catalog ready or restore the
+lifecycle to available. Timing and bounded-resource observations are
+diagnostic, not security assertions.
 
 - Install the ignored developer configuration with `scripts/install-private-local-config.sh`, then start once with the normal HOME and once with an isolated HOME containing no external configuration; confirm five-dictionary and friendly empty states respectively, and confirm neither App Bundle contains `local.json`.
 - Import an MDX, cancel once, then complete an import and attempt a duplicate import; confirm the original file is unchanged.

@@ -2,7 +2,7 @@
 
 Startup loads the explicit Catalog provenance first. Corrupt or unsupported current-generation
 Catalog state blocks all owned-filesystem mutation: Staging, Dictionaries and PendingDeletion are
-left untouched. Missing, valid primary, valid backup and in-memory v1 migration may reconcile.
+left untouched. Missing, valid primary, valid backup and pure v1/v2 migration may reconcile.
 Long directory scans and payload hashes run outside the Catalog mutation lock; a short final
 `mutate()` reloads the latest durable Catalog and commits only if the prepared snapshot is still
 current.
@@ -16,9 +16,22 @@ stage can define a broader quarantine policy.
 
 ## Authority and recovery
 
-`resource-installation.json` is the immutable OpenResource installation identity. Catalog v2 is
-the mutable authority for enabled state, query level/order, lifecycle state, index metadata and
-relative paths. Reconciliation never derives one authority from an untrusted display name.
+`resource-installation.json` is the immutable OpenResource installation
+identity. Catalog v3 is the mutable authority for enabled state, query
+level/order, lifecycle state, index metadata, exact versioned index path and
+sealed publication identity. A ready app-managed descriptor must bind
+publication ID, index SHA/size, source SHA/size, schema, actual entry count and
+the same relative path. Reconciliation never derives one authority from an
+untrusted display name.
+
+Catalog v1/v2 migration is pure Catalog processing and does not inspect owned
+files. Because those schemas cannot prove a sealed index publication, every
+app-managed ready or indexing descriptor is downgraded to `pendingIndex` and
+its index reference/metadata are cleared while its source identity and user
+settings are preserved. A v3 peer is authoritative over a valid older peer;
+a future-generation peer still blocks mutation. Migration writes a valid v3
+backup barrier before replacing the primary so an older application cannot
+silently treat the new state as v2.
 
 - A valid `verified-*` directory is bounded-read, fully hashed and published with
   `renameatx_np(RENAME_EXCL)`. Operation names are accepted only as canonical lowercase UUID
@@ -42,10 +55,19 @@ Both `appManagedImported` and `appManagedOpenResource` are explicitly indexable 
 `externalReference`, `bundledReadOnly` and legacy references never enter owned deletion. Open
 resources remain non-queryable in this stage.
 
-An interrupted `indexing` state returns to `pendingIndex`; the exact
-`index/dictionary.sqlite.building` component is removed only after a fresh fd-bound complete
-inventory confirms that no unknown index entry exists, then directory fsync. `ready` without a final index also returns to `pendingIndex` and clears stale index
-metadata. A final index beside `pendingIndex` never causes automatic promotion to `ready`.
+An interrupted `indexing` state returns to `pendingIndex`. Legacy
+`index/dictionary.sqlite.building` is removed only after a fresh fd-bound
+complete inventory confirms that no unknown index entry exists, then
+directory fsync. Versioned `.dictionary.<publicationID>.candidate` and
+`dictionary.<publicationID>.sqlite` orphans are recognized but preserved and
+never promoted by filename alone. Legacy fixed finals are likewise preserved.
+
+For a v3 `ready` descriptor, startup opens only the versioned index capability
+and verifies its mode, SHA, SQLite integrity, schema, entry count and embedded
+dictionary/publication/source metadata. This startup verifier deliberately
+does not read the MDX source. Any mismatch downgrades to `pendingIndex` and
+clears the persistent index identity; an extra final beside `pendingIndex`
+never causes automatic promotion to `ready`.
 
 Removal suspends the current managed runtime, revalidates the owned directory by fd, carries its
 device/inode/owner/type identity across the stage and rollback names, moves the whole UUID
@@ -72,8 +94,9 @@ corruption. If any owned lifecycle inventory ends with `directoryEnumerationFail
 reconciliation run discards all proposed Catalog changes and does not enter Catalog mutation. Safe
 filesystem operations that already completed are preserved for the next startup rather than being
 dangerously rolled back. By contrast, a complete inventory that finds an unknown entry remains a
-structural error: the directory is preserved and the descriptor may be durably disabled. Final
-fast-path full-SHA verification remains deferred to D1b-3B-3.
+structural error: the directory is preserved and the descriptor may be durably disabled. The
+ready-index fast path is the fd-bound full-SHA and SQLite metadata verification
+described above.
 
 ## D1b-3B-2C process-local lifecycle leases
 
@@ -110,8 +133,9 @@ coordinator. That snapshot is the public lookup's final await. The query actor t
 entire candidate batch with its current Catalog and the snapshot in one synchronous turn, preserving
 order while dropping a prior candidate disabled, deleted, generation-changed, or identity-replaced
 during a later dictionary lookup. A purely queued writer remains compatible only while descriptor
-identity is unchanged. This remains process-local; SQLite fd identity and cross-process payload
-identity remain deferred to D1b-3B-3.
+identity is unchanged. Descriptor-held source/index capabilities add the
+file-identity boundary; the lease protocol itself remains process-local.
 
-These leases coordinate only this App process. They are not an fd-bound SQLite identity guarantee
-across processes; that boundary remains D1b-3B-3.
+These leases coordinate only this App process. Cross-process safety comes from
+the separate fail-closed capability, digest, metadata and name-rebind checks,
+not from the lease generation alone.

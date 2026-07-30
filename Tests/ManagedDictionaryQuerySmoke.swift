@@ -45,6 +45,10 @@ private func descriptor(id: String, position: Int64, enabled: Bool = true,
                             DictionaryFormatterIdentifier.genericMDictV1)
     -> DictionaryDescriptor {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let publicationID = "00000000-0000-0000-0000-000000000003"
+    let sourceSHA = String(repeating: "0", count: 64)
+    let indexSHA = String(repeating: "1", count: 64)
+    let indexPath = "Dictionaries/\(id)/index/dictionary.\(publicationID).sqlite"
     return DictionaryDescriptor(
         dictionaryID: id,
         displayName: "Managed \(id)",
@@ -56,17 +60,28 @@ private func descriptor(id: String, position: Int64, enabled: Bool = true,
         indexMetadata: DictionaryIndexMetadata(
             schemaVersion: 1, entryCount: 1, indexFileSize: 1,
             sourceFileSize: 1, sourceModifiedAt: now,
-            sourceSHA256: String(repeating: "0", count: 64), indexedAt: now
+            sourceSHA256: sourceSHA, indexedAt: now
         ),
         formatterIdentifier: formatterIdentifier,
         capabilities: .unknown,
         relativePaths: DictionaryRelativePaths(
             dictionary: "Dictionaries/\(id)/source/test.mdx",
             resources: [],
-            index: "Dictionaries/\(id)/index/dictionary.sqlite"
+            index: state == .ready ? indexPath : nil
         ),
         createdAt: now,
-        updatedAt: now
+        updatedAt: now,
+        publishedIndexIdentity: state == .ready ? PublishedIndexIdentity(
+            indexPublicationID: publicationID,
+            indexSHA256: indexSHA,
+            indexFileSize: 1,
+            sourceSHA256: sourceSHA,
+            sourceFileSize: 1,
+            schemaVersion: 1,
+            entryCount: 1,
+            indexedAt: now,
+            relativePath: indexPath
+        ) : nil
     )
 }
 
@@ -123,7 +138,9 @@ private func validatedFixture(root: URL, schema: Int = 1,
     throws -> DictionaryDescriptor {
     let sourcePath = layout.relativePath(dictionaryID: id)
     let source = root.appendingPathComponent(sourcePath)
-    let index = root.appendingPathComponent("Dictionaries/\(id)/index/dictionary.sqlite")
+    let publicationID = "00000000-0000-0000-0000-000000000003"
+    let indexPath = "Dictionaries/\(id)/index/dictionary.\(publicationID).sqlite"
+    let index = root.appendingPathComponent(indexPath)
     try FileManager.default.createDirectory(at: source.deletingLastPathComponent(),
                                             withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: index.deletingLastPathComponent(),
@@ -139,6 +156,8 @@ private func validatedFixture(root: URL, schema: Int = 1,
     sqlite3_close(database)
     let sourceSize = UInt64(try source.resourceValues(forKeys: [.fileSizeKey]).fileSize!)
     let indexSize = UInt64(try index.resourceValues(forKeys: [.fileSizeKey]).fileSize!)
+    let indexSHA = digest(try Data(contentsOf: index))
+    let sourceSHA = digestOverride ?? digest(bytes)
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     return DictionaryDescriptor(
         dictionaryID: id,
@@ -149,18 +168,29 @@ private func validatedFixture(root: URL, schema: Int = 1,
         enabled: true,
         state: .ready,
         indexMetadata: DictionaryIndexMetadata(
-            schemaVersion: 1, entryCount: 1, indexFileSize: indexSize,
+            schemaVersion: schema, entryCount: 1, indexFileSize: indexSize,
             sourceFileSize: sourceSize, sourceModifiedAt: now,
-            sourceSHA256: digestOverride ?? digest(bytes), indexedAt: now
+            sourceSHA256: sourceSHA, indexedAt: now
         ),
         formatterIdentifier: formatterIdentifier,
         capabilities: .unknown,
         relativePaths: DictionaryRelativePaths(
             dictionary: sourcePath, resources: [],
-            index: "Dictionaries/\(id)/index/dictionary.sqlite"
+            index: indexPath
         ),
         createdAt: now,
-        updatedAt: now
+        updatedAt: now,
+        publishedIndexIdentity: PublishedIndexIdentity(
+            indexPublicationID: publicationID,
+            indexSHA256: indexSHA,
+            indexFileSize: indexSize,
+            sourceSHA256: sourceSHA,
+            sourceFileSize: sourceSize,
+            schemaVersion: schema,
+            entryCount: 1,
+            indexedAt: now,
+            relativePath: indexPath
+        )
     )
 }
 

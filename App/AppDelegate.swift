@@ -15,7 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lifecycleCoordinator: managedDictionaryLifecycleCoordinator
     )
     private lazy var ownedDictionaryLifecycleReconciler =
-        OwnedDictionaryLifecycleReconciler(catalogStore: dictionaryCatalogStore)
+        OwnedDictionaryLifecycleReconciler(
+            catalogStore: dictionaryCatalogStore,
+            verifyPublishedIndex: livePublishedIndexVerifier
+        )
     private var managedDictionaryQueryService: ManagedDictionaryQueryService?
     private var dictionaryRemovalCoordinator: ManagedDictionaryRemovalCoordinator?
     private lazy var dictionaryIndexCoordinator = ManagedDictionaryIndexCoordinator(

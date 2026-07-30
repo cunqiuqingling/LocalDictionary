@@ -11,6 +11,8 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
         let sourceSHA256: String
         let sourceFileSize: UInt64
         let indexFileSize: UInt64
+        let indexPublicationID: String
+        let indexSHA256: String
     }
 
     private final class Runtime {
@@ -32,6 +34,8 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     private struct RuntimeKey: Hashable {
         let dictionaryID: String
         let generation: UInt64
+        let indexPublicationID: String
+        let indexSHA256: String
     }
 
     init(applicationSupportRootURL: URL =
@@ -50,7 +54,10 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     func remove(dictionaryID: String) { removeAll(dictionaryID: dictionaryID) }
 
     func remove(dictionaryID: String, generation: UInt64) {
-        runtimes[RuntimeKey(dictionaryID: dictionaryID, generation: generation)] = nil
+        runtimes = runtimes.filter {
+            $0.key.dictionaryID != dictionaryID ||
+                $0.key.generation != generation
+        }
     }
 
     func removeAll(dictionaryID: String) {
@@ -62,8 +69,16 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         guard !Task.isCancelled else { return .miss }
         do {
+            guard let persistent = descriptor.publishedIndexIdentity else {
+                return .identityMismatch
+            }
             let runtime: Runtime
-            let key = RuntimeKey(dictionaryID: descriptor.dictionaryID, generation: generation)
+            let key = RuntimeKey(
+                dictionaryID: descriptor.dictionaryID,
+                generation: generation,
+                indexPublicationID: persistent.indexPublicationID,
+                indexSHA256: persistent.indexSHA256
+            )
             if let expectedIdentity = Self.identity(for: descriptor, generation: generation),
                let existing = runtimes[key],
                existing.identity == expectedIdentity {
@@ -76,15 +91,26 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
                     descriptorUpdatedAt: plan.descriptorUpdatedAt,
                     sourceSHA256: plan.sourceSHA256,
                     sourceFileSize: plan.sourceFileSize,
-                    indexFileSize: plan.indexFileSize
+                    indexFileSize: plan.indexFileSize,
+                    indexPublicationID: plan.indexPublicationID,
+                    indexSHA256: plan.indexSHA256
                 )
                 let core = DictionaryCoreBridge(
-                    readOnlyWithDictionaryPath: plan.sourceURL.path,
-                    indexPath: plan.indexURL.path,
+                    managedReadOnlyWithRootPath: plan.managedRootURL.path,
+                    sourceRelativePath: plan.sourceRelativePath,
+                    indexRelativePath: plan.indexRelativePath,
+                    dictionaryID: plan.dictionaryID,
+                    publicationID: plan.indexPublicationID,
+                    indexSHA256: plan.indexSHA256,
+                    indexFileSize: plan.indexFileSize,
+                    sourceSHA256: plan.sourceSHA256,
+                    sourceFileSize: plan.sourceFileSize,
+                    schemaVersion: plan.schemaVersion,
+                    entryCount: plan.entryCount,
                     cacheMaximumBytes: UInt(Self.cacheMaximumBytes),
                     cacheMaximumEntries: UInt(Self.cacheMaximumEntries)
                 )
-                guard core.isReady else { return .unavailable }
+                guard core.isReady else { return .identityMismatch }
                 runtime = Runtime(identity: identity, core: core)
                 runtimes[key] = runtime
             }
@@ -93,7 +119,7 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
             )
             if let error = raw["error"] as? String, !error.isEmpty {
                 runtimes[key] = nil
-                return .unavailable
+                return .identityMismatch
             }
             guard raw["found"] as? Bool == true,
                   let html = raw["html"] as? String,
@@ -117,8 +143,11 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
         } catch is CancellationError {
             return .miss
         } catch {
-            runtimes[RuntimeKey(dictionaryID: descriptor.dictionaryID, generation: generation)] = nil
-            return .unavailable
+            runtimes = runtimes.filter {
+                $0.key.dictionaryID != descriptor.dictionaryID ||
+                    $0.key.generation != generation
+            }
+            return .identityMismatch
         }
     }
 
@@ -126,13 +155,16 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
                                  generation: UInt64) -> RuntimeIdentity? {
         guard let sourceSHA256 = descriptor.indexMetadata.sourceSHA256,
               let sourceFileSize = descriptor.indexMetadata.sourceFileSize,
-              let indexFileSize = descriptor.indexMetadata.indexFileSize else { return nil }
+              let indexFileSize = descriptor.indexMetadata.indexFileSize,
+              let published = descriptor.publishedIndexIdentity else { return nil }
         return RuntimeIdentity(
             generation: generation,
             descriptorUpdatedAt: descriptor.updatedAt,
             sourceSHA256: sourceSHA256.lowercased(),
             sourceFileSize: sourceFileSize,
-            indexFileSize: indexFileSize
+            indexFileSize: indexFileSize,
+            indexPublicationID: published.indexPublicationID,
+            indexSHA256: published.indexSHA256
         )
     }
 

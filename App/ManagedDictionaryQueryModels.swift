@@ -1,6 +1,4 @@
-import CryptoKit
 import Foundation
-import SQLite3
 
 enum GenericMDictBlockKind: String, Equatable, Sendable {
     case heading
@@ -82,6 +80,7 @@ enum ManagedDictionaryRuntimeOutcome: Sendable {
     case hit(ManagedDictionaryQueryHit)
     case miss
     case unavailable
+    case identityMismatch
 }
 
 protocol ManagedDictionaryQueryRuntime: Sendable {
@@ -208,6 +207,11 @@ actor ManagedDictionaryQueryService {
                     await runtime.remove(dictionaryID: descriptor.dictionaryID,
                                          generation: drainedGeneration)
                 }
+                if case .identityMismatch = outcome {
+                    await suspendIdentityMismatch(
+                        dictionaryID: descriptor.dictionaryID
+                    )
+                }
                 candidates.append(ManagedDictionaryQueryCandidate(
                     dictionaryID: descriptor.dictionaryID,
                     generation: lease.generation,
@@ -238,6 +242,16 @@ actor ManagedDictionaryQueryService {
         return drainedGeneration
     }
 
+    private func suspendIdentityMismatch(dictionaryID: String) async {
+        guard let permit = try? await lifecycleCoordinator.acquireExclusiveOperation(
+            for: dictionaryID, operation: .runtimeInvalidation
+        ) else { return }
+        await runtime.removeAll(dictionaryID: dictionaryID)
+        await lifecycleCoordinator.complete(
+            permit, disposition: .suspended(incrementGeneration: true)
+        )
+    }
+
     /// Synchronous batch publication linearization point. The caller must return this value
     /// immediately after the final coordinator snapshot, without another actor suspension.
     private func finalizeBatch(
@@ -256,6 +270,7 @@ actor ManagedDictionaryQueryService {
                 hits.append(hit)
             case .miss: break
             case .unavailable: unavailable.append(candidate.dictionaryID)
+            case .identityMismatch: unavailable.append(candidate.dictionaryID)
             }
         }
         return ManagedDictionaryQueryBatch(
@@ -323,11 +338,18 @@ actor ManagedDictionaryQueryService {
 struct ManagedDictionaryRuntimePlan: Sendable {
     let dictionaryID: String
     let displayName: String
+    let managedRootURL: URL
+    let sourceRelativePath: String
+    let indexRelativePath: String
     let sourceURL: URL
     let indexURL: URL
+    let indexPublicationID: String
+    let indexSHA256: String
     let sourceSHA256: String
     let sourceFileSize: UInt64
     let indexFileSize: UInt64
+    let schemaVersion: Int
+    let entryCount: UInt64
     let descriptorUpdatedAt: Date
 }
 
@@ -369,6 +391,8 @@ struct ManagedDictionaryRuntimeValidator: Sendable {
               !expectedDigest.isEmpty,
               let expectedSourceSize = descriptor.indexMetadata.sourceFileSize,
               let expectedIndexSize = descriptor.indexMetadata.indexFileSize,
+              let expectedEntryCount = descriptor.indexMetadata.entryCount,
+              let published = descriptor.publishedIndexIdentity,
               let sourcePath = descriptor.relativePaths.dictionary,
               let indexPath = descriptor.relativePaths.index else {
             throw ManagedDictionaryRuntimeValidationError.schemaMismatch
@@ -377,34 +401,41 @@ struct ManagedDictionaryRuntimeValidator: Sendable {
            sourcePath != "Dictionaries/\(descriptor.dictionaryID)/payload.mdx" {
             throw ManagedDictionaryRuntimeValidationError.unsafePath
         }
-        let sourceURL = try managedSourceURL(relativePath: sourcePath,
-                                             dictionaryID: descriptor.dictionaryID)
-        let indexURL = try managedIndexURL(relativePath: indexPath,
-                                           dictionaryID: descriptor.dictionaryID)
-        let fileManager = FileManager()
-        let sourceValues = try regularFileValues(sourceURL, fileManager: fileManager)
-        let indexValues = try regularFileValues(indexURL, fileManager: fileManager)
-        guard let sourceSize = sourceValues.fileSize, sourceSize >= 0,
-              UInt64(sourceSize) == expectedSourceSize else {
+        let sourceURL = try managedSourceURL(
+            relativePath: sourcePath, dictionaryID: descriptor.dictionaryID
+        )
+        let indexURL = try managedIndexURL(
+            relativePath: indexPath, dictionaryID: descriptor.dictionaryID
+        )
+        guard published.relativePath == indexPath,
+              published.schemaVersion == expectedSchemaVersion,
+              published.entryCount == expectedEntryCount,
+              published.indexFileSize == expectedIndexSize else {
+            throw ManagedDictionaryRuntimeValidationError.schemaMismatch
+        }
+        guard published.sourceFileSize == expectedSourceSize,
+              published.sourceSHA256 == expectedDigest.lowercased() else {
             throw ManagedDictionaryRuntimeValidationError.sourceChanged
         }
-        guard let indexSize = indexValues.fileSize, indexSize >= 0,
-              UInt64(indexSize) == expectedIndexSize,
-              expectedIndexSize > 0 else {
-            throw ManagedDictionaryRuntimeValidationError.indexChanged
+        guard FileManager.default.fileExists(atPath: sourceURL.path),
+              FileManager.default.fileExists(atPath: indexURL.path) else {
+            throw ManagedDictionaryRuntimeValidationError.missingFile
         }
-        guard try sha256(sourceURL) == expectedDigest.lowercased() else {
-            throw ManagedDictionaryRuntimeValidationError.sourceChanged
-        }
-        try validateSQLite(indexURL)
         return ManagedDictionaryRuntimePlan(
             dictionaryID: descriptor.dictionaryID,
             displayName: descriptor.displayName,
+            managedRootURL: applicationSupportRootURL,
+            sourceRelativePath: sourcePath,
+            indexRelativePath: indexPath,
             sourceURL: sourceURL,
             indexURL: indexURL,
+            indexPublicationID: published.indexPublicationID,
+            indexSHA256: published.indexSHA256,
             sourceSHA256: expectedDigest.lowercased(),
             sourceFileSize: expectedSourceSize,
             indexFileSize: expectedIndexSize,
+            schemaVersion: expectedSchemaVersion,
+            entryCount: expectedEntryCount,
             descriptorUpdatedAt: descriptor.updatedAt
         )
     }
@@ -537,60 +568,4 @@ struct ManagedDictionaryRuntimeValidator: Sendable {
             candidateComponents.starts(with: directoryComponents)
     }
 
-    private func regularFileValues(_ url: URL, fileManager: FileManager) throws
-        -> URLResourceValues {
-        guard fileManager.fileExists(atPath: url.path),
-              fileManager.isReadableFile(atPath: url.path) else {
-            throw ManagedDictionaryRuntimeValidationError.missingFile
-        }
-        let values = try url.resourceValues(forKeys: [
-            .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey
-        ])
-        guard values.isRegularFile == true, values.isSymbolicLink != true else {
-            throw ManagedDictionaryRuntimeValidationError.missingFile
-        }
-        return values
-    }
-
-    private func sha256(_ url: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while true {
-            if Task.isCancelled { throw CancellationError() }
-            let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
-            if data.isEmpty { break }
-            hasher.update(data: data)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func validateSQLite(_ url: URL) throws {
-        var database: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &database,
-                              SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
-              let database else {
-            if let database { sqlite3_close(database) }
-            throw ManagedDictionaryRuntimeValidationError.invalidSQLite
-        }
-        defer { sqlite3_close(database) }
-        guard sqlite3_db_readonly(database, "main") == 1 else {
-            throw ManagedDictionaryRuntimeValidationError.invalidSQLite
-        }
-        guard query(database,
-                    "SELECT value FROM metadata WHERE key='schema_version' LIMIT 1") ==
-                String(expectedSchemaVersion) else {
-            throw ManagedDictionaryRuntimeValidationError.schemaMismatch
-        }
-    }
-
-    private func query(_ database: OpaquePointer, _ sql: String) -> String? {
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
-              let statement else { return nil }
-        defer { sqlite3_finalize(statement) }
-        guard sqlite3_step(statement) == SQLITE_ROW,
-              let text = sqlite3_column_text(statement, 0) else { return nil }
-        return String(cString: text)
-    }
 }

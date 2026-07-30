@@ -80,6 +80,9 @@ private enum DictionaryManagerLayoutSmoke {
                 )
             },
             buildIndex: { _, _, _ in .failure("not used by layout smoke") },
+            createCandidate: { _ in
+                throw DictionaryIndexError.candidateCreationFailed
+            },
             expectedSchemaVersion: 1
         )
         let removalCoordinator = ManagedDictionaryRemovalCoordinator(

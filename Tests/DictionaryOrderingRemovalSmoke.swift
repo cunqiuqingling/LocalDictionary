@@ -38,6 +38,8 @@ private func descriptor(
     createdAt: Date = fixedDate
 ) -> DictionaryDescriptor {
     let ownership = DictionaryOwnershipPolicy.defaultOwnership(for: sourceKind)!
+    let publicationID = "00000000-0000-0000-0000-000000000003"
+    let indexPath = "Dictionaries/\(id)/index/dictionary.\(publicationID).sqlite"
     let metadata: OpenResourceInstallationMetadata? = sourceKind == .openResource ?
         OpenResourceInstallationMetadata(
             resourceID: "synthetic-\(id.replacingOccurrences(of: "-", with: ""))",
@@ -69,16 +71,32 @@ private func descriptor(
             ? DictionaryRelativePaths(
                 dictionary: "Dictionaries/\(id)/dictionary.mdx",
                 resources: [],
-                index: "Dictionaries/\(id)/index/dictionary.sqlite"
+                index: state == .ready ? indexPath : nil
             ) : sourceKind == .openResource
                 ? DictionaryRelativePaths(
                     dictionary: "Dictionaries/\(id)/payload.mdx",
-                    resources: [], index: nil
+                    resources: [], index: state == .ready ? indexPath : nil
                 ) : .empty,
         createdAt: createdAt,
         updatedAt: fixedDate,
         storageOwnership: ownership,
-        openResourceMetadata: metadata
+        openResourceMetadata: metadata,
+        publishedIndexIdentity:
+            (state == .ready &&
+             DictionaryOwnershipPolicy.policy(
+                for: sourceKind, ownership: ownership
+             )?.isAppManaged == true)
+            ? PublishedIndexIdentity(
+                indexPublicationID: publicationID,
+                indexSHA256: String(repeating: "c", count: 64),
+                indexFileSize: 17,
+                sourceSHA256: String(repeating: "a", count: 64),
+                sourceFileSize: 11,
+                schemaVersion: 1,
+                entryCount: 9,
+                indexedAt: fixedDate,
+                relativePath: indexPath
+            ) : nil
     )
 }
 
@@ -509,7 +527,11 @@ private func testRemovalEarlyReturnRetry(base: URL) async throws {
     guard let readyIndex = ready.dictionaries.firstIndex(where: { $0.dictionaryID == indexing.descriptor.dictionaryID }) else {
         throw SmokeError.failed("indexing retry fixture")
     }
-    ready.dictionaries[readyIndex].state = .ready
+    ready.dictionaries[readyIndex] = descriptor(
+        id: indexing.descriptor.dictionaryID,
+        position: indexing.descriptor.sortPosition,
+        state: .ready
+    )
     try indexingStore.save(ready)
     indexingCoordinator.synchronize(catalog: ready)
     try expect(await indexingCoordinator.remove(dictionaryID: indexing.descriptor.dictionaryID) ==

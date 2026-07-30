@@ -15,15 +15,25 @@ struct DictionaryIndexActivity: Equatable, Sendable {
 
 struct DictionaryIndexPlan: Sendable {
     let dictionaryID: String
+    let publicationID: String
     let managedRootURL: URL
     let sourceRelativePath: String
     let expectedSourceSize: UInt64
     let expectedSourceSHA256: String
     let indexDirectoryURL: URL
-    let candidateIndexURL: URL
-    let finalIndexURL: URL
+    let candidateName: String
+    let finalName: String
     let relativeIndexPath: String
     let expectedSchemaVersion: Int
+}
+
+struct DictionaryIndexBuildRequest: @unchecked Sendable {
+    let candidateIndexURL: URL
+    let dictionaryID: String
+    let publicationID: String
+    let sourceSHA256: String
+    let sourceFileSize: UInt64
+    let candidateStorage: AnyObject?
 }
 
 struct DictionaryIndexBuildProduct: Sendable {
@@ -61,9 +71,60 @@ typealias DictionaryIndexSourceOpenFunction = @Sendable (
 
 typealias DictionaryIndexBuildFunction = @Sendable (
     DictionaryIndexSourceCapability,
-    URL,
+    DictionaryIndexBuildRequest,
     DictionaryIndexCancellationToken
 ) -> DictionaryIndexBuildOutcome
+
+struct DictionaryIndexSealResult: Sendable {
+    let entryCount: UInt64
+    let indexFileSize: UInt64
+    let indexSHA256: String
+}
+
+/// Narrow process-local handle. Production closures delegate every identity
+/// operation to the Objective-C++ fd capability; synthetic tests may inject a
+/// temporary-directory implementation without exposing VFS details to Swift.
+final class DictionaryIndexCandidateCapability: @unchecked Sendable {
+    let publicationID: String
+    let candidateIndexURL: URL
+    let finalName: String
+    let storage: AnyObject?
+    private let sealOperation: @Sendable (UInt64) throws -> DictionaryIndexSealResult
+    private let publishOperation: @Sendable () throws -> Void
+    private let discardOperation: @Sendable () -> Void
+    private let commitOperation: @Sendable () throws -> Void
+
+    init(
+        publicationID: String,
+        candidateIndexURL: URL,
+        finalName: String,
+        storage: AnyObject? = nil,
+        seal: @escaping @Sendable (UInt64) throws -> DictionaryIndexSealResult,
+        publish: @escaping @Sendable () throws -> Void,
+        discard: @escaping @Sendable () -> Void,
+        commit: @escaping @Sendable () throws -> Void
+    ) {
+        self.publicationID = publicationID
+        self.candidateIndexURL = candidateIndexURL
+        self.finalName = finalName
+        self.storage = storage
+        sealOperation = seal
+        publishOperation = publish
+        discardOperation = discard
+        commitOperation = commit
+    }
+
+    func seal(entryCount: UInt64) throws -> DictionaryIndexSealResult {
+        try sealOperation(entryCount)
+    }
+    func publish() throws { try publishOperation() }
+    func discard() { discardOperation() }
+    func commit() throws { try commitOperation() }
+}
+
+typealias DictionaryIndexCandidateFactory = @Sendable (
+    DictionaryIndexPlan
+) throws -> DictionaryIndexCandidateCapability
 
 enum DictionaryIndexBuildOutcome: Sendable {
     case success(DictionaryIndexBuildProduct)
@@ -73,16 +134,18 @@ enum DictionaryIndexBuildOutcome: Sendable {
 
 struct DictionaryIndexPreparedResult: Sendable {
     let dictionaryID: String
-    let candidateIndexURL: URL
-    let finalIndexURL: URL
+    let publicationID: String
     let relativeIndexPath: String
     let schemaVersion: Int
     let entryCount: UInt64
     let indexFileSize: UInt64
+    let indexSHA256: String
     let sourceFileSize: UInt64
     let sourceSHA256: String
+    let sourceRelativePath: String
     let indexedAt: Date
     let sourceCapability: DictionaryIndexSourceCapability
+    let candidateCapability: DictionaryIndexCandidateCapability
 }
 
 enum DictionaryIndexWorkerOutcome: Sendable {
@@ -116,6 +179,8 @@ enum DictionaryIndexError: LocalizedError, Equatable, Sendable {
     case schemaMismatch
     case missingEntryCount
     case emptyIndex
+    case candidateCreationFailed
+    case indexIdentityMismatch
     case publicationFailed
     case catalogWriteFailed
 
@@ -134,6 +199,8 @@ enum DictionaryIndexError: LocalizedError, Equatable, Sendable {
         case .schemaMismatch: return "SQLite 索引版本与当前应用不兼容。"
         case .missingEntryCount: return "SQLite 索引无法读取词条数量。"
         case .emptyIndex: return "生成的 SQLite 索引为空。"
+        case .candidateCreationFailed: return "无法安全创建 SQLite 索引候选文件。"
+        case .indexIdentityMismatch: return "SQLite 索引身份验证失败。"
         case .publicationFailed: return "无法安全发布已验证的 SQLite 索引。"
         case .catalogWriteFailed: return "索引已停止，但无法保存 Catalog 状态。"
         }

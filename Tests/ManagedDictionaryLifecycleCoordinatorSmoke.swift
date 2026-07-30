@@ -150,7 +150,6 @@ private actor GenerationRuntime: ManagedDictionaryQueryRuntime {
     let releaseSecond = Gate()
     let scopedRemovalEntered = Gate()
     let releaseScopedRemoval = Gate()
-    private var oldLookupCount = 0
     private var cachedGenerations: Set<UInt64> = []
     private var scopedRemovals: [UInt64] = []
     private var broadRemovalCount = 0
@@ -159,11 +158,10 @@ private actor GenerationRuntime: ManagedDictionaryQueryRuntime {
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         cachedGenerations.insert(generation)
         if generation == 1 {
-            oldLookupCount += 1
-            if oldLookupCount == 1 {
+            if query == "one" {
                 await firstEntered.open()
                 await releaseFirst.wait()
-            } else {
+            } else if query == "two" {
                 await secondEntered.open()
                 await releaseSecond.wait()
             }
@@ -193,6 +191,9 @@ private func descriptor(_ id: String, sourceKind: DictionarySourceKind = .manage
                         level: DictionaryQueryLevel = .normal, position: Int64 = 0,
                         enabled: Bool = true, state: DictionaryState = .ready) -> DictionaryDescriptor {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let publicationID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    let indexPath = "Dictionaries/\(id)/index/dictionary.\(publicationID).sqlite"
+    let sourceSHA256 = String(repeating: "c", count: 64)
     let metadata = sourceKind == .openResource ? OpenResourceInstallationMetadata(
         resourceID: "synthetic-resource-\(id)", resourceRevision: 1,
         resourceVersion: "1", manifestVersion: 1,
@@ -210,15 +211,26 @@ private func descriptor(_ id: String, sourceKind: DictionarySourceKind = .manage
         indexMetadata: DictionaryIndexMetadata(schemaVersion: 1, entryCount: 1,
                                                indexFileSize: 1, sourceFileSize: 1,
                                                sourceModifiedAt: now,
-                                               sourceSHA256: String(repeating: "c", count: 64),
+                                               sourceSHA256: sourceSHA256,
                                                indexedAt: now),
         formatterIdentifier: DictionaryFormatterIdentifier.genericMDictV1,
         capabilities: .unknown,
         relativePaths: DictionaryRelativePaths(
             dictionary: "Dictionaries/\(id)/\(sourceKind == .openResource ? "payload.mdx" : "source/test.mdx")",
-            resources: [], index: "Dictionaries/\(id)/index/dictionary.sqlite"
+            resources: [], index: state == .ready ? indexPath : nil
         ), createdAt: now, updatedAt: now, storageOwnership: ownership,
-        openResourceMetadata: metadata
+        openResourceMetadata: metadata,
+        publishedIndexIdentity: state == .ready ? PublishedIndexIdentity(
+            indexPublicationID: publicationID,
+            indexSHA256: String(repeating: "d", count: 64),
+            indexFileSize: 1,
+            sourceSHA256: sourceSHA256,
+            sourceFileSize: 1,
+            schemaVersion: 1,
+            entryCount: 1,
+            indexedAt: now,
+            relativePath: indexPath
+        ) : nil
     )
 }
 
@@ -241,6 +253,9 @@ private func replacingRuntimeIdentity(_ value: DictionaryDescriptor) -> Dictiona
     replacement.indexMetadata.sourceSHA256 = String(repeating: "d", count: 64)
     replacement.indexMetadata.sourceFileSize = 2
     replacement.indexMetadata.indexFileSize = 2
+    replacement.publishedIndexIdentity?.sourceSHA256 = String(repeating: "d", count: 64)
+    replacement.publishedIndexIdentity?.sourceFileSize = 2
+    replacement.publishedIndexIdentity?.indexFileSize = 2
     replacement.updatedAt = value.updatedAt.addingTimeInterval(1)
     return replacement
 }
@@ -1176,6 +1191,40 @@ private func testOpenResourceFallback(smoke: inout Smoke) async throws {
     try smoke.check("one broken fallback is isolated from the next fallback", category: \.ordering,
                     isolationBatch.hits.map(\.dictionaryID) == [surviving.dictionaryID] &&
                     isolationBatch.unavailableDictionaryIDs == [broken.dictionaryID])
+
+    let mismatched = descriptor(
+        "00000000-0000-0000-0000-000000000213",
+        sourceKind: .openResource, ownership: .appManagedOpenResource,
+        level: .fallback, position: 0
+    )
+    let afterMismatch = descriptor(
+        "00000000-0000-0000-0000-000000000214",
+        sourceKind: .openResource, ownership: .appManagedOpenResource,
+        level: .fallback, position: 1
+    )
+    let mismatchRuntime = Runtime(outcomes: [
+        mismatched.dictionaryID: .identityMismatch,
+        afterMismatch.dictionaryID: .hit(hit(afterMismatch.dictionaryID))
+    ])
+    let mismatchService = ManagedDictionaryQueryService(
+        catalog: catalog([mismatched, afterMismatch]), runtime: mismatchRuntime
+    )
+    let mismatchBatch = await mismatchService.lookup("safe")
+    try smoke.check("identity mismatch never publishes a result",
+                    category: \.identityBinding,
+                    !mismatchBatch.hits.contains {
+                        $0.dictionaryID == mismatched.dictionaryID
+                    })
+    try smoke.check("identity mismatch cannot block an isolated later dictionary",
+                    category: \.ordering,
+                    mismatchBatch.hits.map(\.dictionaryID) == [afterMismatch.dictionaryID])
+    let mismatchLifecycle = await mismatchService.lifecycleCoordinator.snapshot(
+        for: mismatched.dictionaryID
+    )
+    try smoke.check("identity mismatch suspends and advances the runtime generation",
+                    category: \.generationDrain,
+                    mismatchLifecycle?.phase == .suspended &&
+                        mismatchLifecycle?.generation == 2)
 }
 
 /// Exercises the actual CatalogStore mutation/atomic-save path, but only beneath an isolated
@@ -1216,20 +1265,38 @@ private extension Optional where Wrapped == UInt64 {
 struct ManagedDictionaryLifecycleCoordinatorSmoke {
     static func main() async throws {
         var smoke = Smoke()
+        let checkpoint: (String) -> Void = {
+            FileHandle.standardError.write(Data(("checkpoint: " + $0 + "\n").utf8))
+        }
+        checkpoint("lease")
         try await testLeaseAndDrain(smoke: &smoke)
+        checkpoint("final-release")
         try await testFinalReleaseOutcome(smoke: &smoke)
+        checkpoint("cancellation")
         try await testStructuredThrowAndCancellation(smoke: &smoke)
+        checkpoint("identity")
         try await testIdentityTransitions(smoke: &smoke)
+        checkpoint("latest")
         try await testLatestWinsPendingTransitions(smoke: &smoke)
+        checkpoint("fifo")
         try await testFIFOAndShutdown(smoke: &smoke)
+        checkpoint("catalog-recheck")
         try await testCurrentCatalogRecheck(smoke: &smoke)
+        checkpoint("reentrancy")
         try await testFinalValidationReentrancy(smoke: &smoke)
+        checkpoint("release-window")
         try await testReleaseWindowFinalValidation(smoke: &smoke)
+        checkpoint("batch-later")
         try await testBatchFinalizationAcrossLaterLookup(smoke: &smoke)
+        checkpoint("batch-closed")
         try await testBatchSnapshotFailClosedAndGeneration(smoke: &smoke)
+        checkpoint("queued-writer")
         try await testQueuedWriterIdentityBinding(smoke: &smoke)
+        checkpoint("eviction")
         try await testGenerationScopedRuntimeEviction(smoke: &smoke)
+        checkpoint("fallback")
         try await testOpenResourceFallback(smoke: &smoke)
+        checkpoint("transaction")
         try await testCatalogTransaction(smoke: &smoke)
         print("Managed lifecycle/query coordination smoke: PASS (\(smoke.assertions) total runtime assertions)")
         print("categories: actor-state=\(smoke.actorState) query-runtime=\(smoke.runtime) catalog=\(smoke.catalog) runtime-eviction=\(smoke.runtimeEviction) batch-finalization=\(smoke.batchFinalization) identity-binding=\(smoke.identityBinding) snapshot-fail-closed=\(smoke.snapshotFailClosed) POSIX=0 barrier=\(smoke.barriers) release-barrier=\(smoke.releaseBarrier) generation-drain=\(smoke.generationDrain) cancellation=\(smoke.cancellation) ordering=\(smoke.ordering) helper-only=0")

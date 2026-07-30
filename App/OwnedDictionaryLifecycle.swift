@@ -129,6 +129,10 @@ final class OwnedDictionaryLifecycleCancellationToken: @unchecked Sendable {
     }
 }
 
+typealias OwnedDictionaryPublishedIndexVerifier = @Sendable (
+    URL, DictionaryDescriptor
+) -> Bool
+
 struct OwnedDictionaryLifecycleHooks: Sendable {
     let renameNoReplaceAt: @Sendable (Int32, String, Int32, String) throws -> Void
     let synchronize: @Sendable (Int32) throws -> Void
@@ -439,6 +443,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
     let stagingRootURL: URL
     let hooks: OwnedDictionaryLifecycleHooks
     let cancellationToken: OwnedDictionaryLifecycleCancellationToken
+    let verifyPublishedIndex: OwnedDictionaryPublishedIndexVerifier
 
     func prepare(catalog original: DictionaryCatalog,
                  provenance: DictionaryCatalogLoadProvenance) -> OwnedDictionaryLifecyclePrepared {
@@ -480,7 +485,9 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         } catch {
             report.issue(.ioFailure)
         }
-        if catalogCommitAllowed, catalog != original {
+        let requiresMigrationCommit =
+            provenance == .migratedFromV1 || provenance == .migratedFromV2
+        if catalogCommitAllowed, catalog != original || requiresMigrationCommit {
             catalog.updatedAt = Date()
         } else if !catalogCommitAllowed {
             catalog = original
@@ -965,10 +972,9 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
                 continue
             }
             if catalog.dictionaries[index].state == .ready {
-                let finalExists = try finalIndexExists(
-                    parent: roots.dictionaries, dictionaryID: dictionaryID
-                )
-                if !finalExists {
+                if !verifyPublishedIndex(
+                    applicationSupportRootURL, catalog.dictionaries[index]
+                ) {
                     resetIndex(&catalog.dictionaries[index], now: now)
                     report.downgradedDictionaryIDs.append(dictionaryID)
                 }
@@ -1333,7 +1339,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             dictionaryDirectory, "index"
         )
         defer { Darwin.close(index) }
-        let allowed = Set([
+        let legacy = Set([
             "dictionary.sqlite", "dictionary.sqlite.building",
             "dictionary.sqlite.previous", "dictionary.sqlite-wal",
             "dictionary.sqlite-shm"
@@ -1353,7 +1359,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
 #else
         let entries = try OwnedDictionaryLifecyclePOSIX.entries(index)
 #endif
-        guard entries.isSubset(of: allowed) else {
+        guard entries.allSatisfy({ legacy.contains($0) || isVersionedIndexEntry($0) }) else {
             throw OwnedDictionaryLifecycleErrorCode.indexInventoryContainsUnknownEntries
         }
         for entry in entries {
@@ -1362,6 +1368,20 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             )
         }
         _ = inventoryOnly
+    }
+
+    private func isVersionedIndexEntry(_ entry: String) -> Bool {
+        let publication: String
+        if entry.hasPrefix("dictionary."), entry.hasSuffix(".sqlite") {
+            publication = String(entry.dropFirst("dictionary.".count)
+                .dropLast(".sqlite".count))
+        } else if entry.hasPrefix(".dictionary."), entry.hasSuffix(".candidate") {
+            publication = String(entry.dropFirst(".dictionary.".count)
+                .dropLast(".candidate".count))
+        } else {
+            return false
+        }
+        return UUID(uuidString: publication)?.uuidString.lowercased() == publication
     }
 
     private func removeKnownBuildingIfPresent(parent: Int32,
@@ -1443,6 +1463,7 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         descriptor.indexMetadata.entryCount = nil
         descriptor.indexMetadata.indexFileSize = nil
         descriptor.indexMetadata.indexedAt = nil
+        descriptor.publishedIndexIdentity = nil
         descriptor.relativePaths.index = nil
     }
 
@@ -1465,6 +1486,9 @@ final class OwnedDictionaryLifecycleReconciler {
             OwnedDictionaryLifecycleReconciler.defaultApplicationSupportRootURL(),
         stagingRootURL: URL? = nil,
         hooks: OwnedDictionaryLifecycleHooks = .live,
+        verifyPublishedIndex: @escaping OwnedDictionaryPublishedIndexVerifier = {
+            _, _ in false
+        },
         cancellationToken: OwnedDictionaryLifecycleCancellationToken =
             OwnedDictionaryLifecycleCancellationToken()
     ) {
@@ -1475,7 +1499,8 @@ final class OwnedDictionaryLifecycleReconciler {
             applicationSupportRootURL: applicationSupportRootURL,
             stagingRootURL: staging,
             hooks: hooks,
-            cancellationToken: cancellationToken
+            cancellationToken: cancellationToken,
+            verifyPublishedIndex: verifyPublishedIndex
         )
     }
 

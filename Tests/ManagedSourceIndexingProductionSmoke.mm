@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -420,6 +421,328 @@ void TestConcurrencyAndFDRecovery(Harness &harness,
                 "source/parser descriptors leaked after all owners released");
 }
 
+void TestSealedPublicationAndManagedQuery(
+    Harness &harness, const std::filesystem::path &root) {
+  const std::string dictionary_id =
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const std::string publication_id =
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const std::string source_relative =
+      "Dictionaries/" + dictionary_id + "/source/source.mdx";
+  const std::string index_directory =
+      "Dictionaries/" + dictionary_id + "/index";
+  const std::string final_relative =
+      index_directory + "/dictionary." + publication_id + ".sqlite";
+  const auto bytes =
+      BuildSyntheticMDX("sealed-alpha", "sealed-omega", 128);
+  WriteBytes(root / source_relative, bytes);
+  std::filesystem::create_directories(root / index_directory);
+  auto *source = OpenSource(harness, root, source_relative, bytes);
+  auto *created = LocalDictionaryCreateManagedIndexCandidate(
+      String(root), String(index_directory), String(publication_id));
+  harness.Check(ResultFlag(created, @"success"),
+                "sealed candidate creation failed");
+  auto *candidate =
+      static_cast<LocalDictionarySealedIndexCapability *>(
+          [created objectForKey:@"capability"]);
+  harness.Check(candidate != nil && !candidate.isSealed,
+                "candidate capability missing or prematurely sealed");
+  auto *built = LocalDictionaryBuildManagedIndex(
+      source, candidate, String(dictionary_id), String(SHA256(bytes)),
+      bytes.size(), ^BOOL {
+        return NO;
+      });
+  harness.Check(ResultFlag(built, @"success"),
+                "managed candidate build failed");
+  const auto entry_count =
+      [[built objectForKey:@"entryCount"] unsignedLongLongValue];
+  auto *sealed = LocalDictionarySealManagedIndex(
+      candidate, String(dictionary_id), String(SHA256(bytes)), bytes.size(),
+      LocalDictionaryIndexSchemaVersion(), entry_count);
+  harness.Check(ResultFlag(sealed, @"success") && candidate.isSealed,
+                "fd-bound candidate seal failed");
+  harness.Check(candidate.indexSHA256.length == 64 &&
+                    candidate.indexFileSize > 0,
+                "sealed identity omitted digest or size");
+  auto *published = LocalDictionaryPublishManagedIndex(candidate);
+  harness.Check(ResultFlag(published, @"success"),
+                "no-replace publication failed");
+  auto *duplicate_created = LocalDictionaryCreateManagedIndexCandidate(
+      String(root), String(index_directory), String(publication_id));
+  harness.Check(ResultFlag(duplicate_created, @"success"),
+                "duplicate-target setup candidate failed");
+  auto *duplicate =
+      static_cast<LocalDictionarySealedIndexCapability *>(
+          [duplicate_created objectForKey:@"capability"]);
+  auto *duplicate_built = LocalDictionaryBuildManagedIndex(
+      source, duplicate, String(dictionary_id), String(SHA256(bytes)),
+      bytes.size(), ^BOOL {
+        return NO;
+      });
+  harness.Check(ResultFlag(duplicate_built, @"success"),
+                "duplicate-target setup build failed");
+  auto *duplicate_sealed = LocalDictionarySealManagedIndex(
+      duplicate, String(dictionary_id), String(SHA256(bytes)), bytes.size(),
+      LocalDictionaryIndexSchemaVersion(),
+      [[duplicate_built objectForKey:@"entryCount"] unsignedLongLongValue]);
+  harness.Check(ResultFlag(duplicate_sealed, @"success"),
+                "duplicate-target setup seal failed");
+  harness.Check(
+      !ResultFlag(LocalDictionaryPublishManagedIndex(duplicate), @"success"),
+      "no-replace publication overwrote an existing final");
+  LocalDictionaryDiscardManagedIndex(duplicate);
+  const auto startup_begin = std::chrono::steady_clock::now();
+  harness.Check(LocalDictionaryValidatePublishedIndex(
+                    String(root), String(final_relative),
+                    String(dictionary_id), String(publication_id),
+                    candidate.indexSHA256, candidate.indexFileSize,
+                    String(SHA256(bytes)), bytes.size(),
+                    LocalDictionaryIndexSchemaVersion(), entry_count),
+                "published fd identity validation failed");
+  const auto startup_end = std::chrono::steady_clock::now();
+
+  const auto descriptors_before_runtime = OpenDescriptorCount();
+  const auto memory_before_runtime = sqlite3_memory_used();
+  const auto query_open_begin = std::chrono::steady_clock::now();
+  DictionaryCoreBridge *runtime = [[DictionaryCoreBridge alloc]
+      initManagedReadOnlyWithRootPath:String(root)
+                   sourceRelativePath:String(source_relative)
+                    indexRelativePath:String(final_relative)
+                         dictionaryID:String(dictionary_id)
+                        publicationID:String(publication_id)
+                          indexSHA256:candidate.indexSHA256
+                        indexFileSize:candidate.indexFileSize
+                         sourceSHA256:String(SHA256(bytes))
+                       sourceFileSize:bytes.size()
+                        schemaVersion:LocalDictionaryIndexSchemaVersion()
+                           entryCount:entry_count
+                    cacheMaximumBytes:1024 * 1024
+                  cacheMaximumEntries:16];
+  const auto query_open_end = std::chrono::steady_clock::now();
+  harness.Check(runtime.isReady, "managed fd/VFS runtime did not open");
+  auto *lookup = [runtime lookup:@"aaa" maximumHTMLBytes:1024];
+  harness.Check([[lookup objectForKey:@"found"] boolValue],
+                "managed fd/VFS runtime lookup missed");
+  const auto cache_begin = std::chrono::steady_clock::now();
+  auto *cached_lookup = [runtime lookup:@"aaa" maximumHTMLBytes:1024];
+  const auto cache_end = std::chrono::steady_clock::now();
+  harness.Check([[cached_lookup objectForKey:@"cacheHit"] boolValue],
+                "managed runtime cache hit was not retained");
+  const auto descriptors_with_runtime = OpenDescriptorCount();
+  const auto memory_with_runtime = sqlite3_memory_used();
+  harness.Check(LocalDictionaryCommitManagedIndex(candidate),
+                "post-Catalog final rebind failed");
+
+  const auto final_path = root / final_relative;
+  const auto held_path = final_path.string() + ".held";
+  std::filesystem::rename(final_path, held_path);
+  std::ifstream input(held_path, std::ios::binary);
+  std::vector<std::uint8_t> replacement(
+      (std::istreambuf_iterator<char>(input)),
+      std::istreambuf_iterator<char>());
+  replacement.back() ^= 0x5a;
+  WriteBytes(final_path, replacement);
+  auto *replaced_lookup =
+      [runtime lookup:@"aaa" maximumHTMLBytes:1024];
+  harness.Check([replaced_lookup objectForKey:@"error"] != nil,
+                "cached runtime ignored final-name replacement");
+  harness.Check(!LocalDictionaryValidatePublishedIndex(
+                    String(root), String(final_relative),
+                    String(dictionary_id), String(publication_id),
+                    candidate.indexSHA256, candidate.indexFileSize,
+                    String(SHA256(bytes)), bytes.size(),
+                    LocalDictionaryIndexSchemaVersion(), entry_count),
+                "same-size final replacement retained query eligibility");
+  const auto elapsed_ms = [](auto begin, auto end) {
+    return std::chrono::duration<double, std::milli>(end - begin).count();
+  };
+  std::printf(
+      "sealed_index_metrics bytes=%llu first_sha_ms=%.3f "
+      "vfs_validation_ms=%.3f second_sha_ms=%.3f startup_ms=%.3f "
+      "query_open_ms=%.3f cache_hit_ms=%.3f extra_fds=%zu "
+      "sqlite_heap_delta=%lld\n",
+      candidate.indexFileSize,
+      [[sealed objectForKey:@"firstSHA256Milliseconds"] doubleValue],
+      [[sealed objectForKey:@"vfsValidationMilliseconds"] doubleValue],
+      [[sealed objectForKey:@"secondSHA256Milliseconds"] doubleValue],
+      elapsed_ms(startup_begin, startup_end),
+      elapsed_ms(query_open_begin, query_open_end),
+      elapsed_ms(cache_begin, cache_end),
+      descriptors_with_runtime - descriptors_before_runtime,
+      static_cast<long long>(memory_with_runtime - memory_before_runtime));
+}
+
+void TestMediumSealingPerformance(
+    Harness &harness, const std::filesystem::path &root) {
+  const std::string dictionary_id =
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const std::string publication_id =
+      "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const std::string index_directory =
+      "Dictionaries/" + dictionary_id + "/index";
+  const std::string source_sha(64, 'a');
+  std::filesystem::create_directories(root / index_directory);
+  auto *created = LocalDictionaryCreateManagedIndexCandidate(
+      String(root), String(index_directory), String(publication_id));
+  harness.Check(ResultFlag(created, @"success"),
+                "medium candidate creation failed");
+  auto *candidate =
+      static_cast<LocalDictionarySealedIndexCapability *>(
+          [created objectForKey:@"capability"]);
+  sqlite3 *database = nullptr;
+  harness.Check(sqlite3_open_v2(
+                    candidate.candidatePath.UTF8String, &database,
+                    SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+                    nullptr) == SQLITE_OK,
+                "medium synthetic SQLite open failed");
+  const auto exec = [&database](const char *sql) {
+    if (sqlite3_exec(database, sql, nullptr, nullptr, nullptr) != SQLITE_OK) {
+      throw std::runtime_error("medium synthetic SQLite statement failed");
+    }
+  };
+  exec("PRAGMA journal_mode=OFF");
+  exec("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
+  exec("CREATE TABLE entries(id INTEGER PRIMARY KEY,headword TEXT NOT NULL,"
+       "folded TEXT NOT NULL,record_start INTEGER NOT NULL,"
+       "record_end INTEGER NOT NULL)");
+  exec("INSERT INTO entries VALUES(1,'medium','medium',0,1)");
+  exec("CREATE TABLE filler(payload BLOB)");
+  exec("INSERT INTO filler VALUES(zeroblob(8388608))");
+  const std::string metadata_sql =
+      "INSERT INTO metadata VALUES"
+      "('dictionary_id','" + dictionary_id + "'),"
+      "('publication_id','" + publication_id + "'),"
+      "('source_sha256','" + source_sha + "'),"
+      "('source_size','1'),"
+      "('schema_version','1'),"
+      "('entry_count','1'),"
+      "('engine_version','2.000000'),"
+      "('builder_format_version','managed-fd-v1')";
+  exec(metadata_sql.c_str());
+  sqlite3_close(database);
+  auto *sealed = LocalDictionarySealManagedIndex(
+      candidate, String(dictionary_id), String(source_sha), 1, 1, 1);
+  harness.Check(ResultFlag(sealed, @"success") &&
+                    candidate.indexFileSize >= 8 * 1024 * 1024,
+                "medium fd-bound seal failed");
+  std::printf(
+      "medium_seal_metrics bytes=%llu first_sha_ms=%.3f "
+      "vfs_validation_ms=%.3f second_sha_ms=%.3f\n",
+      candidate.indexFileSize,
+      [[sealed objectForKey:@"firstSHA256Milliseconds"] doubleValue],
+      [[sealed objectForKey:@"vfsValidationMilliseconds"] doubleValue],
+      [[sealed objectForKey:@"secondSHA256Milliseconds"] doubleValue]);
+  LocalDictionaryDiscardManagedIndex(candidate);
+}
+
+void TestCandidateFailureModes(
+    Harness &harness, const std::filesystem::path &root) {
+  const auto bytes = BuildSyntheticMDX("failure-alpha", "failure-omega");
+  const std::string source_sha = SHA256(bytes);
+  const auto exercise = [&](const std::string &dictionary_id,
+                            const std::string &publication_id) {
+    const std::string source_relative =
+        "Dictionaries/" + dictionary_id + "/source/source.mdx";
+    const std::string index_directory =
+        "Dictionaries/" + dictionary_id + "/index";
+    WriteBytes(root / source_relative, bytes);
+    std::filesystem::create_directories(root / index_directory);
+    auto *source = OpenSource(harness, root, source_relative, bytes);
+    auto *created = LocalDictionaryCreateManagedIndexCandidate(
+        String(root), String(index_directory), String(publication_id));
+    harness.Check(ResultFlag(created, @"success"),
+                  "failure-mode candidate creation failed");
+    auto *candidate =
+        static_cast<LocalDictionarySealedIndexCapability *>(
+            [created objectForKey:@"capability"]);
+    return std::make_pair(source, candidate);
+  };
+
+  @autoreleasepool {
+    auto values = exercise(
+        "10101010-1010-4010-8010-101010101010",
+        "11111111-2222-4333-8444-555555555555");
+    const auto held =
+        std::filesystem::path(values.second.candidatePath.UTF8String)
+            .string() + ".held";
+    std::filesystem::rename(values.second.candidatePath.UTF8String, held);
+    WriteBytes(values.second.candidatePath.UTF8String, {});
+    auto *result = LocalDictionaryBuildManagedIndex(
+        values.first, values.second,
+        @"10101010-1010-4010-8010-101010101010",
+        String(source_sha), bytes.size(), ^BOOL {
+          return NO;
+        });
+    harness.Check(!ResultFlag(result, @"success"),
+                  "same-size candidate replacement reached builder");
+  }
+
+  @autoreleasepool {
+    auto values = exercise(
+        "20202020-2020-4020-8020-202020202020",
+        "22222222-3333-4444-8555-666666666666");
+    const auto candidate =
+        std::filesystem::path(values.second.candidatePath.UTF8String);
+    const auto link = candidate.string() + ".link";
+    if (::link(candidate.c_str(), link.c_str()) != 0) {
+      throw std::runtime_error("candidate hard-link setup failed");
+    }
+    auto *result = LocalDictionaryBuildManagedIndex(
+        values.first, values.second,
+        @"20202020-2020-4020-8020-202020202020",
+        String(source_sha), bytes.size(), ^BOOL {
+          return NO;
+        });
+    harness.Check(!ResultFlag(result, @"success"),
+                  "hard-linked candidate reached builder");
+  }
+
+  @autoreleasepool {
+    auto values = exercise(
+        "30303030-3030-4030-8030-303030303030",
+        "33333333-4444-4555-8666-777777777777");
+    auto *built = LocalDictionaryBuildManagedIndex(
+        values.first, values.second,
+        @"30303030-3030-4030-8030-303030303030",
+        String(source_sha), bytes.size(), ^BOOL {
+          return NO;
+        });
+    harness.Check(ResultFlag(built, @"success"),
+                  "auxiliary-file setup build failed");
+    WriteBytes(
+        std::string(values.second.candidatePath.UTF8String) + "-wal",
+        {'w', 'a', 'l'});
+    auto *sealed = LocalDictionarySealManagedIndex(
+        values.second, @"30303030-3030-4030-8030-303030303030",
+        String(source_sha), bytes.size(),
+        LocalDictionaryIndexSchemaVersion(),
+        [[built objectForKey:@"entryCount"] unsignedLongLongValue]);
+    harness.Check(!ResultFlag(sealed, @"success"),
+                  "candidate with WAL auxiliary file sealed");
+  }
+
+  @autoreleasepool {
+    auto values = exercise(
+        "40404040-4040-4040-8040-404040404040",
+        "44444444-5555-4666-8777-888888888888");
+    auto *built = LocalDictionaryBuildManagedIndex(
+        values.first, values.second,
+        @"40404040-4040-4040-8040-404040404040",
+        String(source_sha), bytes.size(), ^BOOL {
+          return NO;
+        });
+    harness.Check(ResultFlag(built, @"success"),
+                  "metadata-mismatch setup build failed");
+    auto *sealed = LocalDictionarySealManagedIndex(
+        values.second, @"40404040-4040-4040-8040-404040404040",
+        String(std::string(64, 'f')), bytes.size(),
+        LocalDictionaryIndexSchemaVersion(),
+        [[built objectForKey:@"entryCount"] unsignedLongLongValue]);
+    harness.Check(!ResultFlag(sealed, @"success"),
+                  "source metadata mismatch sealed");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -434,6 +757,9 @@ int main() {
       TestAncestorAndSymlinkFailures(harness, temporary.path());
       TestBuildFailureAndLegacyPath(harness, temporary.path());
       TestConcurrencyAndFDRecovery(harness, temporary.path());
+      TestSealedPublicationAndManagedQuery(harness, temporary.path());
+      TestMediumSealingPerformance(harness, temporary.path());
+      TestCandidateFailureModes(harness, temporary.path());
       std::printf(
           "ManagedSourceIndexingProductionSmoke assertions=%d PASS\n",
           harness.assertions());
