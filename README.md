@@ -8,11 +8,16 @@ Copyright (C) 2026 liuzhentie (刘震铁, aka "cunqiu")
 
 ## 当前公开状态
 
-首次公开阶段只提供源码，暂不提供官方签名或公证的 `.app`。请使用 Xcode 自行构建。正式二进制发布将在签名、公证、Hardened Runtime 和发布流程完善后另行考虑；不建议从非官方第三方来源下载声称属于本项目的预编译 App。
+首次公开阶段只提供源码，暂不提供官方签名或公证的 `.app`。请使用 Xcode 自行构建。仓库现已准备 Developer ID、Hardened Runtime、公证、staple、校验和与 draft-first GitHub Release 工程，但在真实证书、公证凭据、版本冻结和用户明确授权完成前，不构成正式二进制发布；不建议从非官方第三方来源下载声称属于本项目的预编译 App。
 
 Debug 构建可能包含本机编译路径和开发调试信息，不应对外分发。需要自行分享构建产物时，应使用经过敏感内容审计的 Release 构建；但本项目当前仍不提供官方签名或公证的二进制 App。
 
 Debug builds may contain local build paths and development metadata and must not be redistributed.
+
+发行安全边界、外部输入、安装与验收清单见
+[docs/release-process.md](docs/release-process.md) 与
+[docs/release-checklist.md](docs/release-checklist.md)。当前项目版本仍为 `0.1`
+（build `1`），不会在未获产品确认时自行改成 `1.0`。
 
 ## 主要功能
 
@@ -83,7 +88,10 @@ receipt、Catalog v3、fd-bound 建索引与查询链。当前 production endpoi
 
 `managedLocal` 导入会把用户明确选择的 MDX 复制到 `~/Library/Application Support/LocalDictionary/Dictionaries/` 下的 App 托管目录。五本开发者本地 `legacyReference` 只通过本机私有兼容配置使用；该 `local.json` 位于 `~/Library/Application Support/LocalDictionary/LegacyConfig/`，不是普通用户构建要求，也不会进入 App Bundle。项目不提供商业词典下载链接。
 
-LocalDictionary 的 GPL-3.0-only 不覆盖用户导入的词典数据。未来 D1 只考虑经过许可证审核的开放资源；准入规则见 [docs/d1-resource-policy.md](docs/d1-resource-policy.md)。
+LocalDictionary 的 GPL-3.0-only 不覆盖用户导入的词典数据。Resource Center
+只允许经过许可证审核且满足签名、host、SHA-256 与 receipt 边界的开放资源；当前
+production catalog 为空。准入规则见
+[docs/d1-resource-policy.md](docs/d1-resource-policy.md)。
 
 ## AI 功能
 

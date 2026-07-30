@@ -1,5 +1,20 @@
 # Tests
 
+`run-m24-release-structural-gates.sh` verifies the Release-only Hardened Runtime and
+minimal entitlement configuration, project-substituted version authority, arm64/macOS
+15 identity, empty production Resource Center network/trust configuration, source-traceable
+bundled legal materials (including the documented LibTomCrypt trailing-space normalization),
+canonical asset naming, and the absence of credential or
+commercial dictionary payloads. `run-m24-release-tooling-smoke.sh` exercises
+fail-closed argument, dirty-tree, HEAD, output, credential, explicit-submit, unsigned
+artifact, path-with-spaces, notary state, and shell-syntax boundaries without using
+Keychain secrets or any network service. `run-m24-unsigned-release-dry-run.sh` performs
+the complete Release archive/package/manifest/checksum/unzip/re-audit workflow with
+`CODE_SIGNING_ALLOWED=NO`; its ZIP is explicitly
+`UNSIGNED-NOT-FOR-DISTRIBUTION`, is temporary, and is never a formal release.
+The public aggregate invokes all three M24 runners, including the complete unsigned
+archive/package/unzip verification, before the existing M22/M23 regression matrix.
+
 ## D1b-3A-2A-R2 bounded Key parsing
 
 `run-d1b3a2a-resource-limits-smoke.sh` builds a runtime-only synthetic MDX

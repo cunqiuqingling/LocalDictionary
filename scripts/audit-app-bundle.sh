@@ -27,6 +27,7 @@ is_allowed_markdown() {
     # Only conventional, project-supplied notices may be bundled. User notes are never allowed.
     [[ "$lower_name" == "readme.md" ||
        "$lower_name" == "license.md" ||
+       "$lower_name" == "privacy.md" ||
        "$lower_name" == "third_party_notices.md" ]]
 }
 
@@ -62,6 +63,17 @@ while IFS= read -r -d '' item; do
           "$lower_path" == *"signing-private"* ]]; then
         report_risk "资源清单签名工作目录" "$relative_path"
     fi
+    if [[ "$lower_path" == *"notary"*credential* ||
+          "$lower_path" == *"github"*token* ]]; then
+        report_risk "发行服务凭据" "$relative_path"
+    fi
+    if [[ "$lower_path" == *"/deriveddata/" ||
+          "$lower_path" == *"/deriveddata" ||
+          "$lower_path" == "deriveddata" ||
+          "$lower_path" == *"/test fixtures/" ||
+          "$lower_path" == *"/test-fixtures/" ]]; then
+        report_risk "构建缓存或测试 fixture" "$relative_path"
+    fi
 
     if [[ -L "$item" ]]; then
         report_risk "符号链接内容" "$relative_path"
@@ -91,6 +103,18 @@ while IFS= read -r -d '' item; do
         *.pem|*.p8|*.p12|*.key)
             report_risk "私钥或签名密钥文件" "$relative_path"
             ;;
+        *.cer|*.mobileprovision)
+            report_risk "不应随 Developer ID App 分发的证书或描述文件" "$relative_path"
+            ;;
+        *.o)
+            report_risk "编译器目标文件" "$relative_path"
+            ;;
+        *.swiftmodule|*.map)
+            report_risk "调试或编译产物" "$relative_path"
+            ;;
+        *test*signing*key*|*test*trust*key*|*test*manifest*key*)
+            report_risk "测试签名或信任密钥" "$relative_path"
+            ;;
         *.md)
             if ! is_allowed_markdown "$name"; then
                 report_risk "用户 Markdown 笔记" "$relative_path"
@@ -102,6 +126,8 @@ while IFS= read -r -d '' item; do
         '/Users/[^/[:space:]]+/'
     scan_printable_strings "$item" "$relative_path" "用户目录 file URL" \
         'file:///Users/'
+    scan_printable_strings "$item" "$relative_path" "临时目录绝对路径" \
+        '(/private)?/tmp/|/var/folders/[^/[:space:]]+/[^/[:space:]]+/T/'
     scan_printable_strings "$item" "$relative_path" "Authorization Bearer 内容" \
         '[Aa]uthorization:[[:space:]]*[Bb]earer[[:space:]]+[^[:space:]]+'
     scan_printable_strings "$item" "$relative_path" "疑似 API Key 值" \

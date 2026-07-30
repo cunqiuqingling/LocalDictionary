@@ -77,6 +77,11 @@ PATH_RISK="$(make_bundle path-risk)"
 print -r -- "$PRIVATE_PATH" > "$PATH_RISK/Contents/Resources/value.txt"
 expect_failure path "$PATH_RISK" "$PRIVATE_PATH"
 
+TEMP_PATH="/private/tmp/LocalDictionary-SyntheticAuditOnly/output"
+TEMP_PATH_RISK="$(make_bundle temp-path-risk)"
+print -r -- "$TEMP_PATH" > "$TEMP_PATH_RISK/Contents/Resources/value.txt"
+expect_failure temp-path "$TEMP_PATH_RISK" "$TEMP_PATH"
+
 AUTH_VALUE="Authorization: Bearer SYNTHETIC_AUDIT_ONLY_NOT_A_KEY"
 AUTH_RISK="$(make_bundle authorization-risk)"
 print -r -- "$AUTH_VALUE" > "$AUTH_RISK/Contents/Resources/value.txt"
@@ -100,6 +105,15 @@ PRIVATE_KEY_MARKER="-----BEGIN PRIVATE KEY-----"
 PRIVATE_KEY_RISK="$(make_bundle private-key-risk)"
 print -r -- "$PRIVATE_KEY_MARKER" > "$PRIVATE_KEY_RISK/Contents/Resources/synthetic.txt"
 expect_failure private-key "$PRIVATE_KEY_RISK" "$PRIVATE_KEY_MARKER"
+
+TEST_KEY_RISK="$(make_bundle test-trust-key-risk)"
+print 'synthetic public material' > "$TEST_KEY_RISK/Contents/Resources/test-manifest-trust-key.txt"
+expect_failure test-key "$TEST_KEY_RISK" ""
+
+DERIVED_DATA_RISK="$(make_bundle derived-data-risk)"
+/bin/mkdir -p "$DERIVED_DATA_RISK/Contents/Resources/DerivedData"
+print 'synthetic object' > "$DERIVED_DATA_RISK/Contents/Resources/DerivedData/file.o"
+expect_failure derived-data "$DERIVED_DATA_RISK" ""
 
 FAKE_PROJECT="$WORK/Fake Project With Spaces"
 /bin/mkdir -p "$FAKE_PROJECT/scripts" "$FAKE_PROJECT/config"
@@ -135,4 +149,4 @@ PROJECT_FILE="$ROOT/App/LocalDictionary.xcodeproj/project.pbxproj"
 /usr/bin/grep -q 'Audit App Bundle' "$PROJECT_FILE"
 /usr/bin/grep -q 'audit-app-bundle.sh' "$ROOT/scripts/install-local-app.sh"
 
-print "AppBundleAuditSmoke PASS (16/16)"
+print "AppBundleAuditSmoke PASS (19/19)"
