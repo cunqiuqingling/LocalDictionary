@@ -18,8 +18,9 @@ while (( "$#" )); do
         *) release_die "unknown argument: $1" ;;
     esac
 done
-[[ "$MODE" == "unsigned-dry-run" || "$MODE" == "developer-id" || "$MODE" == "notarized" ]] ||
-    release_die "--mode must be unsigned-dry-run, developer-id, or notarized"
+[[ "$MODE" == "unsigned-dry-run" || "$MODE" == "community-unsigned" ||
+   "$MODE" == "developer-id" || "$MODE" == "notarized" ]] ||
+    release_die "--mode must be unsigned-dry-run, community-unsigned, developer-id, or notarized"
 [[ -d "$APP" && "${APP:t}" == "$RELEASE_PRODUCT.app" ]] ||
     release_die "--app must identify LocalDictionary.app"
 [[ -n "$VERSION" ]] || release_die "--version is required"
@@ -96,16 +97,16 @@ if /usr/bin/find "$APP" -type f |
     release_die "bundle contains a forbidden release file"
 fi
 
-if [[ "$MODE" == "unsigned-dry-run" ]]; then
+if [[ "$MODE" == "unsigned-dry-run" || "$MODE" == "community-unsigned" ]]; then
     if /usr/bin/codesign -dv "$APP" >/dev/null 2>&1; then
         SIGNATURE_DETAILS="$(/usr/bin/codesign -dv --verbose=4 "$APP" 2>&1)"
         [[ "$SIGNATURE_DETAILS" == *"Signature=adhoc"* ]] ||
             release_die "unsigned dry-run contains a non-ad-hoc signature"
         [[ "$SIGNATURE_DETAILS" != *"Authority="* ]] ||
             release_die "unsigned dry-run contains a signing authority"
-        print "signature_status=linker_adhoc_UNSIGNED-NOT-FOR-DISTRIBUTION"
+        print "signature_status=linker_adhoc_${MODE}"
     else
-        print "signature_status=unsigned_not_for_distribution"
+        print "signature_status=${MODE}"
     fi
     print "spctl_status=not_run_for_unsigned_artifact"
 else

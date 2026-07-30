@@ -24,8 +24,9 @@ while (( "$#" )); do
         *) release_die "unknown argument: $1" ;;
     esac
 done
-[[ "$MODE" == "unsigned-dry-run" || "$MODE" == "developer-id" ]] ||
-    release_die "--mode must be unsigned-dry-run or developer-id"
+[[ "$MODE" == "unsigned-dry-run" || "$MODE" == "community-unsigned" ||
+   "$MODE" == "developer-id" ]] ||
+    release_die "--mode must be unsigned-dry-run, community-unsigned, or developer-id"
 release_require_new_output "$OUTPUT"
 release_require_xcode
 
@@ -43,6 +44,12 @@ if [[ "$MODE" == "developer-id" ]]; then
         ')"
     [[ "$IDENTITY_MATCHES" == "1" ]] ||
         release_die "Developer ID identity must resolve exactly once (matches: $IDENTITY_MATCHES)"
+elif [[ "$MODE" == "community-unsigned" ]]; then
+    release_require_clean_head "$EXPECTED_HEAD"
+    [[ "$ALLOW_DIRTY_DRY_RUN" -eq 0 ]] ||
+        release_die "dirty override is invalid for community-unsigned"
+    [[ -z "$IDENTITY" && -z "$TEAM_ID" ]] ||
+        release_die "community-unsigned must not accept a signing identity or Team ID"
 elif [[ -n "$(git -C "$RELEASE_ROOT" status --porcelain)" && "$ALLOW_DIRTY_DRY_RUN" -ne 1 ]]; then
     release_die "dirty unsigned dry-run requires --allow-dirty-dry-run"
 fi
@@ -58,7 +65,7 @@ release_require_build_number "$BUILD_NUMBER"
 [[ "$(release_setting "$SETTINGS" PRODUCT_BUNDLE_IDENTIFIER)" == "$RELEASE_BUNDLE_ID" ]] ||
     release_die "project bundle identifier changed"
 
-if [[ "$MODE" == "unsigned-dry-run" ]]; then
+if [[ "$MODE" == "unsigned-dry-run" || "$MODE" == "community-unsigned" ]]; then
     ARCHIVE="$WORK/LocalDictionary-UNSIGNED.xcarchive"
     "$DEVELOPER_DIR/usr/bin/xcodebuild" \
         -project "$RELEASE_PROJECT" \
@@ -70,13 +77,21 @@ if [[ "$MODE" == "unsigned-dry-run" ]]; then
         CODE_SIGNING_ALLOWED=NO \
         archive
     APP="$ARCHIVE/Products/Applications/$RELEASE_PRODUCT.app"
-    ARTIFACT_NAME="$RELEASE_PRODUCT-$VERSION-macOS-$RELEASE_ARCHITECTURE-UNSIGNED-NOT-FOR-DISTRIBUTION.zip"
-    SIGNING_AUTHORITY="UNSIGNED-NOT-FOR-DISTRIBUTION"
+    if [[ "$MODE" == "unsigned-dry-run" ]]; then
+        ARTIFACT_NAME="$RELEASE_PRODUCT-$VERSION-macOS-$RELEASE_ARCHITECTURE-UNSIGNED-NOT-FOR-DISTRIBUTION.zip"
+        SIGNING_AUTHORITY="UNSIGNED-NOT-FOR-DISTRIBUTION"
+        DISTRIBUTION_CHANNEL="test-only"
+    else
+        ARTIFACT_NAME="$RELEASE_PRODUCT-$VERSION-macOS-$RELEASE_ARCHITECTURE-unsigned.zip"
+        SIGNING_AUTHORITY="unsigned"
+        DISTRIBUTION_CHANNEL="github-community-unsigned"
+    fi
     NOTARY_STATUS="not-submitted"
     STAPLE_STATUS="not-applicable"
     GATEKEEPER_STATUS="not-run"
     HARDENED_STATUS="configured-not-signature-asserted"
 else
+    DISTRIBUTION_CHANNEL="developer-id"
     ARCHIVE="$WORK/LocalDictionary.xcarchive"
     "$DEVELOPER_DIR/usr/bin/xcodebuild" \
         -project "$RELEASE_PROJECT" \
@@ -158,12 +173,17 @@ release_write_manifest "$MANIFEST" \
     artifactSHA256 "$SHA" \
     appBundleIdentity "$APP_IDENTITY" \
     signingAuthority "$SIGNING_AUTHORITY" \
+    signing "$([[ "$MODE" == developer-id ]] && print developer-id || print unsigned)" \
     hardenedRuntime "$HARDENED_STATUS" \
     entitlementsSummary "empty-minimum" \
     notarizationStatus "$NOTARY_STATUS" \
     notarizationSubmissionID "" \
     stapleValidation "$STAPLE_STATUS" \
     gatekeeperAssessment "$GATEKEEPER_STATUS" \
+    notarization "$NOTARY_STATUS" \
+    stapled false \
+    gatekeeperDirectOpen "$([[ "$MODE" == community-unsigned ]] && print not-guaranteed || print not-applicable)" \
+    distributionChannel "$DISTRIBUTION_CHANNEL" \
     buildTimestamp "$TIMESTAMP"
 print "$SHA  $ARTIFACT_NAME" >"$PUBLISH_DIR/SHA256SUMS"
 
@@ -172,7 +192,12 @@ ARTIFACT="$OUTPUT/$ARTIFACT_NAME"
 MANIFEST="$OUTPUT/release-manifest.json"
 
 print "mode=$MODE"
-print "status=$([[ "$MODE" == unsigned-dry-run ]] && print UNSIGNED-NOT-FOR-DISTRIBUTION || print developer-id-signed-not-notarized)"
+case "$MODE" in
+    unsigned-dry-run) STATUS="UNSIGNED-NOT-FOR-DISTRIBUTION" ;;
+    community-unsigned) STATUS="community-unsigned-no-developer-id-no-notarization" ;;
+    developer-id) STATUS="developer-id-signed-not-notarized" ;;
+esac
+print "status=$STATUS"
 print "artifact=$ARTIFACT"
 print "sha256=$SHA"
 print "manifest=$MANIFEST"

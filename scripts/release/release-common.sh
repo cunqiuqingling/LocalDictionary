@@ -168,7 +168,7 @@ for index in range(0, len(pairs), 2):
     key, value = pairs[index:index + 2]
     if key in {"artifactSize", "buildNumber"} and value.isdigit():
         value = int(value)
-    elif key == "gitDirty":
+    elif key in {"gitDirty", "stapled"}:
         value = value == "true"
     manifest[key] = value
 with open(output, "x", encoding="utf-8") as handle:

@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-protocol AIKeychainStoring: AnyObject {
+protocol AIKeychainStoring: AnyObject, Sendable {
     func readKey(account: String) async throws -> String?
     func storeKey(_ key: String, account: String) async throws
     func deleteKey(account: String) async throws
@@ -22,7 +22,7 @@ enum AIKeychainError: LocalizedError {
     }
 }
 
-final class AIKeychainStore: AIKeychainStoring {
+final class AIKeychainStore: AIKeychainStoring, @unchecked Sendable {
     static let productionService = "LocalDictionary.AIProvider"
 
     private let service: String

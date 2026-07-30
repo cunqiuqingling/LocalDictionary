@@ -653,6 +653,57 @@ LookupResult SQLiteDictionaryCore::lookup(const std::string &input,
   return result;
 }
 
+uint64_t SQLiteDictionaryCore::enumerateEntries(
+    size_t maximum_html_bytes,
+    const std::function<bool()> &cancellation_check,
+    const std::function<bool(const std::string &, const std::string &, bool)>
+        &visitor) {
+  if (!database_ || !dictionary_ || maximum_html_bytes == 0 || !visitor) {
+    throw std::runtime_error("Dictionary entry enumeration is unavailable");
+  }
+  sqlite3_stmt *statement = nullptr;
+  checkSQLite(sqlite3_prepare_v2(
+                  database_,
+                  "SELECT headword,record_start,record_end FROM entries ORDER BY id",
+                  -1, &statement, nullptr),
+              database_, "prepare bounded entry enumeration");
+  uint64_t visited = 0;
+  try {
+    while (sqlite3_step(statement) == SQLITE_ROW) {
+      if ((visited & 0x3f) == 0 && cancellation_check &&
+          cancellation_check()) {
+        throw IndexBuildCancelled();
+      }
+      const auto *headword = sqlite3_column_text(statement, 0);
+      IndexedRecord record{
+          headword ? reinterpret_cast<const char *>(headword) : "",
+          static_cast<uint64_t>(sqlite3_column_int64(statement, 1)),
+          static_cast<uint64_t>(sqlite3_column_int64(statement, 2))};
+      bool cache_hit = false;
+      std::string html = readWithCache(record, cache_hit);
+      bool truncated = false;
+      if (html.size() > maximum_html_bytes) {
+        size_t boundary = maximum_html_bytes;
+        while (boundary > 0 && boundary < html.size() &&
+               (static_cast<unsigned char>(html[boundary]) & 0xc0) == 0x80) {
+          --boundary;
+        }
+        html.resize(boundary);
+        truncated = true;
+      }
+      ++visited;
+      if (!visitor(record.headword, html, truncated)) {
+        throw IndexBuildCancelled();
+      }
+    }
+    sqlite3_finalize(statement);
+    return visited;
+  } catch (...) {
+    sqlite3_finalize(statement);
+    throw;
+  }
+}
+
 CacheStats SQLiteDictionaryCore::cacheStats() const {
   return {cache_.size(), cache_bytes_, cache_maximum_entries_,
           cache_maximum_bytes_};

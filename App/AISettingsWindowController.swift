@@ -27,9 +27,6 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
     private let automaticFallbackButton = NSButton(
         checkboxWithTitle: "自动切换备用服务", target: nil, action: nil
     )
-    private let automaticSentenceButton = NSButton(
-        checkboxWithTitle: "自动解析完整英文句子", target: nil, action: nil
-    )
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let progressIndicator = NSProgressIndicator()
     private let testButton = NSButton(title: "测试连接", target: nil, action: nil)
@@ -83,8 +80,6 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
                 self.session = AIProviderSettingsSession(snapshot: snapshot)
                 self.automaticFallbackButton.state = snapshot.catalog.automaticFallbackEnabled
                     ? .on : .off
-                self.automaticSentenceButton.state =
-                    snapshot.catalog.automaticSentenceAnalysisEnabled ? .on : .off
                 self.rebuildProfileSelector()
                 self.loadSelectedDraftAtomically()
                 self.setBusy(false)
@@ -180,9 +175,8 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         form.rowSpacing = 9
 
         automaticFallbackButton.controlSize = .small
-        automaticSentenceButton.controlSize = .small
         let automaticSentenceHelp = NSTextField(wrappingLabelWithString:
-            "启用后，选中的完整英文句子会自动发送到所配置的 AI 服务，用于翻译和语法分析。")
+            "AI 不会自动发送单词或句子；只有点击对应的 AI 按钮后，当前内容才会发送到所配置的服务。")
         automaticSentenceHelp.textColor = .secondaryLabelColor
         automaticSentenceHelp.font = .systemFont(ofSize: 11)
         automaticSentenceHelp.maximumNumberOfLines = 2
@@ -234,7 +228,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         let separator = NSBox()
         separator.boxType = .separator
         let stack = NSStackView(views: [selectorRow, priorityRow, separator, form,
-                                        automaticFallbackButton, automaticSentenceButton,
+                                        automaticFallbackButton,
                                         automaticSentenceHelp, privacy, statusLabel, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -450,7 +444,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
     @objc private func saveConfiguration() {
         syncEditorIntoSelectedDraft()
         session?.automaticFallbackEnabled = automaticFallbackButton.state == .on
-        session?.automaticSentenceAnalysisEnabled = automaticSentenceButton.state == .on
+        session?.automaticSentenceAnalysisEnabled = false
         let proposed: AIProviderCatalog
         do {
             guard let value = try session?.catalogForSaving() else {
@@ -627,7 +621,6 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         modelField.isEnabled = !busy
         keyField.isEnabled = !busy
         automaticFallbackButton.isEnabled = !busy
-        automaticSentenceButton.isEnabled = !busy
         testButton.isEnabled = !busy && !isTestingConnection
         clearKeyButton.isEnabled = !busy
         clearCacheButton.isEnabled = !busy

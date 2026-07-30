@@ -23,6 +23,9 @@ export LOCALDICTIONARY_SKIP_KEYCHAIN_SMOKE=1
 /bin/mkdir -p "$HOME"
 
 PUBLIC_TESTS=(
+  Tests/run-offline-language-smoke.sh
+  Tests/run-selection-direction-integration-smoke.sh
+  Tests/run-community-unsigned-release-smoke.sh
   Tests/run-m24-release-structural-gates.sh
   Tests/run-m24-release-tooling-smoke.sh
   Tests/run-m24-unsigned-release-dry-run.sh
@@ -56,6 +59,30 @@ PUBLIC_TESTS=(
   Tests/run-ai-service-smoke.sh
   Tests/run-public-obsidian-note-store-smoke.sh
 )
+
+OFFLINE_SOURCES=(
+  "$ROOT/App/OfflineTranslationModels.swift"
+  "$ROOT/App/LongTextAnalysis.swift"
+  "$ROOT/App/ReverseLookup.swift"
+)
+if /usr/bin/grep -E 'AIProvider|AIExplanationService|URLSession|ResourceCenter|https?://' \
+    "${OFFLINE_SOURCES[@]}" >/dev/null; then
+  print -u2 "offline translation path references a Provider or network client"
+  exit 1
+fi
+if ! /usr/bin/grep -Fq '.translationTask(model.configuration)' \
+      "$ROOT/App/SystemTranslationHost.swift" ||
+   ! /usr/bin/grep -Fq 'prepareTranslation()' "$ROOT/App/SystemTranslationHost.swift" ||
+   ! /usr/bin/grep -Fq 'LanguageAvailability()' "$ROOT/App/SystemTranslationHost.swift"; then
+  print -u2 "system translation host is missing reviewed public API boundaries"
+  exit 1
+fi
+if /usr/bin/grep -Eq 'NSScreenCaptureUsageDescription|CGWindowListCreateImage|ScreenCaptureKit' \
+    "$ROOT/App/Info.plist" "$ROOT/App"/*.swift; then
+  print -u2 "selection placement added a screen-recording boundary"
+  exit 1
+fi
+print "Offline/provider/selection structural gates passed"
 
 QUERY_SOURCE="$ROOT/App/ManagedDictionaryQueryModels.swift"
 QUERY_RUNTIME="$ROOT/App/ManagedDictionaryQueryRuntime.swift"

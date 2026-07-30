@@ -33,7 +33,7 @@ enum AICacheError: LocalizedError {
     var errorDescription: String? { "AI 缓存暂不可用。" }
 }
 
-final class AIExplanationCache {
+final class AIExplanationCache: @unchecked Sendable {
     static let maximumEntries = 256
     static let wordResponseSchemaVersion = 2
     static let sentenceResponseSchemaVersion = 1
@@ -299,7 +299,9 @@ final class AIExplanationCache {
         try await perform { database in try Self.delete(key: key, database: database) }
     }
 
-    private func perform<T>(_ operation: @escaping (OpaquePointer) throws -> T) async throws -> T {
+    private func perform<T: Sendable>(
+        _ operation: @escaping @Sendable (OpaquePointer) throws -> T
+    ) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [databaseURL] in
                 do {
@@ -413,17 +415,17 @@ final class AIExplanationCache {
             .joined(separator: "\u{1F}")
     }
 
-    private struct DecodedInline<Value> {
+    private struct DecodedInline<Value: Sendable>: Sendable {
         let value: Value
         let provider: String
         let model: String
         let createdAt: Date
     }
 
-    private func decodedInlineValue<Value>(
+    private func decodedInlineValue<Value: Sendable>(
         for query: String, intent: AIRequestIntent,
         configuration: AIProviderConfiguration,
-        decode: @escaping (Data) -> Value?
+        decode: @escaping @Sendable (Data) -> Value?
     ) async throws -> DecodedInline<Value>? {
         try await perform { database in
             let key = Self.inlineCacheKey(query: query, intent: intent,

@@ -35,6 +35,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     )
     private var hotKey: GlobalHotKey?
+    private var globalSelectionGeneration: UInt64 = 0
+    private var selectionValidationTimer: Timer?
     private let selectionReader = AccessibilitySelectionReader()
     private let clipboardFallback = ClipboardSelectionFallback()
     private let permissionPrompter = AccessibilityPermissionPrompter()
@@ -43,6 +45,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let aiConfigurationStore = AIConfigurationStore()
     private let aiKeychainStore = AIKeychainStore()
     private let aiCache = AIExplanationCache()
+    private let reverseLookupService = ReverseLookupService()
+    private let reverseIndexCoordinator = ReverseIndexCoordinator()
+    private var legacyReverseDictionarySources: [ReverseDictionarySource] = []
     private lazy var aiProfileManager = AIProviderProfileManager(
         store: aiConfigurationStore,
         keychain: aiKeychainStore
@@ -78,14 +83,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        selectionValidationTimer?.invalidate()
         dictionaryIndexCoordinator.cancelCurrentTask()
         Task { await managedDictionaryLifecycleCoordinator.shutdown() }
     }
 
     private func handleGlobalHotKey() {
         guard let panelController else { return }
+        globalSelectionGeneration &+= 1
+        let generation = globalSelectionGeneration
         if panelController.isVisible {
+            selectionValidationTimer?.invalidate()
+            selectionValidationTimer = nil
             panelController.hide()
+            panelController.invalidateGlobalSelection(generation: generation)
             return
         }
 
@@ -94,29 +105,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         debugLog("frontmost_application=\(sourceApplication != nil)")
 
         switch selectionReader.readSelection(from: sourceApplication) {
-        case .text(let rawText):
-            handleCapturedText(rawText, with: panelController)
+        case .text(let capture):
+            guard capture.isFresh() else {
+                panelController.invalidateGlobalSelection(generation: generation)
+                panelController.show()
+                return
+            }
+            let context = makeGlobalSelectionContext(
+                capture, sourceApplication: sourceApplication, generation: generation
+            )
+            handleCapturedText(
+                capture.text, selectionContext: context, generation: generation,
+                with: panelController
+            )
         case .permissionDenied:
             debugLog("accessibility_trusted=false")
+            panelController.invalidateGlobalSelection(generation: generation)
             panelController.show()
             DispatchQueue.main.async { [permissionPrompter] in
                 permissionPrompter.showIfNeeded()
             }
         case .secureInput:
             debugLog("secure_input=true selection_read=false")
+            panelController.invalidateGlobalSelection(generation: generation)
             panelController.show()
         case .noSelection, .unavailable:
             debugLog("ax_selection_nonempty=false clipboard_fallback=true")
-            handleClipboardFallback(from: sourceApplication, with: panelController)
+            panelController.invalidateGlobalSelection(generation: generation)
+            handleClipboardFallback(
+                from: sourceApplication, generation: generation, with: panelController
+            )
         }
     }
 
     private func handleClipboardFallback(from application: NSRunningApplication?,
+                                         generation: UInt64,
                                          with panelController: DictionaryPanelController) {
         switch clipboardFallback.readSelection(from: application) {
         case .text(let rawText):
             debugLog("clipboard_fallback_nonempty=true characters=\(rawText.count)")
-            handleCapturedText(rawText, with: panelController)
+            handleCapturedText(
+                rawText, selectionContext: nil, generation: generation,
+                with: panelController
+            )
         case .noText:
             debugLog("clipboard_fallback_nonempty=false")
             panelController.show()
@@ -136,20 +167,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleCapturedText(_ rawText: String,
+                                    selectionContext: GlobalSelectionContext?,
+                                    generation: UInt64,
                                     with panelController: DictionaryPanelController) {
         let classification = QueryIntentClassifier.classify(rawText)
         switch classification.intent {
         case .word, .phrase, .sentence:
             debugLog("selection_nonempty=true characters=\(classification.normalizedText.count)")
-            let found = panelController.showAndLookup(classification.normalizedText)
+            let found = panelController.showAndLookup(
+                classification.normalizedText,
+                globalSelectionContext: selectionContext,
+                generation: generation
+            )
+            if let selectionContext,
+               let processIdentifier = selectionContext.sourceProcessIdentifier {
+                beginSelectionValidation(
+                    context: selectionContext,
+                    sourceProcessIdentifier: processIdentifier,
+                    panelController: panelController
+                )
+            }
             debugLog("lookup_found=\(found)")
         case .textTooLong where classification.rejectionReason == .empty:
             debugLog("selection_nonempty=false")
             panelController.show()
         case .textTooLong:
             debugLog("selection_nonempty=true characters=\(classification.normalizedText.count) too_long=true")
-            panelController.showSelectionTooLongMessage()
+            panelController.showSelectionTooLongMessage(
+                globalSelectionContext: selectionContext,
+                generation: generation
+            )
         }
+    }
+
+    private func makeGlobalSelectionContext(
+        _ capture: AccessibilitySelectionCapture,
+        sourceApplication: NSRunningApplication?,
+        generation: UInt64
+    ) -> GlobalSelectionContext? {
+        let displays = SelectionDisplayGeometry.liveScreens()
+        let converted = AXSelectionCoordinateConverter.convert(
+            capture.selectionRects, displays: displays
+        )
+        guard !converted.isEmpty else { return nil }
+        return GlobalSelectionContext(
+            selectedText: capture.text,
+            selectionRects: converted,
+            anchorRect: converted.last,
+            generation: generation,
+            capturedAt: capture.capturedAt,
+            preferredDisplayID: AXSelectionCoordinateConverter.preferredDisplayID(
+                for: capture.selectionRects, displays: displays
+            ),
+            rightToLeft: NSApp.userInterfaceLayoutDirection == .rightToLeft,
+            sourceProcessIdentifier: sourceApplication?.processIdentifier
+        )
+    }
+
+    private func beginSelectionValidation(
+        context: GlobalSelectionContext,
+        sourceProcessIdentifier: Int32,
+        panelController: DictionaryPanelController
+    ) {
+        selectionValidationTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.3, repeats: true) { [weak self, weak panelController] _ in
+            Task { @MainActor in
+                guard let self, let panelController else { return }
+                self.validateGlobalSelection(
+                    original: context,
+                    sourceProcessIdentifier: sourceProcessIdentifier,
+                    panelController: panelController
+                )
+            }
+        }
+        selectionValidationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func validateGlobalSelection(
+        original: GlobalSelectionContext,
+        sourceProcessIdentifier: Int32,
+        panelController: DictionaryPanelController
+    ) {
+        guard panelController.isVisible,
+              original.generation == globalSelectionGeneration,
+              panelController.isPresentingGlobalSelection(
+                  generation: original.generation
+              ),
+              let sourceApplication = NSRunningApplication(
+                  processIdentifier: sourceProcessIdentifier
+              ), !sourceApplication.isTerminated else {
+            selectionValidationTimer?.invalidate()
+            selectionValidationTimer = nil
+            return
+        }
+        if let frontmost = NSWorkspace.shared.frontmostApplication,
+           frontmost.processIdentifier != sourceProcessIdentifier,
+           frontmost.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            invalidateGlobalSelectionAndHide(panelController)
+            return
+        }
+        guard case .text(let capture) = selectionReader.readSelection(from: sourceApplication),
+              capture.isFresh(),
+              SentenceTextNormalizer.normalize(capture.text) ==
+                SentenceTextNormalizer.normalize(original.selectedText),
+              var refreshed = makeGlobalSelectionContext(
+                  capture,
+                  sourceApplication: sourceApplication,
+                  generation: globalSelectionGeneration
+              ) else {
+            invalidateGlobalSelectionAndHide(panelController)
+            return
+        }
+        guard refreshed.selectionRects != original.selectionRects ||
+                refreshed.preferredDisplayID != original.preferredDisplayID else {
+            if !panelController.refreshGlobalSelection(refreshed) {
+                invalidateGlobalSelectionAndHide(panelController)
+            }
+            return
+        }
+        globalSelectionGeneration &+= 1
+        refreshed = GlobalSelectionContext(
+            selectedText: refreshed.selectedText,
+            selectionRects: refreshed.selectionRects,
+            anchorRect: refreshed.anchorRect,
+            generation: globalSelectionGeneration,
+            capturedAt: refreshed.capturedAt,
+            preferredDisplayID: refreshed.preferredDisplayID,
+            rightToLeft: refreshed.rightToLeft,
+            sourceProcessIdentifier: refreshed.sourceProcessIdentifier
+        )
+        panelController.repositionGlobalSelection(refreshed)
+        beginSelectionValidation(
+            context: refreshed,
+            sourceProcessIdentifier: sourceProcessIdentifier,
+            panelController: panelController
+        )
+    }
+
+    private func invalidateGlobalSelectionAndHide(
+        _ panelController: DictionaryPanelController
+    ) {
+        selectionValidationTimer?.invalidate()
+        selectionValidationTimer = nil
+        globalSelectionGeneration &+= 1
+        panelController.hide()
+        panelController.invalidateGlobalSelection(generation: globalSelectionGeneration)
     }
 
     private func debugLog(_ message: @autoclosure () -> String) {
@@ -306,7 +469,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let config {
             let core = DictionaryCoreBridge(dictionaryPath: config.primaryDictionary,
                                             indexPath: config.indexPath)
-            let supplementalDictionaries = config.supplementalDictionaries.map { configuration in
+            let supplementalConfigurations = config.supplementalDictionaries
+            let supplementalDictionaries = supplementalConfigurations.map { configuration in
                 SupplementalDictionaryRuntime(
                     id: configuration.id,
                     displayName: configuration.displayName,
@@ -319,6 +483,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 )
             }
+            var reverseSources = [ReverseDictionarySource(
+                dictionaryID: DictionarySourceID.oxfordOALD8.rawValue,
+                dictionaryName: "牛津高阶 8",
+                dictionaryURL: URL(fileURLWithPath: config.primaryDictionary),
+                queryPriority: 0,
+                sortPosition: 1,
+                core: core
+            )]
+            reverseSources.append(contentsOf: zip(
+                supplementalConfigurations, supplementalDictionaries
+            ).map { configuration, runtime in
+                ReverseDictionarySource(
+                    dictionaryID: configuration.id.rawValue,
+                    dictionaryName: configuration.displayName,
+                    dictionaryURL: URL(fileURLWithPath: configuration.dictionaryPath),
+                    queryPriority: 0,
+                    sortPosition: Int64(configuration.priority + 1),
+                    core: runtime.core
+                )
+            })
+            reverseSources.append(contentsOf: Self.managedReverseSources(from: catalog))
+            legacyReverseDictionarySources = reverseSources.filter {
+                if case .legacy = $0.backing { return true }
+                return false
+            }
             panelController = DictionaryPanelController(core: core,
                                                         supplementalDictionaries: supplementalDictionaries,
                                                         noteStore: noteStore,
@@ -326,10 +515,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                         aiService: aiService,
                                                         managedDictionaryQueryService: managedService,
                                                         dictionaryCatalog: catalog,
+                                                        reverseLookupService: reverseLookupService,
+                                                        reverseIndexCoordinator: reverseIndexCoordinator,
+                                                        reverseDictionarySources: reverseSources,
                                                         openAISettings: { [weak self] in
                                                             self?.showAISettings()
                                                         })
         } else {
+            legacyReverseDictionarySources = []
             let core = DictionaryCoreBridge(dictionaryPath: "", indexPath: "")
             panelController = DictionaryPanelController(core: core,
                                                         noteStore: noteStore,
@@ -337,6 +530,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                         aiService: aiService,
                                                         managedDictionaryQueryService: managedService,
                                                         dictionaryCatalog: catalog,
+                                                        reverseLookupService: reverseLookupService,
+                                                        reverseIndexCoordinator: reverseIndexCoordinator,
+                                                        reverseDictionarySources:
+                                                            Self.managedReverseSources(from: catalog),
                                                         openAISettings: { [weak self] in
                                                             self?.showAISettings()
                                                         })
@@ -373,6 +570,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         resourceCenterController.synchronize(catalog: catalog)
         dictionaryManagerController?.update(catalog: catalog)
         panelController?.updateDictionaryCatalog(catalog)
+        panelController?.updateReverseDictionarySources(
+            legacyReverseDictionarySources + Self.managedReverseSources(from: catalog)
+        )
         if replaceManagedCatalog, let service = managedDictionaryQueryService {
             Task { await service.replaceCatalog(catalog) }
         }
@@ -401,4 +601,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func showAISettings() { aiSettingsController.show() }
     @objc private func quitApplication() { NSApp.terminate(nil) }
+
+    private static func managedReverseSources(
+        from catalog: DictionaryCatalog
+    ) -> [ReverseDictionarySource] {
+        catalog.sortedDictionaries.compactMap { descriptor in
+            guard descriptor.enabled, descriptor.state == .ready,
+                  descriptor.sourceKind == .managedLocal ||
+                    descriptor.sourceKind == .openResource,
+                  descriptor.publishedIndexIdentity != nil else { return nil }
+            return ReverseDictionarySource(managed: descriptor)
+        }
+    }
+
 }

@@ -8,6 +8,14 @@ Apple Silicon (arm64).
 - Option-Space global selection lookup and manual search.
 - Local, user-imported MDX indexing and query.
 - Dictionary management, ordering, removal, favorites, and optional Obsidian notes.
+- Chinese-to-English reverse lookup derived locally from the user's enabled bilingual
+  dictionaries after an explicit index-build action.
+- Apple system offline Chinese/English translation, with language-pack preparation only
+  after an explicit user click.
+- Long-text translation, at most 15 vocabulary items, per-sentence basic structure
+  hints, and separate explicit per-sentence AI entry points.
+- Selection-button placement that avoids known selection rectangles without Screen
+  Recording.
 - Optional AI explanation only after the user configures and invokes a provider.
 
 ## Privacy and network behavior
@@ -24,11 +32,16 @@ with the app.
 
 ## Install and verify
 
-Download the arm64 ZIP and `SHA256SUMS`, then run
+Download the arm64 ZIP and `SHA256SUMS` from the official project release, then run
 `shasum -a 256 -c SHA256SUMS`. Unzip it and move `LocalDictionary.app` to
-`/Applications` or `~/Applications`. Start it normally; do not disable or bypass
-Gatekeeper. Grant Accessibility only if you want Option-Space to read the selected
-text. Import an MDX only when you have the right to use it.
+`/Applications` or `~/Applications`.
+
+If this release uses the `-unsigned.zip` community asset, it has no Developer ID
+signature or Apple notarization and Gatekeeper direct-open is not guaranteed. Try
+opening it normally; if macOS blocks it, use System Settings → Privacy & Security →
+Open Anyway for this app. Do not disable Gatekeeper or remove quarantine with `xattr`.
+Grant Accessibility only if you want Option-Space to read the selected text. Import an
+MDX only when you have the right to use it.
 
 ## Known limitations
 
@@ -37,6 +50,8 @@ text. Import an MDX only when you have the right to use it.
 - Selection extraction varies by application; copying text into the search field
   remains the fallback.
 - The production Resource Center currently has no listed resources.
+- Basic system translation quality varies by language pair and installed Apple model;
+  it is not represented as AI-quality or guaranteed.
 
 ## License
 

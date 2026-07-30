@@ -1,5 +1,21 @@
 # Tests
 
+`run-offline-language-smoke.sh` compiles a synthetic-only Swift harness for Chinese and
+mixed-text routing, lazy system-translation boundaries, long-text segmentation,
+15-item vocabulary capping, local basic analysis, deterministic reverse-index identity
+and stale-index rejection, and non-overlapping selection-button geometry.
+`run-community-unsigned-release-smoke.sh` uses a synthetic bundle archive, checksum,
+and manifest to verify the offline GitHub preparation contract for the distinct
+community asset.
+
+`run-selection-direction-integration-smoke.sh` connects a typed synthetic AX capture
+to the same production placement controller used by the query `NSPanel`, verifies
+per-display coordinate conversion and stale-generation fail-closed behavior, and
+exercises the native mixed-sentence direction action router, sentence-local translation,
+explicit language-pack preparation, result reassembly, and vocabulary recomputation.
+All three runners use synthetic data and avoid real dictionaries, Application Support,
+`local.json`, Keychain, and network access.
+
 `run-m24-release-structural-gates.sh` verifies the Release-only Hardened Runtime and
 minimal entitlement configuration, project-substituted version authority, arm64/macOS
 15 identity, empty production Resource Center network/trust configuration, source-traceable

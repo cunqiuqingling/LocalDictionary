@@ -27,16 +27,18 @@ struct AIProviderRequestFailure: LocalizedError {
     }
 }
 
-final class AIExplanationService {
+final class AIExplanationService: @unchecked Sendable {
     private let profileManager: AIProviderProfileManager
     private let cache: AIExplanationCache
-    private let clientFactory: () -> AIProviderClient
+    private let clientFactory: @Sendable () -> AIProviderClient
 
     init(configurationStore: AIConfigurationStore,
          keychain: AIKeychainStoring,
          cache: AIExplanationCache,
          profileManager: AIProviderProfileManager? = nil,
-         clientFactory: @escaping () -> AIProviderClient = { OpenAICompatibleClient() }) {
+         clientFactory: @escaping @Sendable () -> AIProviderClient = {
+             OpenAICompatibleClient()
+         }) {
         self.profileManager = profileManager ?? AIProviderProfileManager(
             store: configurationStore, keychain: keychain
         )
@@ -56,8 +58,7 @@ final class AIExplanationService {
             return AIServiceAvailability(
                 isEnabled: !enabled.isEmpty,
                 isConfigured: configured,
-                automaticSentenceAnalysisEnabled:
-                    snapshot.catalog.automaticSentenceAnalysisEnabled,
+                automaticSentenceAnalysisEnabled: false,
                 configuration: enabled.first ?? configurations.first ?? .googlePreset,
                 configurations: configurations
             )

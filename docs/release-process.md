@@ -1,7 +1,8 @@
 # LocalDictionary release process
 
-This document describes the prepared Developer ID distribution process. It does not
-declare that a signed or notarized binary has been published. The repository version is
+This document describes both the zero-cost community unsigned path and the prepared,
+optional Developer ID distribution process. It does not declare that any binary has been
+published. The repository version is
 currently `0.1` with build number `1`; a human must freeze the final version before any
 tag or public release.
 
@@ -47,6 +48,14 @@ signature required by modern macOS; the verifier accepts only no signature or th
 authority-free ad-hoc form and never treats it as Developer ID signing. A dirty tree is
 accepted only with the explicit test-only `--allow-dirty-dry-run` option.
 
+`build-release.sh --mode community-unsigned` is the zero-cost public distribution mode.
+It requires a clean exact branch/HEAD and rejects the dry-run dirty override, Team ID,
+and signing identity. It archives with signing disabled, produces
+`LocalDictionary-<version>-macOS-arm64-unsigned.zip`, and records
+`github-community-unsigned`, `unsigned`, `not-submitted`, `stapled: false`, and
+`gatekeeperDirectOpen: not-guaranteed` in the manifest. A linker-added authority-free
+ad-hoc signature is not represented as Developer ID signing.
+
 `build-release.sh --mode developer-id` requires a clean worktree, exact branch and HEAD,
 an explicit version matching Xcode build settings, an explicit Team ID, and exactly one
 matching Developer ID Application identity. It uses Xcode's standard archive/export
@@ -57,22 +66,33 @@ the signed bundle, requires a clean exact HEAD and an explicit Keychain profile,
 cannot submit unless `--submit-notarization` is also present. Failed service responses
 stop the pipeline; a sanitized diagnostic log may be retained outside the repository.
 
-`prepare-github-release.sh` is offline. It validates a canonical notarized asset,
-checksum, and manifest, then writes release notes and a draft-first command for later
-human execution.
+`prepare-github-release.sh` is offline. With `--mode notarized` it validates the
+canonical notarized asset. With `--mode community-unsigned` it validates the distinct
+unsigned name and exact fail-closed manifest fields. Both modes write release notes and
+a draft-first command for later human review; neither invokes GitHub.
 
 ## Canonical output
 
-The public asset is:
+The notarized public asset is:
 
 `LocalDictionary-<version>-macOS-arm64.zip`
+
+The community unsigned public asset is:
+
+`LocalDictionary-<version>-macOS-arm64-unsigned.zip`
 
 It contains only `LocalDictionary.app`. Public checksums are recorded in
 `SHA256SUMS`; `release-manifest.json` records the version, build, bundle identifier,
 architecture, minimum macOS, commit, Xcode/SDK, size, SHA-256, signing summary,
 entitlements, notarization submission ID when one truly exists, staple and Gatekeeper
-status, and build timestamp. A dSYM may be retained separately for crash diagnosis but
+status, distribution channel, and build timestamp. A dSYM may be retained separately for crash diagnosis but
 is not a default public asset.
+
+Community users must verify `SHA256SUMS` and obtain the asset from the official project
+release. Because it has neither Developer ID signing nor notarization, Gatekeeper may
+block first launch. The supported exception is the per-app “Open Anyway” action in
+System Settings → Privacy & Security. Documentation must never tell users to disable
+Gatekeeper globally or strip quarantine with `xattr`.
 
 ## Entitlements and permissions
 

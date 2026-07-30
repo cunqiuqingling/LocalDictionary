@@ -115,10 +115,10 @@ struct InlineLocalDictionaryHit: Equatable, Sendable {
     }
 }
 
-struct InlineLocalLookupSource {
+struct InlineLocalLookupSource: Sendable {
     let name: String
     let priority: Int
-    let lookup: (String) -> InlineLocalDictionaryHit?
+    let lookup: @MainActor @Sendable (String) -> InlineLocalDictionaryHit?
 }
 
 typealias ManagedInlineLookup = @Sendable (String) async -> [InlineLocalDictionaryHit]
@@ -475,7 +475,7 @@ actor InlineLocalLookupService {
         var quick: InlineWordQuickResult?
         for source in sources {
             guard !Task.isCancelled else { break }
-            guard let hit = source.lookup(normalized) else { continue }
+            guard let hit = await source.lookup(normalized) else { continue }
             hits.append(hit)
             if quick == nil, hit.hasChineseCoreDefinition {
                 quick = InlineWordQuickResult(

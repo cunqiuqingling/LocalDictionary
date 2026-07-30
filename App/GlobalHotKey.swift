@@ -1,17 +1,17 @@
 import Carbon.HIToolbox
 import Foundation
 
-final class GlobalHotKey {
+final class GlobalHotKey: @unchecked Sendable {
     private var hotKey: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
-    private let action: () -> Void
+    private let action: @MainActor @Sendable () -> Void
     private(set) var registrationStatus: OSStatus = OSStatus(eventInternalErr)
 
     var isRegistered: Bool {
         registrationStatus == noErr && hotKey != nil
     }
 
-    init(action: @escaping () -> Void) {
+    init(action: @escaping @MainActor @Sendable () -> Void) {
         self.action = action
 
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),

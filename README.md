@@ -8,7 +8,12 @@ Copyright (C) 2026 liuzhentie (刘震铁, aka "cunqiu")
 
 ## 当前公开状态
 
-首次公开阶段只提供源码，暂不提供官方签名或公证的 `.app`。请使用 Xcode 自行构建。仓库现已准备 Developer ID、Hardened Runtime、公证、staple、校验和与 draft-first GitHub Release 工程，但在真实证书、公证凭据、版本冻结和用户明确授权完成前，不构成正式二进制发布；不建议从非官方第三方来源下载声称属于本项目的预编译 App。
+首次公开发行支持零费用 `community-unsigned` 模式，同时保留未来可选的 Developer ID、
+Hardened Runtime、公证与 staple 流程。Community canonical asset 为
+`LocalDictionary-<version>-macOS-arm64-unsigned.zip`，没有 Developer ID 签名和 Apple
+公证，Gatekeeper 不保证直接打开。只应从项目官方 GitHub 仓库下载并核对 `SHA256SUMS`；
+首次打开若被阻止，仅使用“系统设置 → 隐私与安全性 → 仍要打开”，不得关闭 Gatekeeper。
+真实 GitHub Release 仍需版本冻结和用户明确授权，本源码状态本身不表示 Release 已创建。
 
 Debug 构建可能包含本机编译路径和开发调试信息，不应对外分发。需要自行分享构建产物时，应使用经过敏感内容审计的 Release 构建；但本项目当前仍不提供官方签名或公证的二进制 App。
 
@@ -25,9 +30,14 @@ Debug builds may contain local build paths and development metadata and must not
 - Option-Space 全局查询、手动输入和应用内划词。
 - 用户选择的本地 MDX 导入、独立 SQLite 索引与精确查询。
 - 可选的第三方 AI 单词解释和句子学习分析。
+- 中文词语/短语从本地双语释义反向查询英文 headword。
+- Apple 系统离线中英翻译；缺少语言包时只在用户点击后由系统准备。
+- 长文本先显示基础翻译，再显示最多 15 个重点词汇和逐句基础结构提示。
 - 词条收藏，以及写入用户明确选择的 Obsidian Markdown 笔记。
 
-项目不内置商业词典，不提供商业 MDX 下载，也不把 AI 描述为本地离线模型。
+项目不内置商业词典，不提供商业 MDX 下载，也不把 Apple Translation Framework 描述为
+AI API。当前不包含独立 NMT 模型。详见
+[docs/offline-translation.md](docs/offline-translation.md)。
 
 ## 系统要求
 
@@ -95,7 +105,9 @@ production catalog 为空。准入规则见
 
 ## AI 功能
 
-AI 是可选功能。本地词典查询不需要 AI。用户需要自行配置第三方 Provider；用户主动触发 AI 查询时，当前单词、短语或句子会发送给所选 Provider。
+AI 是可选功能。本地词典、中文反向查询、系统离线翻译和基础结构识别都不需要 AI。用户需要
+自行配置第三方 Provider；只有用户主动点击 AI 查询或逐句深度分析时，相应单词、短语或句子
+才会发送给所选 Provider。
 
 API Key 保存在 macOS Keychain。Provider 名称、URL、模型和开关等非敏感配置保存在本机设置中。项目不内置或分发 API Key，也不保证第三方 Provider 的可用性、价格、政策或隐私行为。详细数据边界见 [docs/privacy.md](docs/privacy.md)。
 

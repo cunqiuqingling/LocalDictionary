@@ -36,7 +36,7 @@ private final class DictionaryAppearanceView: NSVisualEffectView {
 }
 
 final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate,
-                                       NSTextViewDelegate {
+                                       NSTextViewDelegate, GlobalSelectionWindowHosting {
     private let oxfordCore: DictionaryCoreBridge
     private let supplementalDictionaries: [SupplementalDictionaryRuntime]
     private let entryFormatter = OxfordEntryFormatter()
@@ -56,6 +56,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private let sentenceMarkdownFormatter = SentenceAnalysisMarkdownFormatter()
     private let inlineAttributedFormatter = InlineLookupAttributedFormatter()
     private let inlineMarkdownFormatter = InlineLookupMarkdownFormatter()
+    private let longTextFormatter = LongTextResultFormatter()
     private let genericManagedPresenter = GenericManagedDictionaryPresenter()
     private lazy var inlinePageRenderer = InlinePageRenderer(formatter: inlineAttributedFormatter)
     private let searchField = NSSearchField()
@@ -70,6 +71,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private let aiIncludeCheckbox = NSButton(
         checkboxWithTitle: "收藏时加入 AI 内容", target: nil, action: nil
     )
+    private let systemTranslationHost = SystemTranslationHostController()
+    private let offlineActionButton = NSButton()
+    private let reverseIndexButton = NSButton()
     private var aiFooterHeightConstraint: NSLayoutConstraint?
     private var currentEntry: StructuredDictionaryEntry?
     private var currentQuery = ""
@@ -80,6 +84,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var aiTask: Task<Void, Never>?
     private var aiRequestLifecycle = AIRequestLifecycle()
     private var localGlossaryTask: Task<Void, Never>?
+    private var longTextTask: Task<Void, Never>?
+    private var reverseLookupTask: Task<Void, Never>?
     private var managedQueryTask: Task<Void, Never>?
     private var managedCatalogGeneration: UInt64 = 0
     private var preferredCatalogDescriptors: [String: DictionaryDescriptor] = [:]
@@ -87,12 +93,22 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     private var currentSentencePresentation: AISentenceAnalysisPresentation?
     private var currentLocalGlossary: LocalSentenceGlossary?
     private var currentSentenceStatus: String?
+    private var currentLongTextResult: LongTextAnalysisResult?
+    private var currentLongTextAI: [String: AISentenceAnalysisPresentation] = [:]
+    private var directionTasks: [String: Task<Void, Never>] = [:]
+    private var directionGenerationGate = SentenceDirectionGenerationGate()
+    private var longTextResultRevision: UInt64 = 0
+    private var offlineActionPair: OfflineTranslationPair?
+    private var offlineActionSource = ""
     private var aiSectionCharacterLocation: Int?
     private var queryGeneration = AIQueryGenerationGate()
     private var feedbackPopover: NSPopover?
-    private var localKeyMonitor: Any?
+    nonisolated(unsafe) private var localKeyMonitor: Any?
     private var isShowingNoteMenu = false
     private var animating = false
+    private let globalSelectionPlacement = GlobalSelectionPlacementController()
+    private var pendingGlobalSelectionContext: GlobalSelectionContext?
+    private var pendingGlobalSelectionFrame: CGRect?
     private var reportedUnavailableDictionaryIDs: Set<String> = []
     private var inlinePageID = UUID()
     private var inlineBaseContent = NSAttributedString(string: "")
@@ -109,12 +125,25 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
 
     private var localGlossaryService: LocalSentenceGlossaryService!
     private var inlineLocalLookupService: InlineLocalLookupService!
+    private let reverseLookupService: ReverseLookupService
+    private let reverseIndexCoordinator: ReverseIndexCoordinator
+    private var reverseDictionarySources: [ReverseDictionarySource]
+    private lazy var offlineTranslation = OfflineTranslationCoordinator(
+        maximumConcurrentTasks: 1
+    ) { [weak model = systemTranslationHost.model] in
+        guard let model else { throw OfflineTranslationError.hostEnded }
+        return await SystemTranslationEngine(model: model)
+    }
+    private lazy var longTextPipeline = LongTextAnalysisPipeline(
+        translation: offlineTranslation
+    )
 
     private enum AIAction: Equatable {
         case none
         case configure
         case explain(domain: String, bypassCache: Bool)
         case analyzeSentence(bypassCache: Bool)
+        case analyzeLongText
         case cancelSentence
     }
 
@@ -139,6 +168,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
          aiService: AIExplanationService,
          managedDictionaryQueryService: ManagedDictionaryQueryService,
          dictionaryCatalog: DictionaryCatalog = .empty(),
+         reverseLookupService: ReverseLookupService,
+         reverseIndexCoordinator: ReverseIndexCoordinator,
+         reverseDictionarySources: [ReverseDictionarySource] = [],
          openAISettings: @escaping () -> Void) {
         oxfordCore = core
         self.supplementalDictionaries = supplementalDictionaries.sorted {
@@ -148,6 +180,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         self.notePicker = notePicker
         self.aiService = aiService
         self.managedDictionaryQueryService = managedDictionaryQueryService
+        self.reverseLookupService = reverseLookupService
+        self.reverseIndexCoordinator = reverseIndexCoordinator
+        self.reverseDictionarySources = reverseDictionarySources
         self.openAISettings = openAISettings
         preferredCatalogDescriptors = Dictionary(uniqueKeysWithValues:
             dictionaryCatalog.dictionaries.filter {
@@ -194,6 +229,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     deinit {
         aiTask?.cancel()
         localGlossaryTask?.cancel()
+        longTextTask?.cancel()
+        reverseLookupTask?.cancel()
+        directionTasks.values.forEach { $0.cancel() }
         managedQueryTask?.cancel()
         inlineTasks.values.forEach { $0.cancel() }
         if let localKeyMonitor { NSEvent.removeMonitor(localKeyMonitor) }
@@ -206,6 +244,12 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         managedCatalogGeneration &+= 1
         managedQueryTask?.cancel()
         managedQueryTask = nil
+        directionTasks.values.forEach { $0.cancel() }
+        directionTasks.removeAll()
+        longTextTask?.cancel()
+        longTextTask = nil
+        reverseLookupTask?.cancel()
+        reverseLookupTask = nil
         preferredCatalogDescriptors = Dictionary(uniqueKeysWithValues:
             catalog.dictionaries.filter {
                 $0.sourceKind == .legacyReference
@@ -219,8 +263,19 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         managedQueryTask = nil
         localGlossaryTask?.cancel()
         localGlossaryTask = nil
+        longTextTask?.cancel()
+        longTextTask = nil
+        reverseLookupTask?.cancel()
+        reverseLookupTask = nil
         inlineTasks.values.forEach { $0.cancel() }
         inlineTasks.removeAll()
+    }
+
+    func updateReverseDictionarySources(_ sources: [ReverseDictionarySource]) {
+        reverseDictionarySources = sources
+        if currentIntent == .word, QueryIntentClassifier.classify(currentQuery).isChineseLookup {
+            reverseIndexButton.isHidden = sources.isEmpty
+        }
     }
 
     func toggle() {
@@ -228,13 +283,24 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @discardableResult
-    func showAndLookup(_ query: String) -> Bool {
+    func showAndLookup(_ query: String,
+                       globalSelectionContext: GlobalSelectionContext? = nil,
+                       generation: UInt64? = nil) -> Bool {
+        updateGlobalSelectionContext(
+            globalSelectionContext, generation: generation, expectedText: query
+        )
         let found = processQuery(query)
         show()
         return found
     }
 
-    func showSelectionTooLongMessage() {
+    func showSelectionTooLongMessage(
+        globalSelectionContext: GlobalSelectionContext? = nil,
+        generation: UInt64? = nil
+    ) {
+        updateGlobalSelectionContext(
+            globalSelectionContext, generation: generation, expectedText: nil
+        )
         resetAIState(query: "", intent: .textTooLong)
         setCurrentEntry(nil)
         displayText("选择内容较长，请缩短为一个句子后再分析。")
@@ -259,11 +325,23 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiStatusLabel.stringValue = ""
         aiClearCacheButton.isHidden = true
         if currentIntent == .sentence {
-            renderSentenceContent()
+            if let result = currentLongTextResult {
+                displayAttributedText(longTextFormatter.format(
+                    result,
+                    aiBySentence: currentLongTextAI.mapValues {
+                        aiSentenceFormatter.format($0)
+                    },
+                    queryGeneration: queryGeneration.generation
+                ))
+            } else {
+                renderSentenceContent()
+            }
         } else if let localResultContent {
             displayAttributedText(localResultContent)
         }
-        if currentIntent == .sentence, currentSentencePresentation == nil {
+        if currentIntent == .sentence, currentLongTextResult != nil {
+            configureLongTextAIAction()
+        } else if currentIntent == .sentence, currentSentencePresentation == nil {
             configureSentenceAction(for: currentQuery)
         } else if currentIntent != .sentence {
             configureAIAction(hasLocalResult: currentEntry?.isValid == true,
@@ -274,15 +352,39 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     func show() {
         guard let panel = window as? DictionaryPanel, !animating else { return }
         animating = true
-        let finalFrame = shownFrame(for: activeScreen(), panelSize: panel.frame.size)
+        let selectionContext = pendingGlobalSelectionContext
+        let finalFrame: NSRect
+        if let selectionContext {
+            pendingGlobalSelectionFrame = nil
+            let active = activeScreen()
+            let displays = SelectionDisplayGeometry.liveScreens()
+            guard globalSelectionPlacement.present(
+                selectionContext,
+                displays: displays,
+                fallbackDisplayID: Self.displayID(for: active),
+                host: self
+            ), let placementFrame = pendingGlobalSelectionFrame,
+               globalSelectionPlacement.selectedText(
+                   for: selectionContext.generation
+               ) == selectionContext.selectedText else {
+                animating = false
+                panel.orderOut(nil)
+                return
+            }
+            finalFrame = placementFrame
+        } else {
+            finalFrame = shownFrame(for: activeScreen(), panelSize: panel.frame.size)
+        }
         var startFrame = finalFrame
-        startFrame.origin.x += 24
+        if selectionContext == nil { startFrame.origin.x += 24 }
         panel.setFrame(startFrame, display: false)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        panel.makeFirstResponder(searchField)
+        if selectionContext == nil {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            panel.makeFirstResponder(searchField)
+        }
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.18
@@ -290,7 +392,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             panel.animator().setFrame(finalFrame, display: true)
             panel.animator().alphaValue = 1
         } completionHandler: { [weak self] in
-            self?.animating = false
+            Task { @MainActor in self?.animating = false }
         }
     }
 
@@ -303,6 +405,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         localGlossaryTask = nil
         managedQueryTask?.cancel()
         managedQueryTask = nil
+        directionTasks.values.forEach { $0.cancel() }
+        directionTasks.removeAll()
+        directionGenerationGate.invalidateAll()
         cancelAllInlineLookups(clear: true)
         renderInlinePage()
         hideInlineSelectionButton()
@@ -316,10 +421,90 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             panel.animator().setFrame(hiddenFrame, display: true)
             panel.animator().alphaValue = 0
         } completionHandler: { [weak self, weak panel] in
-            panel?.orderOut(nil)
-            panel?.alphaValue = 1
-            self?.animating = false
+            Task { @MainActor in
+                panel?.orderOut(nil)
+                panel?.alphaValue = 1
+                self?.animating = false
+                self?.pendingGlobalSelectionContext = nil
+                self?.pendingGlobalSelectionFrame = nil
+            }
         }
+    }
+
+    func invalidateGlobalSelection(generation: UInt64) {
+        pendingGlobalSelectionContext = nil
+        pendingGlobalSelectionFrame = nil
+        globalSelectionPlacement.invalidate(generation: generation, host: self)
+    }
+
+    func isPresentingGlobalSelection(generation: UInt64) -> Bool {
+        pendingGlobalSelectionContext?.generation == generation &&
+            globalSelectionPlacement.currentGeneration == generation &&
+            window?.isVisible == true
+    }
+
+    func refreshGlobalSelection(_ context: GlobalSelectionContext) -> Bool {
+        guard pendingGlobalSelectionContext?.generation == context.generation,
+              globalSelectionPlacement.refresh(context) else { return false }
+        pendingGlobalSelectionContext = context
+        return true
+    }
+
+    func repositionGlobalSelection(_ context: GlobalSelectionContext) {
+        guard SentenceTextNormalizer.normalize(context.selectedText) == currentQuery,
+              let panel = window as? DictionaryPanel, panel.isVisible else {
+            invalidateGlobalSelection(generation: context.generation)
+            return
+        }
+        pendingGlobalSelectionContext = context
+        pendingGlobalSelectionFrame = nil
+        let active = activeScreen()
+        guard globalSelectionPlacement.present(
+            context,
+            displays: SelectionDisplayGeometry.liveScreens(),
+            fallbackDisplayID: Self.displayID(for: active),
+            host: self
+        ), pendingGlobalSelectionFrame != nil else {
+            hide()
+            invalidateGlobalSelection(generation: context.generation)
+            return
+        }
+    }
+
+    var globalSelectionWindowSize: CGSize {
+        window?.frame.size ?? CGSize(width: 420, height: 620)
+    }
+
+    func applyGlobalSelectionWindowFrame(_ frame: CGRect, generation: UInt64) {
+        guard pendingGlobalSelectionContext?.generation == generation else { return }
+        pendingGlobalSelectionFrame = frame
+        if window?.isVisible == true {
+            window?.setFrame(frame, display: true, animate: false)
+        }
+    }
+
+    func hideGlobalSelectionWindow() {
+        pendingGlobalSelectionFrame = nil
+        window?.orderOut(nil)
+    }
+
+    private func updateGlobalSelectionContext(_ context: GlobalSelectionContext?,
+                                              generation: UInt64?,
+                                              expectedText: String?) {
+        guard let context,
+              expectedText.map({
+                  SentenceTextNormalizer.normalize(context.selectedText) ==
+                    SentenceTextNormalizer.normalize($0)
+              }) ?? true else {
+            if let generation {
+                invalidateGlobalSelection(generation: generation)
+            } else {
+                pendingGlobalSelectionContext = nil
+                pendingGlobalSelectionFrame = nil
+            }
+            return
+        }
+        pendingGlobalSelectionContext = context
     }
 
     private func configure(_ panel: DictionaryPanel) {
@@ -353,7 +538,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             }
         }
 
-        searchField.placeholderString = "输入英文单词"
+        searchField.placeholderString = "输入英文、中文或段落"
         searchField.sendsWholeSearchString = true
         searchField.delegate = self
         searchField.target = self
@@ -451,10 +636,29 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         aiClearCacheButton.target = self
         aiClearCacheButton.action = #selector(clearCurrentAICache)
         aiClearCacheButton.isHidden = true
-        let aiButtons = NSStackView(views: [aiActionButton, aiSettingsButton, aiClearCacheButton])
+        offlineActionButton.bezelStyle = .rounded
+        offlineActionButton.controlSize = .small
+        offlineActionButton.target = self
+        offlineActionButton.action = #selector(performOfflineAction)
+        offlineActionButton.isHidden = true
+        reverseIndexButton.title = "建立中文反向索引…"
+        reverseIndexButton.bezelStyle = .rounded
+        reverseIndexButton.controlSize = .small
+        reverseIndexButton.target = self
+        reverseIndexButton.action = #selector(buildReverseIndexes)
+        reverseIndexButton.isHidden = true
+        let aiButtons = NSStackView(views: [
+            reverseIndexButton, offlineActionButton, aiActionButton,
+            aiSettingsButton, aiClearCacheButton
+        ])
         aiButtons.orientation = .horizontal
         aiButtons.spacing = 8
         aiButtons.alignment = .centerY
+        let translationHostView = systemTranslationHost.view
+        translationHostView.translatesAutoresizingMaskIntoConstraints = false
+        translationHostView.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        translationHostView.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+        aiFooter.addArrangedSubview(translationHostView)
         aiFooter.addArrangedSubview(aiStatusLabel)
         aiFooter.addArrangedSubview(aiButtons)
         aiFooter.orientation = .vertical
@@ -495,6 +699,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @objc private func performSearch() {
+        pendingGlobalSelectionContext = nil
+        pendingGlobalSelectionFrame = nil
         guard !searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             resetAIState(query: "", intent: .textTooLong)
             setCurrentEntry(nil)
@@ -518,6 +724,11 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             }
             return false
         case .word, .phrase:
+            if classification.isChineseLookup {
+                searchField.stringValue = classification.normalizedText
+                prepareChineseReverseLookup(classification.normalizedText)
+                return false
+            }
             switch SelectedTextCleaner.clean(classification.normalizedText) {
             case .value(let dictionaryQuery):
                 searchField.stringValue = dictionaryQuery
@@ -534,15 +745,9 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                 return false
             }
         case .sentence:
-            let sentence = classification.normalizedText
-            if classification.shouldAttemptLocalLookupFirst,
-               case .value(let dictionaryQuery) = SelectedTextCleaner.clean(sentence),
-               lookup(dictionaryQuery, intent: .phrase) {
-                searchField.stringValue = dictionaryQuery
-                return true
-            }
-            searchField.stringValue = sentence
-            prepareSentenceMode(sentence)
+            let text = classification.normalizedText
+            searchField.stringValue = text
+            prepareOfflineTextMode(text)
             return false
         }
     }
@@ -759,6 +964,10 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         localGlossaryTask = nil
         managedQueryTask?.cancel()
         managedQueryTask = nil
+        longTextTask?.cancel()
+        longTextTask = nil
+        reverseLookupTask?.cancel()
+        reverseLookupTask = nil
         _ = queryGeneration.beginQuery()
         currentQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         currentIntent = intent
@@ -769,10 +978,20 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         currentSentencePresentation = nil
         currentLocalGlossary = nil
         currentSentenceStatus = nil
+        currentLongTextResult = nil
+        currentLongTextAI.removeAll()
+        directionTasks.values.forEach { $0.cancel() }
+        directionTasks.removeAll()
+        directionGenerationGate.invalidateAll()
+        longTextResultRevision &+= 1
+        offlineActionPair = nil
+        offlineActionSource = ""
         aiSectionCharacterLocation = nil
         aiIncludeCheckbox.state = .off
         aiIncludeCheckbox.isHidden = true
         aiClearCacheButton.isHidden = true
+        offlineActionButton.isHidden = true
+        reverseIndexButton.isHidden = true
         aiSettingsButton.title = "打开 AI 设置…"
         updateAIFooter(visible: false)
         clearInlinePage()
@@ -827,6 +1046,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @objc private func performAIAction() {
+        guard validateGlobalSelectionActionContext() else { return }
         switch aiAction {
         case .none:
             return
@@ -836,6 +1056,8 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             requestAIExplanation(domain: domain, bypassCache: bypassCache)
         case .analyzeSentence(let bypassCache):
             requestSentenceAnalysis(bypassCache: bypassCache)
+        case .analyzeLongText:
+            requestLongTextAIAnalysis()
         case .cancelSentence:
             cancelSentenceAnalysis()
         }
@@ -966,6 +1188,314 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         }
     }
 
+    private func prepareChineseReverseLookup(_ query: String) {
+        resetAIState(query: query, intent: .phrase)
+        setCurrentEntry(nil)
+        displayText("正在查询本地中文反向索引…")
+        let generation = queryGeneration.generation
+        reverseLookupTask?.cancel()
+        reverseLookupTask = Task { [weak self] in
+            guard let self else { return }
+            let results = await reverseLookupService.lookup(query)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self.currentQuery == query,
+                      self.queryGeneration.accepts(generation) else { return }
+                if results.isEmpty {
+                    self.displayText("本地词典未找到可靠结果。\n\n可主动建立中文反向索引，或使用 Apple 系统离线中译英；AI 仅在点击后调用。")
+                    self.reverseIndexButton.isHidden = self.reverseDictionarySources.isEmpty
+                } else {
+                    self.displayAttributedText(self.formatReverseResults(results, query: query))
+                    self.reverseIndexButton.isHidden = true
+                }
+                self.configureOfflineAction(
+                    source: query,
+                    pair: OfflineTranslationPair(
+                        source: .simplifiedChinese, target: .english
+                    )
+                )
+                self.configureAIAction(hasLocalResult: !results.isEmpty, hasChinese: true)
+                self.updateAIFooter(visible: true)
+            }
+        }
+    }
+
+    private func formatReverseResults(_ results: [ReverseLookupResult],
+                                      query: String) -> NSAttributedString {
+        let output = NSMutableAttributedString()
+        output.append(NSAttributedString(
+            string: "“\(query)”的本地反向查词结果\n",
+            attributes: [.font: NSFont.systemFont(ofSize: 16, weight: .bold)]
+        ))
+        for result in results.prefix(20) {
+            output.append(NSAttributedString(
+                string: "\n\(result.headword)\n",
+                attributes: [.font: NSFont.systemFont(ofSize: 14, weight: .semibold)]
+            ))
+            output.append(NSAttributedString(
+                string: "\(result.definitionSnippet)\n来源：\(result.dictionaryName) · \(result.matchReason) · 置信度\(result.confidence.rawValue)\n",
+                attributes: [.font: NSFont.systemFont(ofSize: 12.5),
+                             .foregroundColor: NSColor.labelColor]
+            ))
+        }
+        output.append(NSAttributedString(
+            string: "\n反向匹配是本地候选，不代表唯一正确答案。",
+            attributes: [.font: NSFont.systemFont(ofSize: 11),
+                         .foregroundColor: NSColor.secondaryLabelColor]
+        ))
+        return output
+    }
+
+    private func configureOfflineAction(source: String, pair: OfflineTranslationPair) {
+        offlineActionPair = pair
+        offlineActionSource = source
+        offlineActionButton.isHidden = false
+        offlineActionButton.isEnabled = false
+        offlineActionButton.title = "检查系统离线翻译…"
+        Task { [weak self] in
+            guard let self else { return }
+            let availability = await offlineTranslation.availability(for: pair)
+            await MainActor.run {
+                guard self.currentQuery == source,
+                      self.offlineActionPair == pair else { return }
+                switch availability {
+                case .installed:
+                    self.offlineActionButton.title = self.currentIntent == .sentence
+                        ? "重新进行基础离线翻译" : "系统离线中译英"
+                    self.offlineActionButton.isEnabled = true
+                case .supportedNeedsDownload:
+                    self.offlineActionButton.title = "准备离线语言包…"
+                    self.offlineActionButton.isEnabled = true
+                case .unsupported:
+                    self.offlineActionButton.title = "系统不支持该语言方向"
+                    self.offlineActionButton.isEnabled = false
+                case .checking:
+                    self.offlineActionButton.title = "正在检查系统语言包…"
+                    self.offlineActionButton.isEnabled = false
+                case .temporarilyUnavailable:
+                    self.offlineActionButton.title = "系统翻译暂时不可用"
+                    self.offlineActionButton.isEnabled = false
+                }
+                self.updateAIFooter(visible: true)
+            }
+        }
+    }
+
+    @objc private func performOfflineAction() {
+        guard validateGlobalSelectionActionContext() else { return }
+        guard let pair = offlineActionPair, !offlineActionSource.isEmpty else { return }
+        let source = offlineActionSource
+        offlineActionButton.isEnabled = false
+        Task { [weak self] in
+            guard let self else { return }
+            let availability = await offlineTranslation.availability(for: pair)
+            do {
+                switch availability {
+                case .supportedNeedsDownload:
+                    await MainActor.run {
+                        self.offlineActionButton.title = "正在准备语言包…"
+                        self.aiStatusLabel.stringValue =
+                            "首次下载需要网络，由 Apple 系统界面处理；LocalDictionary 不托管语言包。"
+                    }
+                    try await offlineTranslation.prepareLanguagePack(for: pair)
+                    await MainActor.run {
+                        guard self.currentQuery == source else { return }
+                        self.offlineActionButton.title = self.currentIntent == .sentence
+                            ? "进行基础离线翻译" : "系统离线中译英"
+                        self.offlineActionButton.isEnabled = true
+                        self.aiStatusLabel.stringValue =
+                            "语言包已安装。再次点击即可离线翻译。"
+                    }
+                case .installed:
+                    if await MainActor.run(body: { self.currentIntent == .sentence }) {
+                        await MainActor.run { self.prepareOfflineTextMode(source) }
+                    } else {
+                        let response = try await offlineTranslation.translate([
+                            OfflineTranslationRequest(sourceText: source, pair: pair)
+                        ])
+                        await MainActor.run {
+                            guard self.currentQuery == source,
+                                  let value = response.first else { return }
+                            let output = NSMutableAttributedString(
+                                attributedString: self.textView.attributedString()
+                            )
+                            output.append(NSAttributedString(
+                                string: "\n\n系统离线中译英\n\(value.translatedText)\n",
+                                attributes: [.font: NSFont.systemFont(ofSize: 14)]
+                            ))
+                            self.displayAttributedText(output)
+                            self.offlineActionButton.isEnabled = true
+                        }
+                    }
+                case .unsupported:
+                    throw OfflineTranslationError.unsupportedLanguagePair
+                case .checking, .temporarilyUnavailable:
+                    throw OfflineTranslationError.systemFailure
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.currentQuery == source else { return }
+                    self.aiStatusLabel.stringValue =
+                        (error as? LocalizedError)?.errorDescription ?? "系统翻译暂时失败。"
+                    self.offlineActionButton.isEnabled = true
+                }
+            }
+        }
+    }
+
+    @objc private func buildReverseIndexes() {
+        guard validateGlobalSelectionActionContext() else { return }
+        guard !reverseDictionarySources.isEmpty else { return }
+        reverseIndexButton.isEnabled = false
+        reverseIndexButton.title = "正在建立反向索引…"
+        let query = currentQuery
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let descriptors = try await reverseIndexCoordinator.build(
+                    reverseDictionarySources
+                ) { [weak self] progress in
+                    self?.aiStatusLabel.stringValue =
+                        "\(progress.dictionaryName)：已处理 \(progress.processedEntries) 条"
+                }
+                await reverseLookupService.replaceDescriptors(descriptors)
+                await MainActor.run {
+                    guard self.currentQuery == query else { return }
+                    self.reverseIndexButton.isEnabled = true
+                    self.reverseIndexButton.title = "重建中文反向索引…"
+                    self.prepareChineseReverseLookup(query)
+                }
+            } catch {
+                await MainActor.run {
+                    self.reverseIndexButton.isEnabled = true
+                    self.reverseIndexButton.title = "重新建立反向索引…"
+                    self.aiStatusLabel.stringValue =
+                        (error as? LocalizedError)?.errorDescription ?? "反向索引建立失败。"
+                }
+            }
+        }
+    }
+
+    private func prepareOfflineTextMode(_ text: String) {
+        resetAIState(query: text, intent: .sentence)
+        setCurrentEntry(nil)
+        displayText("一、基础翻译\n正在检查系统离线语言包并进行本机分析…")
+        aiStatusLabel.stringValue = "基础离线分析不会调用任何 AI Provider"
+        updateAIFooter(visible: true)
+        let generation = queryGeneration.generation
+        longTextTask?.cancel()
+        longTextTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await longTextPipeline.analyze(text)
+                await MainActor.run {
+                    guard self.currentQuery == text,
+                          self.queryGeneration.accepts(generation) else { return }
+                    self.currentLongTextResult = result
+                    self.longTextResultRevision &+= 1
+                    self.displayAttributedText(self.longTextFormatter.format(
+                        result, queryGeneration: generation
+                    ))
+                    self.textView.scrollToBeginningOfDocument(nil)
+                    if let missing = result.sentences.first(where: {
+                        $0.translationError == .languagePackRequired
+                    }) {
+                        let pair = missing.language == .simplifiedChinese
+                            ? OfflineTranslationPair(source: .simplifiedChinese, target: .english)
+                            : OfflineTranslationPair(source: .english, target: .simplifiedChinese)
+                        self.configureOfflineAction(source: text, pair: pair)
+                    }
+                    self.configureLongTextAIAction()
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.currentQuery == text,
+                          self.queryGeneration.accepts(generation) else { return }
+                    self.displayText("一、基础翻译\n系统翻译暂时失败。\n\n三、逐句基础解析\n基础结构分析未丢失，可重试系统翻译。")
+                    let language = QueryIntentClassifier.classify(text).language
+                    let pair = language == .simplifiedChinese
+                        ? OfflineTranslationPair(source: .simplifiedChinese, target: .english)
+                        : OfflineTranslationPair(source: .english, target: .simplifiedChinese)
+                    self.configureOfflineAction(source: text, pair: pair)
+                    self.configureLongTextAIAction()
+                }
+            }
+        }
+    }
+
+    private func configureLongTextAIAction() {
+        let text = currentQuery
+        let generation = queryGeneration.generation
+        aiTask?.cancel()
+        aiTask = Task { [weak self] in
+            guard let self else { return }
+            let availability = await aiService.availability()
+            await MainActor.run {
+                guard self.currentQuery == text,
+                      self.queryGeneration.accepts(generation) else { return }
+                if availability.isEnabled && availability.isConfigured {
+                    self.aiAction = .analyzeLongText
+                    self.aiActionButton.title = "逐句进行 AI 深度分析"
+                    self.aiActionButton.isHidden = false
+                    self.aiActionButton.isEnabled = true
+                    self.aiSettingsButton.isHidden = true
+                    self.aiStatusLabel.stringValue = "仅点击后逐句发送给所配置的第三方 Provider"
+                } else {
+                    self.aiAction = .configure
+                    self.aiActionButton.title = "配置 AI 服务…"
+                    self.aiActionButton.isHidden = false
+                    self.aiActionButton.isEnabled = true
+                    self.aiSettingsButton.isHidden = true
+                }
+                self.updateAIFooter(visible: true)
+            }
+        }
+    }
+
+    private func requestLongTextAIAnalysis() {
+        guard let result = currentLongTextResult else { return }
+        let text = currentQuery
+        let generation = queryGeneration.generation
+        aiActionButton.isEnabled = false
+        aiActionButton.title = "正在逐句分析…"
+        aiTask?.cancel()
+        aiTask = Task { [weak self] in
+            guard let self else { return }
+            var presentations: [String: AISentenceAnalysisPresentation] = [:]
+            var failures = 0
+            for sentence in result.sentences {
+                guard !Task.isCancelled else { return }
+                do {
+                    presentations[sentence.id] =
+                        try await aiService.analyzeSentence(sentence.sourceText)
+                } catch {
+                    failures += 1
+                }
+            }
+            await MainActor.run {
+                guard self.currentQuery == text,
+                      self.queryGeneration.accepts(generation),
+                      let latest = self.currentLongTextResult else { return }
+                self.currentLongTextAI = presentations
+                self.displayAttributedText(
+                    self.longTextFormatter.format(
+                        latest,
+                        aiBySentence: presentations.mapValues {
+                            self.aiSentenceFormatter.format($0)
+                        },
+                        queryGeneration: generation
+                    )
+                )
+                self.aiAction = .analyzeLongText
+                self.aiActionButton.title = failures == 0
+                    ? "重新逐句分析" : "重试逐句分析（\(failures) 句失败）"
+                self.aiActionButton.isEnabled = true
+                self.aiStatusLabel.stringValue =
+                    "AI 结果按句关联；基础离线翻译与结构提示仍保留。"
+            }
+        }
+    }
+
     private func prepareSentenceMode(_ sentence: String) {
         resetAIState(query: sentence, intent: .sentence)
         setCurrentEntry(nil)
@@ -1037,19 +1567,15 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     self.renderSentenceContent()
                     return
                 }
-                if availability.automaticSentenceAnalysisEnabled {
-                    self.requestSentenceAnalysis(expectedGeneration: generation)
-                } else {
-                    self.aiAction = .analyzeSentence(bypassCache: false)
-                    self.currentSentenceStatus = "可按需请求 AI；本地词语参考不会联网"
-                    self.aiStatusLabel.stringValue = "完整句子不会自动发送"
-                    self.aiActionButton.title = "AI 翻译与句子解析"
-                    self.aiActionButton.isHidden = false
-                    self.aiActionButton.isEnabled = true
-                    self.aiSettingsButton.isHidden = true
-                    self.updateAIFooter(visible: true)
-                    self.renderSentenceContent()
-                }
+                self.aiAction = .analyzeSentence(bypassCache: false)
+                self.currentSentenceStatus = "可按需请求 AI；本地词语参考不会联网"
+                self.aiStatusLabel.stringValue = "完整句子不会自动发送"
+                self.aiActionButton.title = "AI 翻译与句子解析"
+                self.aiActionButton.isHidden = false
+                self.aiActionButton.isEnabled = true
+                self.aiSettingsButton.isHidden = true
+                self.updateAIFooter(visible: true)
+                self.renderSentenceContent()
             }
         }
     }
@@ -1151,10 +1677,12 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     private func updateAIFooter(visible: Bool, compact: Bool = false) {
-        aiFooter.isHidden = !visible
+        let shouldShow = visible || !offlineActionButton.isHidden || !reverseIndexButton.isHidden
+        aiFooter.isHidden = !shouldShow
         if visible, compact { aiActionButton.isHidden = true }
         let compactHeight: CGFloat = aiClearCacheButton.isHidden ? 22 : 48
-        aiFooterHeightConstraint?.constant = visible ? (compact ? compactHeight : 52) : 0
+        aiFooterHeightConstraint?.constant = shouldShow
+            ? max(52, compact ? compactHeight + 22 : 72) : 0
     }
 
     @objc private func aiInclusionDidChange() {
@@ -1669,6 +2197,272 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     func textViewDidChangeSelection(_ notification: Notification) {
         guard notification.object as? NSTextView === textView else { return }
         updateInlineSelectionButton()
+    }
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any,
+                  at charIndex: Int) -> Bool {
+        guard validateGlobalSelectionActionContext() else { return true }
+        let url: URL?
+        if let value = link as? URL {
+            url = value
+        } else if let value = link as? String {
+            url = URL(string: value)
+        } else {
+            url = nil
+        }
+        guard let url, url.scheme == "localdictionary" else { return false }
+        if url.host == "ai-sentence",
+           let sentenceID = url.pathComponents.last,
+           sentenceID.hasPrefix("sentence-"),
+           currentLongTextResult?.sentences.contains(where: {
+               $0.id == sentenceID
+           }) == true {
+            requestLongTextSentenceAI(sentenceID: sentenceID)
+            return true
+        }
+        guard let result = currentLongTextResult,
+              let action = LongTextActionRouter.parse(
+                  url,
+                  expectedGeneration: queryGeneration.generation,
+                  validSentenceIDs: Set(result.sentences.map(\.id))
+              ) else { return false }
+        performLongTextNativeAction(action)
+        return true
+    }
+
+    private func performLongTextNativeAction(_ action: LongTextNativeAction) {
+        switch action {
+        case .translate(let sentenceID, let pair, let generation):
+            startDirectionTranslation(
+                sentenceID: sentenceID, pair: pair,
+                queryGenerationValue: generation, prepareLanguagePack: false
+            )
+        case .prepareLanguagePack(let sentenceID, let pair, let generation):
+            startDirectionTranslation(
+                sentenceID: sentenceID, pair: pair,
+                queryGenerationValue: generation, prepareLanguagePack: true
+            )
+        }
+    }
+
+    private func startDirectionTranslation(
+        sentenceID: String,
+        pair: OfflineTranslationPair,
+        queryGenerationValue: UInt64,
+        prepareLanguagePack: Bool
+    ) {
+        guard queryGeneration.accepts(queryGenerationValue),
+              var result = currentLongTextResult,
+              var sentence = result.sentences.first(where: { $0.id == sentenceID }),
+              LongTextSegmenter.containsTranslatableLanguage(sentence.sourceText) else {
+            return
+        }
+        directionTasks[sentenceID]?.cancel()
+        let sentenceGeneration = directionGenerationGate.begin(sentenceID: sentenceID)
+        sentence.translatedText = nil
+        sentence.translationError = nil
+        sentence.translationState = .translating(pair)
+        result = result.replacingSentence(sentence)
+        currentLongTextResult = result
+        longTextResultRevision &+= 1
+        renderLongTextResult(result)
+        let query = currentQuery
+
+        directionTasks[sentenceID] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                var availability = await self.longTextPipeline.availability(for: pair)
+                if prepareLanguagePack {
+                    switch availability {
+                    case .supportedNeedsDownload:
+                        try await self.longTextPipeline.prepareLanguagePack(for: pair)
+                        availability = .installed
+                    case .installed:
+                        break
+                    case .unsupported:
+                        throw OfflineTranslationError.unsupportedLanguagePair
+                    case .checking, .temporarilyUnavailable:
+                        throw OfflineTranslationError.systemFailure
+                    }
+                }
+                switch availability {
+                case .installed:
+                    break
+                case .supportedNeedsDownload:
+                    self.applyDirectionState(
+                        .languagePackRequired(pair), error: .languagePackRequired,
+                        sentenceID: sentenceID, sentenceGeneration: sentenceGeneration,
+                        query: query, queryGenerationValue: queryGenerationValue
+                    )
+                    return
+                case .unsupported:
+                    throw OfflineTranslationError.unsupportedLanguagePair
+                case .checking, .temporarilyUnavailable:
+                    throw OfflineTranslationError.systemFailure
+                }
+                let translated = try await self.longTextPipeline.translateSingleSentence(
+                    sentence, pair: pair
+                )
+                guard self.acceptsDirectionResult(
+                    sentenceID: sentenceID,
+                    sentenceGeneration: sentenceGeneration,
+                    query: query,
+                    queryGenerationValue: queryGenerationValue
+                ), let latest = self.currentLongTextResult else { return }
+                let merged = latest.replacingSentence(translated)
+                self.currentLongTextResult = merged
+                self.longTextResultRevision &+= 1
+                let vocabularyRevision = self.longTextResultRevision
+                self.renderLongTextResult(merged)
+                let vocabulary = await self.longTextPipeline.selectVocabulary(
+                    from: merged.sentences
+                )
+                guard self.acceptsDirectionResult(
+                    sentenceID: sentenceID,
+                    sentenceGeneration: sentenceGeneration,
+                    query: query,
+                    queryGenerationValue: queryGenerationValue
+                ), self.longTextResultRevision == vocabularyRevision,
+                   let newest = self.currentLongTextResult else { return }
+                let refreshed = newest.replacingVocabulary(vocabulary)
+                self.currentLongTextResult = refreshed
+                self.renderLongTextResult(refreshed)
+                self.aiStatusLabel.stringValue =
+                    "第 \(translated.order + 1) 句系统离线翻译已更新。"
+            } catch is CancellationError {
+                self.applyDirectionState(
+                    .cancelled(pair), error: .cancelled,
+                    sentenceID: sentenceID, sentenceGeneration: sentenceGeneration,
+                    query: query, queryGenerationValue: queryGenerationValue
+                )
+            } catch let error as OfflineTranslationError {
+                self.applyDirectionState(
+                    LongTextAnalysisPipeline.state(for: error, pair: pair), error: error,
+                    sentenceID: sentenceID, sentenceGeneration: sentenceGeneration,
+                    query: query, queryGenerationValue: queryGenerationValue
+                )
+            } catch {
+                self.applyDirectionState(
+                    .failed(pair), error: .systemFailure,
+                    sentenceID: sentenceID, sentenceGeneration: sentenceGeneration,
+                    query: query, queryGenerationValue: queryGenerationValue
+                )
+            }
+            if self.directionGenerationGate.accepts(
+                sentenceID: sentenceID, generation: sentenceGeneration
+            ) {
+                self.directionTasks[sentenceID] = nil
+            }
+        }
+    }
+
+    private func applyDirectionState(
+        _ state: LongTextSentenceTranslationState,
+        error: OfflineTranslationError,
+        sentenceID: String,
+        sentenceGeneration: UInt64,
+        query: String,
+        queryGenerationValue: UInt64
+    ) {
+        guard acceptsDirectionResult(
+            sentenceID: sentenceID,
+            sentenceGeneration: sentenceGeneration,
+            query: query,
+            queryGenerationValue: queryGenerationValue
+        ), var result = currentLongTextResult,
+           var sentence = result.sentences.first(where: { $0.id == sentenceID }) else {
+            return
+        }
+        sentence.translatedText = nil
+        sentence.translationError = error
+        sentence.translationState = state
+        result = result.replacingSentence(sentence)
+        currentLongTextResult = result
+        longTextResultRevision &+= 1
+        renderLongTextResult(result)
+    }
+
+    private func acceptsDirectionResult(sentenceID: String,
+                                        sentenceGeneration: UInt64,
+                                        query: String,
+                                        queryGenerationValue: UInt64) -> Bool {
+        currentQuery == query &&
+            queryGeneration.accepts(queryGenerationValue) &&
+            directionGenerationGate.accepts(
+                sentenceID: sentenceID, generation: sentenceGeneration
+            ) &&
+            !Task.isCancelled
+    }
+
+    private func renderLongTextResult(_ result: LongTextAnalysisResult) {
+        displayAttributedText(longTextFormatter.format(
+            result,
+            aiBySentence: currentLongTextAI.mapValues {
+                aiSentenceFormatter.format($0)
+            },
+            queryGeneration: queryGeneration.generation
+        ))
+    }
+
+    private func validateGlobalSelectionActionContext() -> Bool {
+        guard let context = pendingGlobalSelectionContext else { return true }
+        guard globalSelectionPlacement.selectedText(for: context.generation).map({
+            SentenceTextNormalizer.normalize($0)
+        }) == currentQuery else {
+            hide()
+            invalidateGlobalSelection(generation: context.generation)
+            return false
+        }
+        return true
+    }
+
+    private func requestLongTextSentenceAI(sentenceID: String) {
+        guard let result = currentLongTextResult,
+              let sentence = result.sentences.first(where: { $0.id == sentenceID })
+        else { return }
+        let text = currentQuery
+        let generation = queryGeneration.generation
+        aiStatusLabel.stringValue = "正在分析第 \(sentence.order + 1) 句…"
+        aiTask?.cancel()
+        aiTask = Task { [weak self] in
+            guard let self else { return }
+            let availability = await aiService.availability()
+            guard availability.isEnabled, availability.isConfigured else {
+                await MainActor.run {
+                    guard self.currentQuery == text else { return }
+                    self.aiStatusLabel.stringValue = "请先配置并启用 AI 服务。"
+                    self.openAISettings()
+                }
+                return
+            }
+            do {
+                let presentation = try await aiService.analyzeSentence(sentence.sourceText)
+                await MainActor.run {
+                    guard self.currentQuery == text,
+                          self.queryGeneration.accepts(generation),
+                          let latest = self.currentLongTextResult else { return }
+                    self.currentLongTextAI[sentenceID] = presentation
+                    self.displayAttributedText(
+                        self.longTextFormatter.format(
+                            latest,
+                            aiBySentence: self.currentLongTextAI.mapValues {
+                                self.aiSentenceFormatter.format($0)
+                            },
+                            queryGeneration: generation
+                        )
+                    )
+                    self.aiStatusLabel.stringValue =
+                        "第 \(sentence.order + 1) 句 AI 结果已按句嵌入。"
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.currentQuery == text else { return }
+                    self.aiStatusLabel.stringValue =
+                        (error as? LocalizedError)?.errorDescription ??
+                        "本句 AI 深度分析失败，可稍后重试。"
+                }
+            }
+        }
     }
 
     private func updateInlineSelectionButton() {
@@ -2402,6 +3196,12 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
         return NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
             ?? NSScreen.main
             ?? NSScreen.screens[0]
+    }
+
+    private static func displayID(for screen: NSScreen) -> UInt32? {
+        (screen.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? NSNumber)?.uint32Value
     }
 
     private func shownFrame(for screen: NSScreen, panelSize: NSSize) -> NSRect {

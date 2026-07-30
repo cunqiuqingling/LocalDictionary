@@ -3,6 +3,8 @@
 NS_ASSUME_NONNULL_BEGIN
 
 typedef BOOL (^DictionaryIndexCancellationCheck)(void);
+typedef BOOL (^DictionaryReverseEntryHandler)(
+    NSString *headword, NSString *plainHTML, BOOL truncated);
 
 FOUNDATION_EXPORT NSInteger LocalDictionaryIndexSchemaVersion(void);
 FOUNDATION_EXPORT NSDictionary<NSString *, id> *LocalDictionaryBuildIndex(
@@ -136,6 +138,10 @@ class DictionaryBridgeStorage;
 - (NSDictionary<NSString *, id> *)lookup:(NSString *)query;
 - (NSDictionary<NSString *, id> *)lookup:(NSString *)query
                          maximumHTMLBytes:(NSUInteger)maximumHTMLBytes;
+- (NSDictionary<NSString *, id> *)enumerateEntriesForReverseIndex:
+        (NSUInteger)maximumHTMLBytes
+    cancellationCheck:(DictionaryIndexCancellationCheck)cancellationCheck
+               handler:(DictionaryReverseEntryHandler)handler;
 
 @end
 

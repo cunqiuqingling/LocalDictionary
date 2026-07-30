@@ -140,7 +140,7 @@ struct AIProviderSettingsSession {
         return try AIProviderCatalog(
             profiles: profiles,
             automaticFallbackEnabled: automaticFallbackEnabled,
-            automaticSentenceAnalysisEnabled: automaticSentenceAnalysisEnabled
+            automaticSentenceAnalysisEnabled: false
         ).normalizedForSave()
     }
 

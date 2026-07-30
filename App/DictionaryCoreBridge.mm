@@ -1027,4 +1027,41 @@ NSDictionary<NSString *, id> *LocalDictionaryBuildIndexFromManagedSource(
   }
 }
 
+- (NSDictionary<NSString *, id> *)enumerateEntriesForReverseIndex:
+        (NSUInteger)maximumHTMLBytes
+    cancellationCheck:(DictionaryIndexCancellationCheck)cancellationCheck
+               handler:(DictionaryReverseEntryHandler)handler {
+  if (![self isReady] || maximumHTMLBytes == 0 || !handler) {
+    return @{@"success" : @NO, @"error" : @"反向索引源不可用。"};
+  }
+  if ((_storage->managed_source &&
+       !_storage->managed_source->ValidForPublication()) ||
+      (_storage->managed_index &&
+       (!_storage->managed_index->valid() ||
+        !_storage->managed_index->NameStillMatches()))) {
+    _storage->error = "Managed dictionary runtime identity changed";
+    _storage->core.reset();
+    return @{@"success" : @NO, @"error" : @"反向索引源身份已变化。"};
+  }
+  try {
+    const auto visited = _storage->core->enumerateEntries(
+        static_cast<size_t>(maximumHTMLBytes),
+        [cancellationCheck]() {
+          return cancellationCheck && cancellationCheck();
+        },
+        [handler](const std::string &headword, const std::string &html,
+                  bool truncated) {
+          @autoreleasepool {
+            return handler(string(headword), string(html), truncated) == YES;
+          }
+        });
+    return @{@"success" : @YES, @"entryCount" : @(visited)};
+  } catch (const localdict::IndexBuildCancelled &) {
+    return @{@"success" : @NO, @"cancelled" : @YES};
+  } catch (const std::exception &exception) {
+    _storage->error = exception.what();
+    return @{@"success" : @NO, @"error" : @"反向索引建立失败。"};
+  }
+}
+
 @end

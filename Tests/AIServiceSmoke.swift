@@ -54,7 +54,7 @@ private final class MockURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-private final class StubKeychain: AIKeychainStoring {
+private final class StubKeychain: AIKeychainStoring, @unchecked Sendable {
     var values: [String: String] = [:]
     var failWrites = false
     var failReads = false
@@ -316,14 +316,18 @@ private struct AIServiceSmoke {
         let normalized = SentenceTextNormalizer.normalize(punctuation)
         try expect(normalized == "“If it doesn't work,” she said, “we'll try again.”",
                    "sentence punctuation and apostrophes preserved")
-        try expect(QueryIntentClassifier.classify(String(repeating: "a", count: 801)).intent == .textTooLong,
-                   "character safety limit")
-        try expect(QueryIntentClassifier.classify("First sentence. Second sentence. Third sentence. Fourth sentence.").intent == .textTooLong,
-                   "sentence count safety limit")
-        try expect(QueryIntentClassifier.classify("First sentence.\n\nSecond paragraph.").intent == .textTooLong,
-                   "multiple paragraphs safety limit")
-        try expect(QueryIntentClassifier.classify("这是一个主要为中文的句子。英文很少").intent == .textTooLong,
-                   "mostly non-English safety limit")
+        try expect(QueryIntentClassifier.classify(
+            String(repeating: "a", count: SentenceTextNormalizer.maximumCharacters + 1)
+        ).intent == .textTooLong, "character safety limit")
+        try expect(QueryIntentClassifier.classify(
+            "First sentence. Second sentence. Third sentence. Fourth sentence."
+        ).intent == .sentence, "multi-sentence local analysis route")
+        try expect(QueryIntentClassifier.classify(
+            "First sentence.\n\nSecond paragraph."
+        ).intent == .sentence, "multiple paragraphs local analysis route")
+        try expect(QueryIntentClassifier.classify(
+            "这是一个主要为中文的句子。英文很少"
+        ).intent == .sentence, "Chinese local analysis route")
     }
 
     private static func testConfigurationAndUserDefaults() throws {
@@ -397,8 +401,8 @@ private struct AIServiceSmoke {
         let manager = AIProviderProfileManager(store: store, keychain: keychain)
         let catalog = try await manager.catalog()
         try expect(catalog.profiles.count == 2 &&
-                   catalog.automaticSentenceAnalysisEnabled,
-                   "legacy configuration migrated into provider catalog")
+                   !catalog.automaticSentenceAnalysisEnabled,
+                   "legacy automatic analysis is migrated to explicit-click only")
         let google = catalog.profiles.first { $0.providerType == .googleGemini }!
         let zhipu = catalog.profiles.first { $0.providerType == .zhipu }!
         try expect(google.providerID == AIProviderConfiguration.googleProviderID &&
@@ -1059,6 +1063,7 @@ private struct AIServiceSmoke {
                    "word and sentence inline requests reuse one process credential")
     }
 
+    @MainActor
     private static func testInlineLocalLookupAndFormatting() async throws {
         var localQueryCount = 0
         let service = InlineLocalLookupService(sources: [
@@ -1286,6 +1291,7 @@ private struct AIServiceSmoke {
                    }, "crowded text uses an independent safe action row")
     }
 
+    @MainActor
     private static func testInlineSelectionSnapshotsAndAnchors() async throws {
         let base = NSMutableAttributedString()
         func append(_ text: String, font: NSFont = .systemFont(ofSize: 13)) {
@@ -1462,9 +1468,9 @@ private struct AIServiceSmoke {
                                                       cache: cache,
                                                       clientFactory: { client })
         let unavailable = await unavailableService.availability()
-        try expect(unavailable.automaticSentenceAnalysisEnabled && !unavailable.isConfigured &&
+        try expect(!unavailable.automaticSentenceAnalysisEnabled && !unavailable.isConfigured &&
                    client.sentenceCalls == 0,
-                   "automatic sentence analysis with no key performs no request")
+                   "automatic sentence analysis remains disabled and performs no request")
         let first = try await service.explain(query: "Prompt", domain: "technology")
         try expect(!first.fromCache && client.calls == 1, "network result")
         client.result = .failure(AIClientError.offline)

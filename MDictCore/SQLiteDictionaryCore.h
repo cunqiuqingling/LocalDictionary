@@ -103,6 +103,11 @@ class SQLiteDictionaryCore {
       const PublishedIndexMetadata &expected_metadata);
   LookupResult lookup(const std::string &input,
                       size_t maximum_html_bytes = 0);
+  uint64_t enumerateEntries(
+      size_t maximum_html_bytes,
+      const std::function<bool()> &cancellation_check,
+      const std::function<bool(const std::string &, const std::string &, bool)>
+          &visitor);
   CacheStats cacheStats() const;
 
   static std::string normalizeQuery(const std::string &input);

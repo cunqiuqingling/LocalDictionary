@@ -103,6 +103,15 @@
 		A10000000000000000000082 /* ResourceCenterController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000082 /* ResourceCenterController.swift */; };
 		A10000000000000000000083 /* ResourceCenterViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000083 /* ResourceCenterViewController.swift */; };
 		A10000000000000000000084 /* ReleaseLegal in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000085 /* ReleaseLegal */; };
+		A10000000000000000000090 /* Translation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000090 /* Translation.framework */; };
+		A10000000000000000000091 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000091 /* SwiftUI.framework */; };
+		A10000000000000000000092 /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000092 /* CryptoKit.framework */; };
+		A10000000000000000000093 /* OfflineTranslationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000093 /* OfflineTranslationModels.swift */; };
+		A10000000000000000000094 /* SystemTranslationHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000094 /* SystemTranslationHost.swift */; };
+		A10000000000000000000095 /* LongTextAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000095 /* LongTextAnalysis.swift */; };
+		A10000000000000000000096 /* ReverseLookup.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000096 /* ReverseLookup.swift */; };
+		A10000000000000000000097 /* ReverseIndexCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000097 /* ReverseIndexCoordinator.swift */; };
+		A10000000000000000000098 /* SelectionButtonPlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000098 /* SelectionButtonPlacement.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -216,6 +225,15 @@
 		B10000000000000000000083 /* ResourceCenterViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterViewController.swift; sourceTree = "<group>"; };
 		B10000000000000000000084 /* LocalDictionaryRelease.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LocalDictionaryRelease.entitlements; sourceTree = "<group>"; };
 		B10000000000000000000085 /* ReleaseLegal */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReleaseLegal; sourceTree = "<group>"; };
+		B10000000000000000000090 /* Translation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Translation.framework; path = System/Library/Frameworks/Translation.framework; sourceTree = SDKROOT; };
+		B10000000000000000000091 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		B10000000000000000000092 /* CryptoKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CryptoKit.framework; path = System/Library/Frameworks/CryptoKit.framework; sourceTree = SDKROOT; };
+		B10000000000000000000093 /* OfflineTranslationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineTranslationModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000094 /* SystemTranslationHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemTranslationHost.swift; sourceTree = "<group>"; };
+		B10000000000000000000095 /* LongTextAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTextAnalysis.swift; sourceTree = "<group>"; };
+		B10000000000000000000096 /* ReverseLookup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReverseLookup.swift; sourceTree = "<group>"; };
+		B10000000000000000000097 /* ReverseIndexCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReverseIndexCoordinator.swift; sourceTree = "<group>"; };
+		B10000000000000000000098 /* SelectionButtonPlacement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionButtonPlacement.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -229,6 +247,9 @@
 				A10000000000000000000016 /* libxml2.tbd in Frameworks */,
 				A10000000000000000000018 /* ApplicationServices.framework in Frameworks */,
 				A10000000000000000000025 /* Security.framework in Frameworks */,
+				A10000000000000000000090 /* Translation.framework in Frameworks */,
+				A10000000000000000000091 /* SwiftUI.framework in Frameworks */,
+				A10000000000000000000092 /* CryptoKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -304,6 +325,12 @@
 				B1000000000000000000004D /* DictionaryAppearanceTextAdapter.h */,
 				B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */,
 				B1000000000000000000004F /* AIRequestLifecycle.swift */,
+				B10000000000000000000093 /* OfflineTranslationModels.swift */,
+				B10000000000000000000094 /* SystemTranslationHost.swift */,
+				B10000000000000000000095 /* LongTextAnalysis.swift */,
+				B10000000000000000000096 /* ReverseLookup.swift */,
+				B10000000000000000000097 /* ReverseIndexCoordinator.swift */,
+				B10000000000000000000098 /* SelectionButtonPlacement.swift */,
 				B10000000000000000000060 /* ResourceManifestModels.swift */,
 				B10000000000000000000061 /* StrictJSON.swift */,
 				B10000000000000000000062 /* StrictResourceManifestDecoder.swift */,
@@ -380,6 +407,9 @@
 				B1000000000000000000001C /* libxml2.tbd */,
 				B1000000000000000000001E /* ApplicationServices.framework */,
 				B1000000000000000000002D /* Security.framework */,
+				B10000000000000000000090 /* Translation.framework */,
+				B10000000000000000000091 /* SwiftUI.framework */,
+				B10000000000000000000092 /* CryptoKit.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -517,6 +547,12 @@
 				A1000000000000000000002E /* AIProviderSettingsSession.swift in Sources */,
 				A1000000000000000000002F /* AIProviderCredentialSession.swift in Sources */,
 				A10000000000000000000030 /* InlineLookupModels.swift in Sources */,
+				A10000000000000000000093 /* OfflineTranslationModels.swift in Sources */,
+				A10000000000000000000094 /* SystemTranslationHost.swift in Sources */,
+				A10000000000000000000095 /* LongTextAnalysis.swift in Sources */,
+				A10000000000000000000096 /* ReverseLookup.swift in Sources */,
+				A10000000000000000000097 /* ReverseIndexCoordinator.swift in Sources */,
+				A10000000000000000000098 /* SelectionButtonPlacement.swift in Sources */,
 				A10000000000000000000032 /* DictionaryCatalog.swift in Sources */,
 				A10000000000000000000033 /* DictionaryCatalogStore.swift in Sources */,
 				A10000000000000000000034 /* LegacyDictionaryConfigAdapter.swift in Sources */,

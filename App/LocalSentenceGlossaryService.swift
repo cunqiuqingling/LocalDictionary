@@ -7,15 +7,15 @@ struct LocalGlossaryLookupResult: Equatable, Sendable {
     let source: String
 }
 
-struct LocalGlossaryDictionarySource {
+struct LocalGlossaryDictionarySource: Sendable {
     let name: String
     let priority: Int
-    let lookup: (String) -> LocalGlossaryLookupResult?
+    let lookup: @MainActor @Sendable (String) -> LocalGlossaryLookupResult?
 }
 
 typealias ManagedGlossaryLookup = @Sendable (String) async -> LocalGlossaryLookupResult?
 
-struct LocalSentenceGlossaryEntry: Equatable {
+struct LocalSentenceGlossaryEntry: Equatable, Sendable {
     let surface: String
     let lookupTerm: String
     let partOfSpeech: String
@@ -29,7 +29,7 @@ struct LocalSentenceGlossaryEntry: Equatable {
     }
 }
 
-struct LocalSentenceGlossary: Equatable {
+struct LocalSentenceGlossary: Equatable, Sendable {
     let sourceText: String
     let entries: [LocalSentenceGlossaryEntry]
     let candidateQueryCount: Int
@@ -132,7 +132,7 @@ actor LocalSentenceGlossaryService {
             guard !Task.isCancelled,
                   queryCount < Self.maximumCandidateQueries else { return nil }
             queryCount += 1
-            if let hit = source.lookup(term),
+            if let hit = await source.lookup(term),
                !Self.uniqueChinese(hit.definitions, maximum: 1).isEmpty {
                 return hit
             }
@@ -142,7 +142,7 @@ actor LocalSentenceGlossaryService {
                 guard !Task.isCancelled,
                       queryCount < Self.maximumCandidateQueries else { return nil }
                 queryCount += 1
-                if let hit = source.lookup(term),
+                if let hit = await source.lookup(term),
                    !Self.uniqueChinese(hit.definitions, maximum: 1).isEmpty {
                     return hit
                 }

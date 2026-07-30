@@ -64,6 +64,10 @@ forbid_text '^[[:space:]]*gh[[:space:]]+release[[:space:]]+create' \
 require_fixed '--submit-notarization' "$ROOT/scripts/release/notarize-release.sh"
 require_text 'CODE_SIGNING_ALLOWED=NO' "$ROOT/scripts/release/build-release.sh"
 require_text 'UNSIGNED-NOT-FOR-DISTRIBUTION' "$ROOT/scripts/release/build-release.sh"
+require_text 'community-unsigned' "$ROOT/scripts/release/build-release.sh"
+require_text 'macOS-\$RELEASE_ARCHITECTURE-unsigned.zip' \
+    "$ROOT/scripts/release/build-release.sh"
+require_text 'github-community-unsigned' "$ROOT/scripts/release/build-release.sh"
 require_text 'plutil -insert method -string developer-id' "$ROOT/scripts/release/build-release.sh"
 require_text 'OTHER_CODE_SIGN_FLAGS="--timestamp"' "$ROOT/scripts/release/build-release.sh"
 require_text 'codesign --verify --deep --strict' "$ROOT/scripts/release/notarize-release.sh"

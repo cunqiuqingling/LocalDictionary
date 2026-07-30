@@ -2,6 +2,8 @@
 
 ## Before archive
 
+- [ ] Distribution mode is explicitly chosen: `community-unsigned` or `developer-id`;
+      unsigned status is never described as notarized or Developer ID signed.
 - [ ] Human approved the marketing version and build number.
 - [ ] Worktree is clean, branch and HEAD are exact, and all public tests passed.
 - [ ] `audit-release.sh` passes with the reviewed Xcode selected by `DEVELOPER_DIR`.
@@ -29,6 +31,12 @@
 
 ## Artifact and GitHub
 
+- [ ] Community mode uses
+      `LocalDictionary-<version>-macOS-arm64-unsigned.zip`; its manifest says
+      `github-community-unsigned`, `unsigned`, `not-submitted`, `stapled: false`, and
+      `gatekeeperDirectOpen: not-guaranteed`.
+- [ ] Developer ID mode uses `LocalDictionary-<version>-macOS-arm64.zip` only after
+      accepted notarization and successful staple/Gatekeeper verification.
 - [ ] Final ZIP was regenerated from the stapled app and contains only
       `LocalDictionary.app`.
 - [ ] Final name is `LocalDictionary-<version>-macOS-arm64.zip`.
@@ -46,8 +54,10 @@
 1. Download the ZIP and `SHA256SUMS`, then verify:
    `shasum -a 256 -c SHA256SUMS`.
 2. Unzip and move `LocalDictionary.app` to `/Applications` or `~/Applications`.
-3. Start the app normally. Do not disable Gatekeeper and do not remove quarantine with
-   `xattr`.
+3. For a notarized build, start the app normally. For a community unsigned build, first
+   try opening normally; if macOS blocks it, use only System Settings → Privacy &
+   Security → Open Anyway for this app. Do not disable Gatekeeper and do not remove
+   quarantine with `xattr`.
 4. Grant Accessibility only if using Option-Space selection lookup.
 5. Import an owned/licensed MDX manually. The app does not ship commercial dictionaries.
 6. The production Resource Center is intentionally empty until reviewed signed resource

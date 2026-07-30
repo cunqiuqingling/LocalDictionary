@@ -184,8 +184,7 @@ struct AIProviderCatalog: Codable, Equatable, Sendable {
         return AIProviderCatalog(schemaVersion: Self.currentSchemaVersion,
                                  profiles: normalized,
                                  automaticFallbackEnabled: automaticFallbackEnabled,
-                                 automaticSentenceAnalysisEnabled:
-                                    automaticSentenceAnalysisEnabled)
+                                 automaticSentenceAnalysisEnabled: false)
     }
 }
 
@@ -289,7 +288,7 @@ struct AILegacyConfigurationMetadata: Sendable {
     let originalKeychainAccount: String
 }
 
-final class AIConfigurationStore {
+final class AIConfigurationStore: @unchecked Sendable {
     private enum Key {
         static let catalog = "LocalDictionary.AI.providerCatalog.v2"
         static let catalogBackup = "LocalDictionary.AI.providerCatalog.v2.backup"
