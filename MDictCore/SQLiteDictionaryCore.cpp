@@ -490,6 +490,77 @@ IndexOpenResult SQLiteDictionaryCore::openManagedReadOnly(
   return result;
 }
 
+IndexOpenResult SQLiteDictionaryCore::openLegacyReadOnly(
+    int source_descriptor,
+    const fdsqlite::FDBoundReadOnlyFileCapability &index_capability,
+    const IndexSourceMetadata &expected_source_metadata) {
+  const auto total_start = Clock::now();
+  closeDatabase();
+  if (fdsqlite::EnsureFDBoundReadOnlyVFSRegistered() != SQLITE_OK) {
+    throw std::runtime_error("Cannot register fd-bound SQLite VFS");
+  }
+  fdsqlite::FDBoundRegisteredToken token(index_capability);
+  checkSQLite(sqlite3_open_v2(
+                  token.value().c_str(), &database_,
+                  SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX,
+                  fdsqlite::FDBoundReadOnlyVFSName()),
+              database_, "open legacy fd-bound read-only index");
+  try {
+    execute(database_, "PRAGMA query_only=ON");
+    validateTableColumns(
+        database_, "metadata", {{"key", "TEXT"}, {"value", "TEXT"}});
+    validateTableColumns(
+        database_, "entries",
+        {{"id", "INTEGER"}, {"headword", "TEXT"}, {"folded", "TEXT"},
+         {"record_start", "INTEGER"}, {"record_end", "INTEGER"}});
+    const std::pair<const char *, std::string> expected[] = {
+        {"schema_version", std::to_string(kSchemaVersion)},
+        {"source_name", expected_source_metadata.source_name},
+        {"source_size", numberString(expected_source_metadata.size)},
+        {"source_mtime_seconds",
+         signedNumberString(expected_source_metadata.modified_seconds)},
+        {"source_mtime_nanoseconds",
+         signedNumberString(expected_source_metadata.modified_nanoseconds)},
+        {"source_inode", numberString(expected_source_metadata.inode)},
+        {"source_device", numberString(expected_source_metadata.device)}};
+    for (const auto &item : expected) {
+      if (metadataValue(database_, item.first) != item.second) {
+        throw std::runtime_error("Legacy dictionary index source mismatch");
+      }
+    }
+    auto dictionary = mdict::Mdict::fromFileDescriptor(
+        source_descriptor, mdict::MdictInputKind::mdx);
+    dictionary->initMetadataOnly();
+    if (metadataValue(database_, "engine_version") !=
+        std::to_string(dictionary->engineVersion())) {
+      throw std::runtime_error("Legacy dictionary engine metadata mismatch");
+    }
+    sqlite3_stmt *statement = nullptr;
+    checkSQLite(sqlite3_prepare_v2(database_, "SELECT COUNT(*) FROM entries", -1,
+                                  &statement, nullptr),
+                database_, "prepare legacy entry count");
+    uint64_t actual_entry_count = 0;
+    if (sqlite3_step(statement) == SQLITE_ROW) {
+      actual_entry_count =
+          static_cast<uint64_t>(sqlite3_column_int64(statement, 0));
+    }
+    sqlite3_finalize(statement);
+    const auto declared_count = metadataValue(database_, "entry_count");
+    if (!declared_count.empty() &&
+        declared_count != numberString(actual_entry_count)) {
+      throw std::runtime_error("Legacy dictionary entry count mismatch");
+    }
+    dictionary_ = std::move(dictionary);
+    IndexOpenResult result;
+    result.entry_count = actual_entry_count;
+    result.startup_milliseconds = milliseconds(total_start, Clock::now());
+    return result;
+  } catch (...) {
+    closeDatabase();
+    throw;
+  }
+}
+
 IndexOpenResult SQLiteDictionaryCore::open(bool force_rebuild) {
   const auto total_start = Clock::now();
   IndexOpenResult result;

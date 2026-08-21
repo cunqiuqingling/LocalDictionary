@@ -14,7 +14,8 @@ trap '/bin/rm -rf "$BUILD"' EXIT
     -framework ApplicationServices \
     -framework Carbon \
     -framework NaturalLanguage \
-    "$ROOT/App/QueryIntentClassifier.swift" \
+  "$ROOT/App/ManualEvidenceRecorder.swift" \
+  "$ROOT/App/QueryIntentClassifier.swift" \
     "$ROOT/App/OfflineTranslationModels.swift" \
     "$ROOT/App/LocalSentenceGlossaryService.swift" \
     "$ROOT/App/LongTextAnalysis.swift" \
@@ -28,6 +29,10 @@ trap '/bin/rm -rf "$BUILD"' EXIT
 /usr/bin/grep -Fq 'capture.selectionRects' "$ROOT/App/AppDelegate.swift"
 /usr/bin/grep -Fq 'globalSelectionPlacement.present' \
     "$ROOT/App/DictionaryPanelController.swift"
+/usr/bin/grep -Fq 'DictionaryPanelInteractionPolicy.styleMask' \
+    "$ROOT/App/DictionaryPanelController.swift"
+/usr/bin/grep -Fq 'globalSelectionValidationStopped' \
+    "$ROOT/App/AppDelegate.swift"
 /usr/bin/grep -Fq 'applyGlobalSelectionWindowFrame(result.frame' \
     "$ROOT/App/SelectionButtonPlacement.swift"
 /usr/bin/grep -Fq 'LongTextActionRouter.parse' \

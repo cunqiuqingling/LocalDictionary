@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/resource-payload-staging-security-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-payload-staging.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild" ]]; then

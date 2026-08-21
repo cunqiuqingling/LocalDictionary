@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="${0:A:h:h}"
-BUILD_DIR="$ROOT_DIR/.build/c1-ui-state-smoke"
+BUILD_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-c1-ui-state.XXXXXX")"
+trap '/bin/rm -rf "$BUILD_DIR"' EXIT
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then
     export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
@@ -17,6 +18,8 @@ mkdir -p "$BUILD_DIR/module-cache"
 
 xcrun --sdk macosx swiftc \
   -parse-as-library \
+  -D OPEN_RESOURCE_UI_TESTING \
+  -D DICTIONARY_MANAGER_PRESENTATION_STATE_ONLY \
   -strict-concurrency=complete \
   -warnings-as-errors \
   -module-cache-path "$BUILD_DIR/module-cache" \
@@ -32,10 +35,14 @@ xcrun --sdk macosx swiftc \
 
 xcrun --sdk macosx swiftc \
   -parse-as-library \
+  -D OPEN_RESOURCE_UI_TESTING \
   -strict-concurrency=complete \
   -warnings-as-errors \
   -module-cache-path "$BUILD_DIR/module-cache" \
   "$ROOT_DIR/App/AppConfig.swift" \
+  "$ROOT_DIR/App/ManualEvidenceRecorder.swift" \
+  "$ROOT_DIR/App/QueryIntentClassifier.swift" \
+  "$ROOT_DIR/App/OfflineTranslationModels.swift" \
   "$ROOT_DIR/App/DictionaryCatalog.swift" \
   "$ROOT_DIR/App/ResourceManifestKeyID.swift" \
   "$ROOT_DIR/App/ManagedDictionaryLifecycleCoordinator.swift" \
@@ -58,6 +65,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT_DIR/App/ResourcePayloadDownloadCoordinator.swift" \
   "$ROOT_DIR/App/OpenResourceInstallationCoordinator.swift" \
   "$ROOT_DIR/App/DictionaryCatalogOrdering.swift" \
+  "$ROOT_DIR/App/LegacyDictionaryConfigAdapter.swift" \
   "$ROOT_DIR/App/DictionaryManagerPresentation.swift" \
   "$ROOT_DIR/App/DictionaryImportModels.swift" \
   "$ROOT_DIR/App/MDictImportInspector.swift" \
@@ -68,13 +76,18 @@ xcrun --sdk macosx swiftc \
   "$ROOT_DIR/App/ManagedDictionaryQueryModels.swift" \
   "$ROOT_DIR/App/ManagedDictionaryRemoval.swift" \
   "$ROOT_DIR/App/ResourceCenterProductionConfiguration.swift" \
+  "$ROOT_DIR/App/BundledOpenResourceCatalog.swift" \
+  "$ROOT_DIR/App/OfficialOpenResourceDiscovery.swift" \
+  "$ROOT_DIR/App/FreeDictStarDictResource.swift" \
+  "$ROOT_DIR/App/AuditedOpenResourceInstaller.swift" \
   "$ROOT_DIR/App/ResourceCenterModels.swift" \
   "$ROOT_DIR/App/ResourceCenterController.swift" \
   "$ROOT_DIR/App/ResourceCenterViewController.swift" \
+  "$ROOT_DIR/Tests/DictionaryManagerReverseStubs.swift" \
   "$ROOT_DIR/App/DictionaryManagerWindowController.swift" \
   "$ROOT_DIR/Tests/DictionaryManagerLayoutSmoke.swift" \
   -framework AppKit \
-  -lsqlite3 \
+  -lsqlite3 -larchive \
   -o "$BUILD_DIR/DictionaryManagerLayoutSmoke"
 
 "$BUILD_DIR/DictionaryManagerLayoutSmoke"

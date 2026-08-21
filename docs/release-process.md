@@ -10,7 +10,8 @@ tag or public release.
 
 The formal sequence is:
 
-1. Start from an explicitly approved, clean commit on `feature/m24-release`.
+1. Start from an explicitly approved, clean commit on
+   `feature/prerelease-offline-language`.
 2. Run `scripts/release/audit-release.sh`.
 3. Archive the `LocalDictionary` scheme in Release for generic macOS.
 4. Export with one unambiguous `Developer ID Application` identity, the approved Team

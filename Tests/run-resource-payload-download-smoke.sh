@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/resource-payload-download-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-resource-payload.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then
@@ -37,6 +38,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/ResourcePayloadStagingStore.swift" \
   "$ROOT/App/ResourcePayloadFileDownloader.swift" \
   "$ROOT/App/ResourcePayloadDownloadCoordinator.swift" \
+  "$ROOT/App/BundledOpenResourceCatalog.swift" \
   "$ROOT/Tests/ResourcePayloadDownloadSmoke.swift" \
   -o "$BUILD/ResourcePayloadDownloadSmoke"
 

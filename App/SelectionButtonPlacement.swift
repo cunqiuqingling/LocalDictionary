@@ -1,6 +1,29 @@
 import AppKit
 import CoreGraphics
 
+/// Centralizes the interaction contract for the global lookup panel. A non-activating auxiliary
+/// panel stays on the source application's full-screen Space instead of switching to the desktop,
+/// while the scrollable single-line field still supports arbitrarily long queries and caret
+/// navigation.
+@MainActor
+enum DictionaryPanelInteractionPolicy {
+    static var styleMask: NSWindow.StyleMask {
+        [.titled, .fullSizeContentView, .nonactivatingPanel]
+    }
+
+    static var collectionBehavior: NSWindow.CollectionBehavior {
+        [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+    }
+
+    static func configureSearchField(_ field: NSSearchField) {
+        field.sendsWholeSearchString = true
+        field.cell?.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.cell?.wraps = false
+        field.cell?.lineBreakMode = .byClipping
+    }
+}
+
 struct SelectionDisplayGeometry: Equatable, Sendable {
     let displayID: UInt32
     let appKitFrame: CGRect

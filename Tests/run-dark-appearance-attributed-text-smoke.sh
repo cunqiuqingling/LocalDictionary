@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/dark-appearance-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-dark-appearance.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/clang++" ]]; then
     export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"

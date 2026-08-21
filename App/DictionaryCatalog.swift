@@ -3,9 +3,238 @@ import Foundation
 enum DictionaryFormatterIdentifier: Sendable {
     static let genericMDictV1 = "generic-mdict-v1"
     static let legacyGenericMDictV1 = "generic-mdict.v1"
+    static let oxfordOALD8V1 = "oxford-oald8.v1"
+    static let century21V1 = "century21.v1"
+    static let newOxfordV1 = "new-oxford.v1"
+    static let medicalEnglishChineseV1 = "medical-en-zh-2003.v1"
+    static let affixRootAV1 = "affix-root-a.v1"
+    static let freeDictStarDictV1 = "freedict-stardict-v1"
+    static let ccCedictTextV1 = "cc-cedict-text-v1"
+    static let kaikkiWiktionaryJSONLV1 = "kaikki-wiktionary-jsonl-v1"
+    static let wordNetDataV1 = "wordnet-data-v1"
+    static let gcideMarkupV1 = "gcide-markup-v1"
 
     static func supportsGenericMDictV1(_ identifier: String) -> Bool {
         identifier == genericMDictV1 || identifier == legacyGenericMDictV1
+    }
+
+    static func supportsLegacyMDictEnumeration(_ identifier: String) -> Bool {
+        supportsGenericMDictV1(identifier) || [
+            oxfordOALD8V1, century21V1, newOxfordV1,
+            medicalEnglishChineseV1, affixRootAV1
+        ].contains(identifier)
+    }
+
+    static func supportsOpenResourceSQLite(_ identifier: String) -> Bool {
+        [freeDictStarDictV1, ccCedictTextV1, kaikkiWiktionaryJSONLV1,
+         wordNetDataV1, gcideMarkupV1].contains(identifier)
+    }
+
+    static func openResourceSourceComponent(_ identifier: String) -> String? {
+        switch identifier {
+        case freeDictStarDictV1: return "source.stardict.tar.xz"
+        case ccCedictTextV1: return "source.cc-cedict.txt.gz"
+        case kaikkiWiktionaryJSONLV1: return "source.wiktionary.jsonl"
+        case wordNetDataV1: return "source.wordnet.tar.gz"
+        case gcideMarkupV1: return "source.gcide.tar.xz"
+        default: return nil
+        }
+    }
+}
+
+enum FreeDictStarterSecurityConstants: Sendable {
+    static let resourceID = "org.freedict.eng-zho"
+    static let resourceRevision: UInt64 = 20_251_123
+    static let version = "2025.11.23"
+    static let sourceURL = "https://download.freedict.org/dictionaries/eng-zho/2025.11.23/" +
+        "freedict-eng-zho-2025.11.23.stardict.tar.xz"
+    static let sourceBytes: UInt64 = 1_672_048
+    static let sourceSHA256 =
+        "9dbae6bb5558906cc05f1e573bee2deab8b6e09adfb16fc496288926882435af"
+    static let officialSHA512 =
+        "059f9aca26fdc3a5a2c0c0e8fc92e111a34bf8fd438f70d267cccf35f5e47a2" +
+        "d45c46650999a1b3a48c3bffc3e16e0db897232128fe822d1bc59cf34f40b395c"
+    static let catalogMetadataSHA256 =
+        "f2c66bec955cec692276c74e05b7f406c177fb3cf99e418285c1621560ac1194"
+    static let transformerVersion = "1"
+    static let outputSchemaVersion = 1
+    static let sourceEntryCount: UInt64 = 26_660
+    static let minimumConvertedEntryCount: UInt64 = 26_000
+}
+
+/// Small security registry shared by catalog/receipt validation. The richer product presentation
+/// lives in `BundledOpenResourceCatalog`; its startup assertion must match these immutable fields.
+struct AuditedOpenResourceSecurityMetadata: Equatable, Sendable {
+    let resourceID: String
+    let resourceRevision: UInt64
+    let version: String
+    let downloadURL: String
+    let downloadBytes: UInt64
+    let sha256: String
+    let catalogMetadataSHA256: String
+    let officialDigestAlgorithm: String
+    let officialDigest: String
+    let transformerIdentifier: String
+    let transformerVersion: String
+    let outputSchemaVersion: Int
+    let minimumConvertedEntryCount: UInt64
+    let expectedEntryCount: UInt64
+    let licenseIdentifier: String
+}
+
+enum AuditedOpenResourceSecurityRegistry: Sendable {
+    private static let records: [String: AuditedOpenResourceSecurityMetadata] = {
+        var values = [
+            AuditedOpenResourceSecurityMetadata(
+                resourceID: FreeDictStarterSecurityConstants.resourceID,
+                resourceRevision: FreeDictStarterSecurityConstants.resourceRevision,
+                version: FreeDictStarterSecurityConstants.version,
+                downloadURL: FreeDictStarterSecurityConstants.sourceURL,
+                downloadBytes: FreeDictStarterSecurityConstants.sourceBytes,
+                sha256: FreeDictStarterSecurityConstants.sourceSHA256,
+                catalogMetadataSHA256:
+                    FreeDictStarterSecurityConstants.catalogMetadataSHA256,
+                officialDigestAlgorithm: "SHA-512",
+                officialDigest: FreeDictStarterSecurityConstants.officialSHA512,
+                transformerIdentifier: DictionaryFormatterIdentifier.freeDictStarDictV1,
+                transformerVersion: FreeDictStarterSecurityConstants.transformerVersion,
+                outputSchemaVersion: FreeDictStarterSecurityConstants.outputSchemaVersion,
+                minimumConvertedEntryCount:
+                    FreeDictStarterSecurityConstants.minimumConvertedEntryCount,
+                expectedEntryCount: FreeDictStarterSecurityConstants.sourceEntryCount,
+                licenseIdentifier: "CC-BY-SA-3.0"
+            ),
+            AuditedOpenResourceSecurityMetadata(
+                resourceID: "org.cc-cedict.zh-en",
+                resourceRevision: 20_260_808_091_604,
+                version: "2026-08-08T09:16:04Z",
+                downloadURL:
+                    "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz",
+                downloadBytes: 3_967_111,
+                sha256: "1fe09c26e17ab52eceb2be2988f9c89b13c9b2b010e27325e97c2d0664c65701",
+                catalogMetadataSHA256:
+                    "67c47c9c8c3f2dde52a3318ab4d53b71fb449cd61a240390d17a83560b512fe6",
+                officialDigestAlgorithm: "SHA-256",
+                officialDigest:
+                    "1fe09c26e17ab52eceb2be2988f9c89b13c9b2b010e27325e97c2d0664c65701",
+                transformerIdentifier: DictionaryFormatterIdentifier.ccCedictTextV1,
+                transformerVersion: "1", outputSchemaVersion: 1,
+                minimumConvertedEntryCount: 120_000,
+                expectedEntryCount: 250_000,
+                licenseIdentifier: "CC-BY-SA-4.0"
+            ),
+            AuditedOpenResourceSecurityMetadata(
+                resourceID: "org.gnu.gcide.en", resourceRevision: 54,
+                version: "0.54",
+                downloadURL: "https://ftp.gnu.org/gnu/gcide/gcide-0.54.tar.xz",
+                downloadBytes: 14_803_080,
+                sha256: "22416f6f36175b160dc388b7547512514d464473cf7d7c898d738efb26c51d42",
+                catalogMetadataSHA256:
+                    "66e4e3c8bce8e50897653e549e1e88ff258682437f2dae7cc2521639c355a16d",
+                officialDigestAlgorithm: "SHA-512",
+                officialDigest:
+                    "9bda8bc2e30a529bafeb3fcdd2f315025209fa2e609da707caf7b4a273221a761" +
+                    "7a10b58d2b635e1ae980e01a790a4e09bb74ec54d6e09c9014e72b30d33b1e6",
+                transformerIdentifier: DictionaryFormatterIdentifier.gcideMarkupV1,
+                transformerVersion: "1", outputSchemaVersion: 1,
+                minimumConvertedEntryCount: 100_000,
+                expectedEntryCount: 250_000,
+                licenseIdentifier: "GPL-3.0-or-later"
+            ),
+            AuditedOpenResourceSecurityMetadata(
+                resourceID: "org.princeton.wordnet.en", resourceRevision: 30,
+                version: "3.0",
+                downloadURL:
+                    "https://wordnetcode.princeton.edu/3.0/WNdb-3.0.tar.gz",
+                downloadBytes: 10_518_425,
+                sha256: "658b1ba191f5f98c2e9bae3e25c186013158f30ef779f191d2a44e5d25046dc8",
+                catalogMetadataSHA256:
+                    "e499c439c98cae0cc25717ff383eb443fea66d51ca4fa68e83da00214293782c",
+                officialDigestAlgorithm: "SHA-512",
+                officialDigest:
+                    "41e177167fa80fa9c26c8002b2783d2bcffa2622b9fec6d5f446ef498b214197" +
+                    "3489020b7dce928cce5ce14e6cc5606c7cbb4678e1f069acf907f64f3a38c730",
+                transformerIdentifier: DictionaryFormatterIdentifier.wordNetDataV1,
+                transformerVersion: "1", outputSchemaVersion: 1,
+                minimumConvertedEntryCount: 100_000,
+                expectedEntryCount: 300_000,
+                licenseIdentifier: "WordNet-3.0"
+            ),
+            AuditedOpenResourceSecurityMetadata(
+                resourceID: "org.kaikki.zhwiktionary.en",
+                resourceRevision: 20_260_806_085_640,
+                version: "2026-08-06T08:56:40Z",
+                downloadURL:
+                    "https://kaikki.org/zhwiktionary/%E8%8B%B1%E8%AA%9E/" +
+                    "kaikki.org-dictionary-%E8%8B%B1%E8%AA%9E.jsonl",
+                downloadBytes: 60_047_743,
+                sha256: "fb5a71b2e4fd71f9c752db242d15e028e80872d8c4cc069948d15ba2bf1d946f",
+                catalogMetadataSHA256:
+                    "f2d8f20f527b580d0b286e0219a5708af0a4281c354f185e1dc34e3cd38abd2c",
+                officialDigestAlgorithm: "SHA-512",
+                officialDigest:
+                    "d00d86150aba906330cc81271bc285f4e938052cb3183c03ee3312ed791e62e4b" +
+                    "6d89dd1f9928ac4a32902361247b9dbab5f94d13936abedc98467a99ba6ed33",
+                transformerIdentifier:
+                    DictionaryFormatterIdentifier.kaikkiWiktionaryJSONLV1,
+                transformerVersion: "1", outputSchemaVersion: 1,
+                minimumConvertedEntryCount: 50_000,
+                expectedEntryCount: 100_000,
+                licenseIdentifier: "CC-BY-SA-3.0 AND GFDL-1.3-or-later"
+            )
+        ]
+        #if OPEN_RESOURCE_CONVERTER_TESTING
+        values.append(AuditedOpenResourceSecurityMetadata(
+            resourceID: "org.synthetic.cc-cedict.zh-en",
+            resourceRevision: 1,
+            version: "fixture-1",
+            downloadURL:
+                "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz",
+            downloadBytes: 156,
+            sha256: "dfe8fdb7bc5c2791e6a4c26b5792761a2510e3b502a37b14177ba58f17427c72",
+            catalogMetadataSHA256: String(repeating: "e", count: 64),
+            officialDigestAlgorithm: "SHA-256",
+            officialDigest:
+                "dfe8fdb7bc5c2791e6a4c26b5792761a2510e3b502a37b14177ba58f17427c72",
+            transformerIdentifier: DictionaryFormatterIdentifier.ccCedictTextV1,
+            transformerVersion: "1", outputSchemaVersion: 1,
+            minimumConvertedEntryCount: 3,
+            expectedEntryCount: 3,
+            licenseIdentifier: "CC-BY-SA-4.0"
+        ))
+        #endif
+        return Dictionary(uniqueKeysWithValues: values.map { ($0.resourceID, $0) })
+    }()
+
+    static func resource(id: String) -> AuditedOpenResourceSecurityMetadata? {
+        records[id]
+    }
+}
+
+/// Live official resources are versioned by their upstream directory, not by an App release.
+/// Payload integrity is bound to the receipt produced after the actual download.
+enum LiveOfficialOpenResourcePolicy {
+    static func accepts(resourceID: String, formatterIdentifier: String) -> Bool {
+        if formatterIdentifier == DictionaryFormatterIdentifier.freeDictStarDictV1 {
+            guard resourceID.hasPrefix("org.freedict.live.") else { return false }
+            let pair = resourceID.dropFirst("org.freedict.live.".count).split(separator: "-")
+            return pair.count == 2 && pair.allSatisfy {
+                $0.count == 3 && $0.allSatisfy { $0.isASCII && $0.isLetter }
+            }
+        }
+        return resourceID == "org.cc-cedict.zh-en.live" &&
+            formatterIdentifier == DictionaryFormatterIdentifier.ccCedictTextV1
+    }
+
+    static func accepts(resourceID: String, formatterIdentifier: String,
+                        sourceURL: String) -> Bool {
+        guard accepts(resourceID: resourceID,
+                      formatterIdentifier: formatterIdentifier),
+              let url = URL(string: sourceURL), url.scheme == "https" else { return false }
+        if formatterIdentifier == DictionaryFormatterIdentifier.freeDictStarDictV1 {
+            return url.host == "download.freedict.org"
+        }
+        return url.host == "cc-cedict.org"
     }
 }
 
@@ -229,6 +458,15 @@ struct DictionaryCapabilities: Codable, Equatable, Sendable {
     )
 }
 
+/// Persisted result of the bounded post-index probe for an imported dictionary. This is only a
+/// capability hint; the disposable reverse sidecar remains a separate, user-started operation.
+enum DictionaryReverseCapabilityProbe: String, Codable, Equatable, Sendable {
+    case supported
+    case noUsableNativeGloss
+    case unsupportedFormatter
+    case unknown
+}
+
 struct DictionaryRelativePaths: Codable, Equatable, Sendable {
     var dictionary: String?
     var resources: [String]
@@ -261,6 +499,45 @@ struct DictionaryIndexMetadata: Codable, Equatable, Sendable {
     var sourceModifiedAt: Date?
     var sourceSHA256: String?
     var indexedAt: Date?
+}
+
+struct DictionaryLookupDirection: Equatable, Hashable, Sendable {
+    let sourceLanguageCode: String
+    let targetLanguageCode: String
+}
+
+/// Language metadata derived from formatter identity. Unknown user imports remain unknown;
+/// no dictionary body is inspected or rebuilt.
+struct DictionaryLanguageCapability: Equatable, Sendable {
+    let headwordLanguageCode: String?
+    let definitionLanguageCodes: Set<String>
+    let lookupDirections: Set<DictionaryLookupDirection>
+
+    var isMonolingual: Bool {
+        guard let headwordLanguageCode else { return false }
+        return definitionLanguageCodes == [headwordLanguageCode]
+    }
+
+    var isBilingual: Bool {
+        guard let headwordLanguageCode else { return false }
+        return definitionLanguageCodes.contains { $0 != headwordLanguageCode }
+    }
+
+    func supportsDirectLookup(languageCode: String) -> Bool {
+        headwordLanguageCode == languageCode && lookupDirections.contains {
+            $0.sourceLanguageCode == languageCode
+        }
+    }
+
+    func supportsReverseTo(languageCode: String) -> Bool {
+        lookupDirections.contains {
+            $0.targetLanguageCode == languageCode && $0.sourceLanguageCode != languageCode
+        }
+    }
+
+    static let unknown = DictionaryLanguageCapability(
+        headwordLanguageCode: nil, definitionLanguageCodes: [], lookupDirections: []
+    )
 }
 
 /// Durable content identity for one app-managed, query-eligible SQLite
@@ -307,8 +584,51 @@ struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
     var storageOwnership: DictionaryStorageOwnership = .appManagedImported
     var openResourceMetadata: OpenResourceInstallationMetadata?
     var publishedIndexIdentity: PublishedIndexIdentity? = nil
+    var reverseCapabilityProbe: DictionaryReverseCapabilityProbe? = nil
+    /// Durable tombstone for a legacy registration removed from the product.  The referenced
+    /// external MDX/MDD and legacy SQLite files remain outside App deletion authority.
+    var retiredLegacyRegistrationAt: Date? = nil
 
     var id: String { dictionaryID }
+
+    var isRetiredLegacyRegistration: Bool {
+        sourceKind == .legacyReference && storageOwnership == .externalReference &&
+            retiredLegacyRegistrationAt != nil
+    }
+
+    var languageCapability: DictionaryLanguageCapability {
+        let en = "en"
+        let zh = "zh-Hans"
+        let enToEn = DictionaryLookupDirection(sourceLanguageCode: en, targetLanguageCode: en)
+        let enToZH = DictionaryLookupDirection(sourceLanguageCode: en, targetLanguageCode: zh)
+        let zhToEn = DictionaryLookupDirection(sourceLanguageCode: zh, targetLanguageCode: en)
+        switch formatterIdentifier {
+        case DictionaryFormatterIdentifier.century21V1,
+             DictionaryFormatterIdentifier.medicalEnglishChineseV1,
+             DictionaryFormatterIdentifier.freeDictStarDictV1,
+             DictionaryFormatterIdentifier.kaikkiWiktionaryJSONLV1:
+            return DictionaryLanguageCapability(
+                headwordLanguageCode: en, definitionLanguageCodes: [en, zh],
+                lookupDirections: [enToZH, zhToEn]
+            )
+        case DictionaryFormatterIdentifier.ccCedictTextV1:
+            return DictionaryLanguageCapability(
+                headwordLanguageCode: zh, definitionLanguageCodes: [en],
+                lookupDirections: [zhToEn]
+            )
+        case DictionaryFormatterIdentifier.oxfordOALD8V1,
+             DictionaryFormatterIdentifier.newOxfordV1,
+             DictionaryFormatterIdentifier.affixRootAV1,
+             DictionaryFormatterIdentifier.wordNetDataV1,
+             DictionaryFormatterIdentifier.gcideMarkupV1:
+            return DictionaryLanguageCapability(
+                headwordLanguageCode: en, definitionLanguageCodes: [en],
+                lookupDirections: [enToEn]
+            )
+        default:
+            return .unknown
+        }
+    }
 
     fileprivate func validate() throws {
         guard !dictionaryID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -320,12 +640,52 @@ struct DictionaryDescriptor: Codable, Equatable, Identifiable, Sendable {
         guard DictionaryOwnershipPolicy.policy(for: sourceKind, ownership: storageOwnership) != nil else {
             throw DictionaryCatalogValidationError.invalidStorageOwnership
         }
+        if retiredLegacyRegistrationAt != nil {
+            guard sourceKind == .legacyReference,
+                  storageOwnership == .externalReference,
+                  enabled == false,
+                  state == .disabled else {
+                throw DictionaryCatalogValidationError.invalidRetiredLegacyRegistration
+            }
+        }
         if sourceKind == .openResource {
             guard let openResourceMetadata else {
                 throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
             }
             try openResourceMetadata.validate(dictionaryID: dictionaryID)
-            guard relativePaths.dictionary == "Dictionaries/\(dictionaryID)/payload.mdx" else {
+            if DictionaryFormatterIdentifier.supportsOpenResourceSQLite(formatterIdentifier) {
+                if let resource = AuditedOpenResourceSecurityRegistry.resource(
+                    id: openResourceMetadata.resourceID
+                ) {
+                    guard resource.transformerIdentifier == formatterIdentifier,
+                          openResourceMetadata.resourceRevision == resource.resourceRevision,
+                          openResourceMetadata.resourceVersion == resource.version,
+                          openResourceMetadata.manifestSHA256 == resource.catalogMetadataSHA256,
+                          openResourceMetadata.payloadSHA256 == resource.sha256,
+                          openResourceMetadata.payloadBytes == resource.downloadBytes,
+                          openResourceMetadata.expectedEntryCount.minimum ==
+                            resource.minimumConvertedEntryCount,
+                          openResourceMetadata.expectedEntryCount.maximum ==
+                            resource.expectedEntryCount,
+                          openResourceMetadata.license.name == resource.licenseIdentifier else {
+                        throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
+                    }
+                } else if !LiveOfficialOpenResourcePolicy.accepts(
+                    resourceID: openResourceMetadata.resourceID,
+                    formatterIdentifier: formatterIdentifier
+                ) {
+                    throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
+                }
+            }
+            let expectedSource = DictionaryFormatterIdentifier
+                .openResourceSourceComponent(formatterIdentifier).map {
+                    "Dictionaries/\(dictionaryID)/\($0)"
+                } ?? "Dictionaries/\(dictionaryID)/payload.mdx"
+            let validSourceBinding = DictionaryFormatterIdentifier
+                .supportsOpenResourceSQLite(formatterIdentifier)
+                ? (relativePaths.dictionary == nil || relativePaths.dictionary == expectedSource)
+                : relativePaths.dictionary == expectedSource
+            guard validSourceBinding else {
                 throw DictionaryCatalogValidationError.invalidOpenResourceMetadata
             }
         } else if openResourceMetadata != nil {
@@ -388,8 +748,11 @@ struct DictionaryCatalog: Codable, Equatable, Sendable {
     }
 
     var sortedDictionaries: [DictionaryDescriptor] {
-        dictionaries.sorted {
-            if $0.queryLevel.rank != $1.queryLevel.rank {
+        let positions = dictionaries.map(\.sortPosition)
+        let hasUnifiedOrder = positions.allSatisfy { $0 > 0 } &&
+            Set(positions).count == positions.count
+        return dictionaries.sorted {
+            if !hasUnifiedOrder, $0.queryLevel.rank != $1.queryLevel.rank {
                 return $0.queryLevel.rank < $1.queryLevel.rank
             }
             if $0.sortPosition != $1.sortPosition {
@@ -397,6 +760,11 @@ struct DictionaryCatalog: Codable, Equatable, Sendable {
             }
             return $0.dictionaryID < $1.dictionaryID
         }
+    }
+
+    /// Retired legacy tombstones participate in persistence but never in visible user ordering.
+    var activeSortedDictionaries: [DictionaryDescriptor] {
+        sortedDictionaries.filter { !$0.isRetiredLegacyRegistration }
     }
 
     func validated() throws -> DictionaryCatalog {
@@ -457,6 +825,7 @@ enum DictionaryCatalogValidationError: LocalizedError {
     case invalidPublishedIndexIdentity
     case invalidPublishedIndexFields
     case invalidPublishedIndexBinding(String)
+    case invalidRetiredLegacyRegistration
 
     var errorDescription: String? {
         switch self {
@@ -471,6 +840,8 @@ enum DictionaryCatalogValidationError: LocalizedError {
         case .invalidPublishedIndexFields: return "托管词典的已发布索引字段无效。"
         case .invalidPublishedIndexBinding(let field):
             return "托管词典的索引元数据绑定无效：\(field)。"
+        case .invalidRetiredLegacyRegistration:
+            return "旧配置词典的退役登记无效。"
         }
     }
 }

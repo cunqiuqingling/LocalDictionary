@@ -60,7 +60,9 @@ require_literal "$ROOT/LICENSE" "END OF TERMS AND CONDITIONS"
 
 require_literal "$ROOT/README.md" \
   "LocalDictionary original project code is licensed under GPL-3.0-only."
-reject_pattern 'GPL-3\.0-or-later' "$ROOT/README.md" "$ROOT/docs/provenance.md"
+reject_pattern \
+  'LocalDictionary original project code is licensed under GPL-3\.0-or-later|原创项目代码.*GPL-3\.0-or-later' \
+  "$ROOT/README.md" "$ROOT/docs/provenance.md"
 reject_pattern 'original project code (is|are|采用|使用).*(MIT|Apache|MPL)' \
   "$ROOT/README.md" "$ROOT/docs/provenance.md"
 

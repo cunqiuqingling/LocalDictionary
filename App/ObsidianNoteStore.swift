@@ -214,19 +214,37 @@ struct InlineLookupNoteItem: Equatable {
     }
 }
 
+struct FavoriteLanguageMetadata: Equatable, Sendable {
+    let sourceLanguage: LanguageIdentifier?
+    let nativeLanguage: LanguageIdentifier
+    let learningLanguage: LanguageIdentifier
+    let studyLanguage: LanguageIdentifier?
+
+    var markdownComment: String {
+        let source = sourceLanguage?.rawValue ?? "mixed-or-undetermined"
+        let study = studyLanguage?.rawValue ?? "none"
+        return "<!-- LocalDictionary-Language source=\(source); native=" +
+            "\(nativeLanguage.rawValue); learning=\(learningLanguage.rawValue); " +
+            "study=\(study) -->"
+    }
+}
+
 struct VocabularyNoteSaveContent: Equatable {
     let headword: String
     let localEntry: StructuredDictionaryEntry?
     let aiSection: AIExplanationNoteSection?
     let inlineSupplements: [InlineLookupNoteItem]
+    let languageMetadata: FavoriteLanguageMetadata?
 
     init(headword: String, localEntry: StructuredDictionaryEntry?,
          aiSection: AIExplanationNoteSection?,
-         inlineSupplements: [InlineLookupNoteItem] = []) {
+         inlineSupplements: [InlineLookupNoteItem] = [],
+         languageMetadata: FavoriteLanguageMetadata? = nil) {
         self.headword = headword
         self.localEntry = localEntry
         self.aiSection = aiSection
         self.inlineSupplements = inlineSupplements.filter(\.isValid)
+        self.languageMetadata = languageMetadata
     }
 
     var isValid: Bool {
@@ -262,15 +280,18 @@ struct SentenceNoteSaveContent: Equatable {
     let aiSectionMarkdown: String?
     let glossarySectionMarkdown: String?
     let inlineSupplements: [InlineLookupNoteItem]
+    let languageMetadata: FavoriteLanguageMetadata?
 
     init(sourceText: String, title: String, aiSectionMarkdown: String?,
          glossarySectionMarkdown: String?,
-         inlineSupplements: [InlineLookupNoteItem] = []) {
+         inlineSupplements: [InlineLookupNoteItem] = [],
+         languageMetadata: FavoriteLanguageMetadata? = nil) {
         self.sourceText = sourceText
         self.title = title
         self.aiSectionMarkdown = aiSectionMarkdown
         self.glossarySectionMarkdown = glossarySectionMarkdown
         self.inlineSupplements = inlineSupplements.filter(\.isValid)
+        self.languageMetadata = languageMetadata
     }
 
     var isValid: Bool {
@@ -442,6 +463,7 @@ final class ObsidianNoteStore {
               to candidateURL: URL) throws -> VocabularyNoteSaveResult {
         guard content.isValid else { throw ObsidianNoteStoreError.invalidEntry }
         if content.aiSection == nil, content.inlineSupplements.isEmpty,
+           content.languageMetadata == nil,
            let localEntry = content.localEntry {
             switch try save(localEntry, to: candidateURL) {
             case .saved: return .localSaved
@@ -982,6 +1004,9 @@ final class ObsidianNoteStore {
             localBlock = "## \(singleLine(content.headword))"
         }
         var output = localBlock
+        if let metadata = content.languageMetadata {
+            output = insertingMetadata(metadata.markdownComment, into: output, newline: newline)
+        }
         if let aiSection = content.aiSection {
             output = appendingMarkdownBlock(markdown(aiSection.markdown, using: newline),
                                             to: output,
@@ -994,12 +1019,11 @@ final class ObsidianNoteStore {
 
     private static func sentenceMarkdownBlock(for content: SentenceNoteSaveContent,
                                               newline: String) -> String {
-        var lines = [
-            "## \(singleLine(content.title))",
-            "",
-            "### 原句",
-            ""
-        ]
+        var lines = ["## \(singleLine(content.title))"]
+        if let metadata = content.languageMetadata {
+            lines.append(metadata.markdownComment)
+        }
+        lines += ["", "### 原句", ""]
         lines.append(contentsOf: blockquoteLines(for: content.sourceText))
         var block = lines.joined(separator: newline)
         if content.validAISection, let ai = content.aiSectionMarkdown {
@@ -1015,6 +1039,15 @@ final class ObsidianNoteStore {
         return mergingInlineSupplements(content.inlineSupplements,
                                         into: block,
                                         newline: newline).content
+    }
+
+    private static func insertingMetadata(_ metadata: String,
+                                          into markdown: String,
+                                          newline: String) -> String {
+        var lines = markdown.components(separatedBy: newline)
+        guard !lines.isEmpty else { return metadata }
+        lines.insert(metadata, at: min(1, lines.count))
+        return lines.joined(separator: newline)
     }
 
     private static func mergingInlineSupplements(

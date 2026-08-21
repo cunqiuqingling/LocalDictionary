@@ -47,15 +47,26 @@ private actor DirectionMockTranslationEngine: OfflineTranslationEngine {
     func translate(_ requests: [OfflineTranslationRequest]) async throws
         -> [OfflineTranslationResponse] {
         translationCalls += 1
-        if requests.contains(where: { failingIDs.contains($0.id) }) {
+        if requests.contains(where: { request in
+            failingIDs.contains(request.id) || failingIDs.contains(where: {
+                request.id.hasPrefix($0 + "#")
+            })
+        }) {
             throw OfflineTranslationError.systemFailure
         }
         translatedIDs.append(contentsOf: requests.map(\.id))
         return requests.map {
-            OfflineTranslationResponse(
+            let translatedText: String
+            switch $0.pair.target {
+            case .english:
+                translatedText = "Synthetic English translation for the selected sentence."
+            case .simplifiedChinese:
+                translatedText = "这是为所选句子生成的合成中文译文。"
+            }
+            return OfflineTranslationResponse(
                 id: $0.id,
                 sourceText: $0.sourceText,
-                translatedText: "\($0.pair.target.rawValue):\($0.sourceText)",
+                translatedText: translatedText,
                 pair: $0.pair
             )
         }
@@ -92,6 +103,25 @@ private struct SelectionDirectionIntegrationSmoke {
 
     @MainActor
     private static func testProductionPlacement() throws {
+        let policyPanel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 620),
+            styleMask: DictionaryPanelInteractionPolicy.styleMask,
+            backing: .buffered,
+            defer: true
+        )
+        policyPanel.collectionBehavior = DictionaryPanelInteractionPolicy.collectionBehavior
+        try expect(policyPanel.styleMask.contains(.nonactivatingPanel) &&
+                   policyPanel.collectionBehavior.contains(.canJoinAllSpaces) &&
+                   policyPanel.collectionBehavior.contains(.fullScreenAuxiliary),
+                   "lookup panel is not a non-activating full-screen auxiliary")
+        let longQueryField = NSSearchField(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+        DictionaryPanelInteractionPolicy.configureSearchField(longQueryField)
+        try expect(longQueryField.cell?.usesSingleLineMode == true &&
+                   longQueryField.cell?.isScrollable == true &&
+                   longQueryField.cell?.wraps == false &&
+                   longQueryField.cell?.lineBreakMode == .byClipping,
+                   "long search field is not horizontally scrollable")
+
         let displays = [
             SelectionDisplayGeometry(
                 displayID: 1,
@@ -335,7 +365,7 @@ private struct SelectionDirectionIntegrationSmoke {
         try expect(translated.sentences[0] == initial.sentences[0] &&
                    translated.sentences[1] == initial.sentences[1],
                    "direction selection changed another sentence")
-        try expect(translated.sentences[2].translatedText?.hasPrefix("zh-Hans:") == true,
+        try expect(translated.sentences[2].translatedText == "这是为所选句子生成的合成中文译文。",
                    "selected sentence did not use chosen target")
         try expect(!translated.completeTranslation.contains("请选择本句翻译方向"),
                    "top translation was not reassembled")

@@ -19,12 +19,14 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
 namespace {
 
 using localdict::testsupport::BuildSyntheticMDX;
+using localdict::testsupport::BuildSyntheticMDXWithHeadwords;
 
 class Harness {
  public:
@@ -174,6 +176,67 @@ std::size_t OpenDescriptorCount() {
     }
   }
   return count;
+}
+
+struct LegacySmallStackContext {
+  const std::filesystem::path *source;
+  const std::filesystem::path *index;
+  bool ready = false;
+  std::size_t source_hash_length = 0;
+  std::size_t index_hash_length = 0;
+  std::string error;
+};
+
+void *OpenLegacyRuntimeOnSmallStack(void *opaque) {
+  @autoreleasepool {
+    auto *context = static_cast<LegacySmallStackContext *>(opaque);
+    DictionaryCoreBridge *runtime = [[DictionaryCoreBridge alloc]
+        initLegacyReadOnlyWithDictionaryPath:String(*context->source)
+                                       indexPath:String(*context->index)
+                                    dictionaryID:@"legacy-small-stack-1"
+                             formatterIdentifier:@"generic-mdict.v1"
+                              cacheMaximumBytes:1024 * 1024
+                            cacheMaximumEntries:16];
+    context->ready = runtime.isReady;
+    context->source_hash_length = runtime.sourceSHA256.length;
+    context->index_hash_length = runtime.indexSHA256.length;
+    context->error = runtime.lastError.UTF8String ?: "unknown error";
+  }
+  return nullptr;
+}
+
+void TestLegacyRuntimeOnUtilityStack(Harness &harness,
+                                     const std::filesystem::path &source,
+                                     const std::filesystem::path &index) {
+  pthread_attr_t attributes;
+  if (pthread_attr_init(&attributes) != 0) {
+    throw std::runtime_error("pthread_attr_init failed");
+  }
+  constexpr std::size_t kUtilityStackBytes = 512 * 1024;
+  const int stack_result = pthread_attr_setstacksize(&attributes,
+                                                     kUtilityStackBytes);
+  if (stack_result != 0) {
+    pthread_attr_destroy(&attributes);
+    throw std::runtime_error("pthread_attr_setstacksize failed");
+  }
+  LegacySmallStackContext context{&source, &index, false, 0, 0, ""};
+  pthread_t thread;
+  const int create_result = pthread_create(
+      &thread, &attributes, OpenLegacyRuntimeOnSmallStack, &context);
+  pthread_attr_destroy(&attributes);
+  if (create_result != 0) {
+    throw std::runtime_error("pthread_create failed");
+  }
+  if (pthread_join(thread, nullptr) != 0) {
+    throw std::runtime_error("pthread_join failed");
+  }
+  if (!context.ready) {
+    throw std::runtime_error(
+        "legacy runtime failed on utility-size stack: " + context.error);
+  }
+  harness.Check(context.source_hash_length == 64 &&
+                    context.index_hash_length == 64,
+                "utility-stack legacy runtime omitted stable identities");
 }
 
 void TestNormalBuilds(Harness &harness,
@@ -371,8 +434,8 @@ void TestBuildFailureAndLegacyPath(Harness &harness,
   harness.Check(!std::filesystem::exists(candidate.string() + ".building"),
                 "failed fd build left a temporary candidate");
 
-  const auto legacy_bytes =
-      BuildSyntheticMDX("legacy-alpha", "legacy-omega");
+  const auto legacy_bytes = BuildSyntheticMDXWithHeadwords(
+      "apple", "banana", "苹果；蘋果；苹果树的果实", "香蕉；蕉");
   const auto legacy_source = root / "legacy-preferred.mdx";
   const auto legacy_index = root / "legacy-preferred.sqlite";
   WriteBytes(legacy_source, legacy_bytes);
@@ -381,6 +444,46 @@ void TestBuildFailureAndLegacyPath(Harness &harness,
   const auto legacy_result = legacy.buildIndex();
   harness.Check(legacy_result.entry_count == 2,
                 "legacy path build API regressed");
+  TestLegacyRuntimeOnUtilityStack(harness, legacy_source, legacy_index);
+  DictionaryCoreBridge *legacy_runtime = [[DictionaryCoreBridge alloc]
+      initLegacyReadOnlyWithDictionaryPath:String(legacy_source)
+                                     indexPath:String(legacy_index)
+                                  dictionaryID:@"legacy-preferred-1"
+                           formatterIdentifier:@"generic-mdict.v1"
+                            cacheMaximumBytes:1024 * 1024
+                          cacheMaximumEntries:16];
+  if (!legacy_runtime.isReady) {
+    throw std::runtime_error(
+        "legacy preferred descriptor did not open through fd-bound runtime: " +
+        std::string(legacy_runtime.lastError.UTF8String ?: "unknown error"));
+  }
+  harness.Check(legacy_runtime.sourceSHA256.length == 64 &&
+                    legacy_runtime.indexSHA256.length == 64,
+                "legacy fd-bound runtime omitted stable source/index identity");
+  auto *forward = [legacy_runtime lookup:@"apple" maximumHTMLBytes:4096];
+  harness.Check([[forward objectForKey:@"found"] boolValue],
+                "legacy forward index was unavailable before reverse enumeration");
+  __block BOOL saw_apple = NO;
+  __block BOOL saw_chinese = NO;
+  auto *enumerated = [legacy_runtime
+      enumerateEntriesForReverseIndex:4096
+                    cancellationCheck:^BOOL {
+                      return NO;
+                    }
+                               handler:^BOOL(NSString *headword,
+                                             NSString *plainHTML,
+                                             BOOL truncated) {
+                                 saw_apple = saw_apple ||
+                                     [headword isEqualToString:@"apple"];
+                                 saw_chinese = saw_chinese ||
+                                     ([plainHTML containsString:@"苹果"] && !truncated);
+                                 return YES;
+                               }];
+  harness.Check(ResultFlag(enumerated, @"success") &&
+                    [[enumerated objectForKey:@"entryCount"] unsignedLongLongValue] == 2,
+                "legacy reverse source enumeration failed");
+  harness.Check(saw_apple && saw_chinese,
+                "legacy reverse source did not expose apple/苹果 fixture entry");
 }
 
 void TestConcurrencyAndFDRecovery(Harness &harness,

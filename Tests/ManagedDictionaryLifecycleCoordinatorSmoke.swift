@@ -929,10 +929,10 @@ private func testBatchSnapshotFailClosedAndGeneration(smoke: inout Smoke) async 
     let missingQueries = await missingRuntime.snapshot().queried
     try smoke.check("missing batch snapshot fails the candidate closed",
                     category: \.snapshotFailClosed,
-                    missingBatch.hits.isEmpty &&
+                    missingBatch.hits.map(\.dictionaryID) == [fallback.dictionaryID] &&
                         missingBatch.unavailableDictionaryIDs.isEmpty &&
                         !missingBatch.skippedBecausePreferredMatched &&
-                        missingQueries == [a.dictionaryID])
+                        missingQueries == [a.dictionaryID, fallback.dictionaryID])
 
     let generationRuntime = BatchRuntime(
         blockedDictionaryID: b.dictionaryID,
@@ -1149,12 +1149,17 @@ private func testOpenResourceFallback(smoke: inout Smoke) async throws {
                                                         runtime: localHitRuntime)
     let localHit = await localHitService.lookup("safe")
     let localQueried = await localHitRuntime.snapshot().queried
-    try smoke.check("managedLocal hit prevents fallback lookup", category: \.ordering,
-                    localHit.hits.map(\.dictionaryID) == [normal.dictionaryID] &&
-                    localQueried == [normal.dictionaryID])
+    try smoke.check("managedLocal and open-resource hits use unified lookup",
+                    category: \.ordering,
+                    localHit.hits.map(\.dictionaryID) ==
+                        [normal.dictionaryID, fallbackA.dictionaryID] &&
+                    localQueried == [normal.dictionaryID, fallbackA.dictionaryID])
     let preferred = await localHitService.lookup("safe", preferredMatched: true)
-    try smoke.check("preferred hit skips both managed tiers", category: \.ordering,
-                    preferred.skippedBecausePreferredMatched && preferred.hits.isEmpty)
+    try smoke.check("legacy preferred flag cannot suppress unified sources",
+                    category: \.ordering,
+                    !preferred.skippedBecausePreferredMatched &&
+                        preferred.hits.map(\.dictionaryID) ==
+                            [normal.dictionaryID, fallbackA.dictionaryID])
 
     let pending = descriptor("00000000-0000-0000-0000-000000000205", sourceKind: .openResource,
                              ownership: .appManagedOpenResource, level: .fallback, state: .pendingIndex)

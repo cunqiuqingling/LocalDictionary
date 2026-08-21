@@ -1014,11 +1014,11 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         let directory = try OwnedDictionaryLifecyclePOSIX.openChildDirectory(parent, component)
         let capability = ValidatedDirectoryCapability(directory)
         let identity = try OwnedDictionaryLifecyclePOSIX.directoryIdentity(capability.descriptor)
-        let allowed = allowIndex
-            ? Set([OpenResourceInstallationIdentity.payloadComponent,
-                   OpenResourceInstallationIdentity.sidecarComponent, "index"])
-            : Set([OpenResourceInstallationIdentity.payloadComponent,
-                   OpenResourceInstallationIdentity.sidecarComponent])
+        var allowed = OpenResourceInstallationIdentity.convertedSourceComponents.union([
+            OpenResourceInstallationIdentity.payloadComponent,
+            OpenResourceInstallationIdentity.sidecarComponent
+        ])
+        if allowIndex { allowed.insert("index") }
         guard try OwnedDictionaryLifecyclePOSIX.entries(capability.descriptor).isSubset(of: allowed) else {
             throw OwnedDictionaryLifecycleErrorCode.unexpectedOwnedEntry
         }
@@ -1040,17 +1040,29 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         if let expectedDictionaryID, sidecar.dictionaryID != expectedDictionaryID {
             throw OwnedDictionaryLifecycleErrorCode.dictionaryIdentityConflict
         }
-        let payloadFD = try OwnedDictionaryLifecyclePOSIX.openRegular(
-            capability.descriptor, OpenResourceInstallationIdentity.payloadComponent
+        let converted = DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+            sidecar.formatterIdentifier
         )
-        defer { Darwin.close(payloadFD) }
-        try OwnedDictionaryLifecyclePOSIX.validateRegularFile(
-            OwnedDictionaryLifecyclePOSIX.metadata(payloadFD), exactMode: 0o600,
-            expectedSize: sidecar.payloadBytes
-        )
-        if fullHash,
-           try OwnedDictionaryLifecyclePOSIX.sha256(payloadFD) != sidecar.payloadSHA256 {
-            throw OwnedDictionaryLifecycleErrorCode.payloadIdentityMismatch
+        if try OwnedDictionaryLifecyclePOSIX.isAbsent(
+            capability.descriptor, sidecar.payloadRelativePath
+        ) {
+            guard converted, sidecar.outputIntegrityStatus == "ok",
+                  sidecar.outputPublicationID != nil, sidecar.outputSHA256 != nil else {
+                throw OwnedDictionaryLifecycleErrorCode.payloadIdentityMismatch
+            }
+        } else {
+            let payloadFD = try OwnedDictionaryLifecyclePOSIX.openRegular(
+                capability.descriptor, sidecar.payloadRelativePath
+            )
+            defer { Darwin.close(payloadFD) }
+            try OwnedDictionaryLifecyclePOSIX.validateRegularFile(
+                OwnedDictionaryLifecyclePOSIX.metadata(payloadFD), exactMode: 0o600,
+                expectedSize: sidecar.payloadBytes
+            )
+            if fullHash,
+               try OwnedDictionaryLifecyclePOSIX.sha256(payloadFD) != sidecar.payloadSHA256 {
+                throw OwnedDictionaryLifecycleErrorCode.payloadIdentityMismatch
+            }
         }
         if allowIndex,
            !(try OwnedDictionaryLifecyclePOSIX.isAbsent(capability.descriptor, "index")) {
@@ -1126,15 +1138,33 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
 
     private func match(sidecar: OpenResourceInstallationSidecar,
                        descriptor: DictionaryDescriptor) throws {
+        let converted = DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+            descriptor.formatterIdentifier
+        )
+        let legacySourcePath =
+            "Dictionaries/\(sidecar.dictionaryID)/\(sidecar.payloadRelativePath)"
         guard descriptor.dictionaryID == sidecar.dictionaryID,
               descriptor.sourceKind == .openResource,
               descriptor.storageOwnership == .appManagedOpenResource,
               descriptor.formatterIdentifier == sidecar.formatterIdentifier,
-              descriptor.relativePaths.dictionary ==
-                "Dictionaries/\(sidecar.dictionaryID)/\(sidecar.payloadRelativePath)",
+              (converted
+                ? descriptor.relativePaths.dictionary == nil ||
+                    descriptor.relativePaths.dictionary == legacySourcePath
+                : descriptor.relativePaths.dictionary == legacySourcePath),
               descriptor.openResourceMetadata ==
                 metadata(from: sidecar) else {
             throw OwnedDictionaryLifecycleErrorCode.dictionaryIdentityConflict
+        }
+        if DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+            descriptor.formatterIdentifier
+        ) {
+            guard let published = descriptor.publishedIndexIdentity,
+                  sidecar.outputPublicationID == published.indexPublicationID,
+                  sidecar.outputSHA256 == published.indexSHA256,
+                  sidecar.outputSchemaVersion == published.schemaVersion,
+                  sidecar.outputIntegrityStatus == "ok" else {
+                throw OwnedDictionaryLifecycleErrorCode.dictionaryIdentityConflict
+            }
         }
     }
 
@@ -1181,8 +1211,9 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
             formatterIdentifier: sidecar.formatterIdentifier,
             capabilities: .unknown,
             relativePaths: DictionaryRelativePaths(
-                dictionary:
-                    "Dictionaries/\(sidecar.dictionaryID)/\(sidecar.payloadRelativePath)",
+                dictionary: DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+                    sidecar.formatterIdentifier
+                ) ? nil : "Dictionaries/\(sidecar.dictionaryID)/\(sidecar.payloadRelativePath)",
                 resources: [], index: nil
             ),
             createdAt: sidecar.installedAt,
@@ -1274,10 +1305,18 @@ private struct OwnedDictionaryLifecycleWorker: Sendable {
         var allowedDirectories = Set<String>()
         switch ownership {
         case .appManagedOpenResource:
-            allowedFiles = [
-                OpenResourceInstallationIdentity.payloadComponent,
-                OpenResourceInstallationIdentity.sidecarComponent
-            ]
+            allowedFiles = [OpenResourceInstallationIdentity.sidecarComponent]
+            if let descriptor,
+               let path = descriptor.relativePaths.dictionary,
+               let tail = ownedTail(path, dictionaryID: descriptor.dictionaryID),
+               tail.count == 1 {
+                allowedFiles.insert(tail[0])
+            } else {
+                allowedFiles.insert(OpenResourceInstallationIdentity.payloadComponent)
+                allowedFiles.formUnion(
+                    OpenResourceInstallationIdentity.convertedSourceComponents
+                )
+            }
             if allowIndex { allowedDirectories.insert("index") }
         case .appManagedImported:
             if let descriptor {

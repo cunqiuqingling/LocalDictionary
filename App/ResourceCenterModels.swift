@@ -11,11 +11,16 @@ enum ResourceCenterCatalogState: Equatable, Sendable {
 enum ResourceCenterOperationState: Equatable, Sendable {
     case available
     case downloading(received: UInt64, expected: UInt64?)
+    case downloaded
     case verifying
     case installing
+    case converting(processed: UInt64, total: UInt64?)
     case indexing
+    case validatingIndex
+    case publishing
     case installed
     case updateAvailable
+    case needsReinstall
     case removing
     case failed
     case cancelled
@@ -35,10 +40,16 @@ struct ResourceCenterResourceRow: Equatable, Sendable, Identifiable {
     let publisher: String
     let sourceURL: String
     let redistributionStatement: String
+    let sourceFormat: String
+    let checksumSummary: String
+    let attribution: String
+    let localConversionStatement: String
     let operationState: ResourceCenterOperationState
     let failureMessage: String?
+    let diagnosticText: String?
     let canInstall: Bool
     let canUpdate: Bool
+    let isRecommendedForLanguagePair: Bool
 }
 
 struct ResourceCenterSnapshot: Equatable, Sendable {
@@ -49,6 +60,10 @@ struct ResourceCenterSnapshot: Equatable, Sendable {
     let importedDictionaryCount: Int
     let preferredDictionaryCount: Int
     let catalogVerifiedAt: Date?
+
+    var recommendedResources: [ResourceCenterResourceRow] {
+        Array(resources.filter(\.isRecommendedForLanguagePair).prefix(3))
+    }
 
     static func unavailable(catalog: DictionaryCatalog,
                             message: String = "尚未配置经过审核的开放资源目录。") -> Self {
@@ -73,11 +88,15 @@ struct ResourceCenterSnapshot: Equatable, Sendable {
 enum ResourceCenterPresentation {
     static func snapshot(
         verifiedManifest: VerifiedResourceManifest?,
+        bundledResources: [BundledOpenResourceDefinition] = [],
         catalog: DictionaryCatalog,
         catalogState: ResourceCenterCatalogState,
         catalogMessage: String,
         operations: [String: ResourceCenterOperationState] = [:],
         failures: [String: String] = [:],
+        diagnostics: [String: String] = [:],
+        nativeLanguageCode: String = "zh-Hans",
+        learningLanguageCode: String = "en",
         verifiedAt: Date? = nil
     ) -> ResourceCenterSnapshot {
         let openDescriptors = catalog.dictionaries.filter {
@@ -91,7 +110,71 @@ enum ResourceCenterPresentation {
                     $1.openResourceMetadata!.resourceRevision
             }
         }
-        let resources = verifiedManifest?.validated.manifest.resources
+        let starterRows = bundledResources.map { resource -> ResourceCenterResourceRow in
+            let descriptor = installed[resource.resourceID]
+            let metadata = descriptor?.openResourceMetadata
+            var canInstall = metadata == nil
+            var canUpdate = metadata.map { resource.resourceRevision > $0.resourceRevision } ?? false
+            let state: ResourceCenterOperationState
+            if let explicit = operations[resource.resourceID] {
+                state = explicit
+                switch explicit {
+                case .downloading, .downloaded, .verifying, .installing, .converting,
+                     .indexing, .validatingIndex, .publishing, .removing:
+                    canInstall = false; canUpdate = false
+                default: break
+                }
+            } else if let descriptor, requiresReinstallation(descriptor) {
+                state = .needsReinstall
+                canInstall = true
+                canUpdate = false
+            } else if let metadata {
+                state = resource.resourceRevision > metadata.resourceRevision
+                    ? .updateAvailable : .installed
+            } else {
+                state = .available
+            }
+            return ResourceCenterResourceRow(
+                id: resource.resourceID,
+                displayName: resource.title,
+                summary: resource.summary,
+                languages: resource.languageDisplay,
+                category: resource.category,
+                version: resource.version,
+                installedVersion: metadata?.resourceVersion,
+                // A live official endpoint may use chunked transfer and therefore cannot
+                // advertise a byte count during discovery.  Once installed, the durable
+                // receipt is authoritative for the payload that was actually downloaded.
+                installedSize: metadata?.payloadBytes ??
+                    (resource.downloadBytes > 0 ? resource.downloadBytes : nil),
+                licenseName: resource.licenseIdentifier,
+                licenseURL: resource.licenseURL.absoluteString,
+                publisher: resource.publisher,
+                sourceURL: resource.downloadURL.absoluteString,
+                redistributionStatement: resource.redistributionStatement,
+                sourceFormat: resource.sourceFormat.rawValue,
+                checksumSummary: resource.isLiveDiscoveredResource
+                    ? (resource.officialDigest.isEmpty
+                        ? "下载后在本机计算 SHA-256 并写入安装凭据。"
+                        : "使用官方实时目录的 \(resource.officialDigestAlgorithm) 校验；" +
+                            "SHA-256 在下载后本机记录。")
+                    : "SHA-256 \(resource.sha256)；\(resource.digestProvenance) " +
+                        "\(resource.officialDigestAlgorithm) \(resource.officialDigest)",
+                attribution: resource.attribution,
+                localConversionStatement:
+                    "下载后在本机转换为 LocalDictionary 内部 SQLite 索引，仅供本地查询。",
+                operationState: state,
+                failureMessage: failures[resource.resourceID],
+                diagnosticText: diagnostics[resource.resourceID],
+                canInstall: canInstall,
+                canUpdate: canUpdate,
+                isRecommendedForLanguagePair: resource.isRecommended(
+                    nativeLanguageCode: nativeLanguageCode,
+                    learningLanguageCode: learningLanguageCode
+                )
+            )
+        }
+        let remoteRows = verifiedManifest?.validated.manifest.resources
             .filter { $0.status == .active && $0.distributionMode == .mirroredDownload }
             .map { resource -> ResourceCenterResourceRow in
                 let descriptor = installed[resource.resourceID]
@@ -108,12 +191,17 @@ enum ResourceCenterPresentation {
                 if let explicit = operations[resource.resourceID] {
                     inferredState = explicit
                     switch explicit {
-                    case .downloading, .verifying, .installing, .indexing, .removing:
+                    case .downloading, .downloaded, .verifying, .installing, .converting,
+                         .indexing, .validatingIndex, .publishing, .removing:
                         canInstall = false
                         canUpdate = false
                     default:
                         break
                     }
+                } else if let descriptor, requiresReinstallation(descriptor) {
+                    inferredState = .needsReinstall
+                    canInstall = true
+                    canUpdate = false
                 } else if let metadata {
                     if resource.resourceRevision > metadata.resourceRevision {
                         inferredState = .updateAvailable
@@ -149,10 +237,16 @@ enum ResourceCenterPresentation {
                         resource.mirroringAllowed
                         ? "许可证证据允许镜像再分发；安装前可查看来源与许可证。"
                         : "不可由 Resource Center 分发。",
+                    sourceFormat: resource.dictionaryFormat.rawValue,
+                    checksumSummary: resource.sha256.map { "SHA-256 \($0)" } ?? "—",
+                    attribution: resource.attribution,
+                    localConversionStatement: "已签名远程目录的兼容安装路径。",
                     operationState: inferredState,
                     failureMessage: failures[resource.resourceID],
+                    diagnosticText: diagnostics[resource.resourceID],
                     canInstall: canInstall,
-                    canUpdate: canUpdate
+                    canUpdate: canUpdate,
+                    isRecommendedForLanguagePair: false
                 )
             }
             .sorted {
@@ -162,6 +256,18 @@ enum ResourceCenterPresentation {
                 }
                 return $0.id < $1.id
             } ?? []
+        let starterIDs = Set(starterRows.map(\.id))
+        let resources = (starterRows + remoteRows.filter { !starterIDs.contains($0.id) })
+            .sorted {
+                if $0.isRecommendedForLanguagePair != $1.isRecommendedForLanguagePair {
+                    return $0.isRecommendedForLanguagePair
+                }
+                if $0.displayName != $1.displayName {
+                    return $0.displayName.localizedStandardCompare($1.displayName) ==
+                        .orderedAscending
+                }
+                return $0.id < $1.id
+            }
         return ResourceCenterSnapshot(
             catalogState: catalogState,
             catalogMessage: catalogMessage,
@@ -175,6 +281,12 @@ enum ResourceCenterPresentation {
             }.count,
             catalogVerifiedAt: verifiedAt
         )
+    }
+
+    static func requiresReinstallation(_ descriptor: DictionaryDescriptor) -> Bool {
+        descriptor.storageOwnership == .appManagedOpenResource &&
+            [.missingResources, .unavailable, .invalid, .corrupt, .staleIndex]
+                .contains(descriptor.state)
     }
 
     static func safeFailureMessage(_ error: Error) -> String {

@@ -30,7 +30,7 @@ final class SentenceAnalysisMarkdownFormatter {
         return "句子解析｜" + (preview.isEmpty ? "英文句子" : preview)
     }
 
-    private func aiMarkdownSection(
+    func aiMarkdownSection(
         _ presentation: AISentenceAnalysisPresentation
     ) -> String {
         let analysis = presentation.analysis
@@ -94,6 +94,9 @@ final class SentenceAnalysisMarkdownFormatter {
         appendSection("难点表达", lines: difficultLines, to: &lines)
         appendSection("简化改写", body: analysis.paraphraseEN, to: &lines)
         appendSection("学习提示", body: analysis.learningNoteZH, to: &lines)
+        if let fallback = analysis.rawFallbackText {
+            appendSection("Provider 可读原文", body: fallback, to: &lines)
+        }
         return lines.joined(separator: "\n")
     }
 

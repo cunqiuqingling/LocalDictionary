@@ -12,7 +12,7 @@ private func descriptor(
     source: DictionarySourceKind = .managedLocal,
     level: DictionaryQueryLevel = .normal
 ) -> DictionaryDescriptor {
-    DictionaryDescriptor(
+    var value = DictionaryDescriptor(
         dictionaryID: "00000000-0000-0000-0000-000000000001",
         displayName: "A deliberately long dictionary name for tooltip coverage",
         sourceKind: source,
@@ -35,6 +35,10 @@ private func descriptor(
         createdAt: Date(timeIntervalSince1970: 1_700_000_000),
         updatedAt: Date(timeIntervalSince1970: 1_700_000_100)
     )
+    if source == .openResource {
+        value.storageOwnership = .appManagedOpenResource
+    }
+    return value
 }
 
 @main
@@ -46,11 +50,11 @@ private enum DictionaryManagerUIStateSmoke {
                    "managed source wording")
         try expect(DictionaryManagerPresentation.sourceText(.openResource) == "开放词库",
                    "open source wording")
-        try expect(DictionaryManagerPresentation.queryLevelText(.preferred) == "首选",
+        try expect(DictionaryManagerPresentation.queryLevelText(.preferred) == "默认词典",
                    "preferred wording")
-        try expect(DictionaryManagerPresentation.queryLevelText(.normal) == "普通",
+        try expect(DictionaryManagerPresentation.queryLevelText(.normal) == "本地导入",
                    "normal wording")
-        try expect(DictionaryManagerPresentation.queryLevelText(.fallback) == "后备",
+        try expect(DictionaryManagerPresentation.queryLevelText(.fallback) == "开放资源",
                    "fallback wording")
 
         let expectedStates: [(DictionaryState, String)] = [
@@ -68,6 +72,16 @@ private enum DictionaryManagerUIStateSmoke {
         try expect(DictionaryManagerPresentation.statusText(
             for: descriptor(state: .ready, enabled: false)
         ) == "已停用", "disabled must override ready state")
+        let staleOpen = descriptor(
+            state: .missingResources, enabled: false,
+            source: .openResource, level: .fallback
+        )
+        try expect(DictionaryManagerPresentation.statusText(for: staleOpen) ==
+                   "需要重新安装",
+                   "stale managed open resource must not become a generic disabled/file state")
+        try expect(DictionaryManagerPresentation.statusDetail(for: staleOpen)
+            .contains("资源中心重新安装"),
+                   "stale managed open resource must explain recovery")
         try expect(DictionaryManagerPresentation.statusText(
             for: descriptor(state: .indexing), activity: .cancellingIndex
         ) == "正在取消", "cancelling state")
@@ -112,12 +126,14 @@ private enum DictionaryManagerUIStateSmoke {
         try expect(DictionaryManagerPresentation.totalColumnWidth + 40 <=
             DictionaryManagerPresentation.defaultWindowWidth,
             "default window must fit normal table columns")
-        try expect((DictionaryManagerPresentation.columnWidths["state"] ?? 0) >= 120,
-                   "state column width")
+        try expect((DictionaryManagerPresentation.columnWidths["forwardState"] ?? 0) >= 90,
+                   "forward-state column width")
+        try expect((DictionaryManagerPresentation.columnWidths["reverseState"] ?? 0) >= 145,
+                   "reverse-state column width")
         try expect((DictionaryManagerPresentation.columnWidths["action"] ?? 0) >= 145,
                    "action column width")
-        try expect((DictionaryManagerPresentation.columnWidths["indexedAt"] ?? 0) >= 150,
-                   "date column width")
+        try expect(DictionaryManagerPresentation.minimumWindowWidth >= 900,
+                   "minimum width must keep the reverse action visible")
 
         for operation in [
             DictionaryManagerPresentation.ErrorOperation.inspect,

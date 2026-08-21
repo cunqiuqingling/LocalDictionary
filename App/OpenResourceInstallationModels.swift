@@ -43,8 +43,18 @@ enum OpenResourceInstallationError: LocalizedError, Equatable {
 
 struct OpenResourceInstallationIdentity: Equatable, Sendable {
     static let payloadComponent = "payload.mdx"
+    static let starDictSourceComponent = "source.stardict.tar.xz"
+    static let ccCedictSourceComponent = "source.cc-cedict.txt.gz"
+    static let kaikkiSourceComponent = "source.wiktionary.jsonl"
+    static let wordNetSourceComponent = "source.wordnet.tar.gz"
+    static let gcideSourceComponent = "source.gcide.tar.xz"
+    static let convertedSourceComponents: Set<String> = [
+        starDictSourceComponent, ccCedictSourceComponent, kaikkiSourceComponent,
+        wordNetSourceComponent, gcideSourceComponent
+    ]
     static let sidecarComponent = "resource-installation.json"
     static let sidecarFormatVersion = 1
+    static let convertedSidecarFormatVersion = 2
 
     let dictionaryID: String
     let resourceID: String
@@ -64,6 +74,7 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
     let installedAt: Date
     let formatterIdentifier: String
 
+#if !OPEN_RESOURCE_CONVERTER_TESTING
     init(verifiedManifest: VerifiedResourceManifest,
          resourceID: String,
          dictionaryID: String = UUID().uuidString.lowercased(),
@@ -99,6 +110,7 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
         self.installedAt = Date(timeIntervalSince1970: floor(installedAt.timeIntervalSince1970))
         formatterIdentifier = DictionaryFormatterIdentifier.genericMDictV1
     }
+#endif
 
     init(dictionaryID: String, resourceID: String, resourceRevision: UInt64, resourceVersion: String,
          manifestVersion: UInt64, manifestSHA256: String, verifiedKeyID: String,
@@ -114,7 +126,8 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
               OpenResourceInstallationMetadata.isSHA256(payloadSHA256), payloadBytes > 0,
               ResourceManifestKeyID.isValid(verifiedKeyID), !languages.isEmpty,
               expectedEntryCount.minimum <= expectedEntryCount.maximum,
-              DictionaryFormatterIdentifier.supportsGenericMDictV1(formatterIdentifier) else {
+              (DictionaryFormatterIdentifier.supportsGenericMDictV1(formatterIdentifier) ||
+                DictionaryFormatterIdentifier.supportsOpenResourceSQLite(formatterIdentifier)) else {
             throw OpenResourceInstallationError.invalidIdentity
         }
         let resolvedDisplayName = displayName ?? resourceID
@@ -132,6 +145,33 @@ struct OpenResourceInstallationIdentity: Equatable, Sendable {
         self.expectedEntryCount = expectedEntryCount
         self.installedAt = Date(timeIntervalSince1970: floor(installedAt.timeIntervalSince1970))
         self.formatterIdentifier = formatterIdentifier
+    }
+
+    var sourceComponent: String {
+        DictionaryFormatterIdentifier.supportsOpenResourceSQLite(formatterIdentifier)
+            ? Self.sourceComponent(for: formatterIdentifier) : Self.payloadComponent
+    }
+
+    static func sourceComponent(for formatterIdentifier: String) -> String {
+        switch formatterIdentifier {
+        case DictionaryFormatterIdentifier.freeDictStarDictV1:
+            return starDictSourceComponent
+        case DictionaryFormatterIdentifier.ccCedictTextV1:
+            return ccCedictSourceComponent
+        case DictionaryFormatterIdentifier.kaikkiWiktionaryJSONLV1:
+            return kaikkiSourceComponent
+        case DictionaryFormatterIdentifier.wordNetDataV1:
+            return wordNetSourceComponent
+        case DictionaryFormatterIdentifier.gcideMarkupV1:
+            return gcideSourceComponent
+        default:
+            return payloadComponent
+        }
+    }
+
+    var receiptFormatVersion: Int {
+        DictionaryFormatterIdentifier.supportsOpenResourceSQLite(formatterIdentifier)
+            ? Self.convertedSidecarFormatVersion : Self.sidecarFormatVersion
     }
 
     var catalogMetadata: OpenResourceInstallationMetadata {
@@ -167,12 +207,20 @@ struct OpenResourceInstallationSidecar: Codable, Equatable, Sendable {
     let sourceProject: String
     let officialPageReference: String
     let installedAt: Date
+    let sourceURL: String?
+    let officialDigestAlgorithm: String?
+    let officialDigest: String?
+    let transformerVersion: String?
+    let outputSchemaVersion: Int?
+    let outputPublicationID: String?
+    let outputSHA256: String?
+    let outputIntegrityStatus: String?
 
     init(identity: OpenResourceInstallationIdentity) {
-        formatVersion = OpenResourceInstallationIdentity.sidecarFormatVersion
+        formatVersion = identity.receiptFormatVersion
         dictionaryID = identity.dictionaryID; resourceID = identity.resourceID
         resourceRevision = identity.resourceRevision; resourceVersion = identity.resourceVersion
-        payloadRelativePath = OpenResourceInstallationIdentity.payloadComponent
+        payloadRelativePath = identity.sourceComponent
         payloadBytes = identity.payloadBytes; payloadSHA256 = identity.payloadSHA256
         sourceKind = .openResource; storageOwnership = .appManagedOpenResource
         languages = identity.languages; formatterIdentifier = identity.formatterIdentifier
@@ -180,22 +228,100 @@ struct OpenResourceInstallationSidecar: Codable, Equatable, Sendable {
         manifestSHA256 = identity.manifestSHA256; verifiedKeyID = identity.verifiedKeyID
         expectedEntryCount = identity.expectedEntryCount; sourceProject = identity.sourceProject
         officialPageReference = identity.officialPageReference; installedAt = identity.installedAt
+        sourceURL = nil; officialDigestAlgorithm = nil; officialDigest = nil
+        transformerVersion = nil; outputSchemaVersion = nil; outputPublicationID = nil
+        outputSHA256 = nil; outputIntegrityStatus = nil
+    }
+
+
+    init(identity: OpenResourceInstallationIdentity,
+         sourceURL: String,
+         officialDigestAlgorithm: String,
+         officialDigest: String,
+         transformerVersion: String,
+         outputSchemaVersion: Int,
+         outputPublicationID: String,
+         outputSHA256: String,
+         outputIntegrityStatus: String) {
+        formatVersion = identity.receiptFormatVersion
+        dictionaryID = identity.dictionaryID; resourceID = identity.resourceID
+        resourceRevision = identity.resourceRevision; resourceVersion = identity.resourceVersion
+        payloadRelativePath = identity.sourceComponent
+        payloadBytes = identity.payloadBytes; payloadSHA256 = identity.payloadSHA256
+        sourceKind = .openResource; storageOwnership = .appManagedOpenResource
+        languages = identity.languages; formatterIdentifier = identity.formatterIdentifier
+        license = identity.license; manifestVersion = identity.manifestVersion
+        manifestSHA256 = identity.manifestSHA256; verifiedKeyID = identity.verifiedKeyID
+        expectedEntryCount = identity.expectedEntryCount; sourceProject = identity.sourceProject
+        officialPageReference = identity.officialPageReference; installedAt = identity.installedAt
+        self.sourceURL = sourceURL
+        self.officialDigestAlgorithm = officialDigestAlgorithm
+        self.officialDigest = officialDigest
+        self.transformerVersion = transformerVersion
+        self.outputSchemaVersion = outputSchemaVersion
+        self.outputPublicationID = outputPublicationID
+        self.outputSHA256 = outputSHA256
+        self.outputIntegrityStatus = outputIntegrityStatus
     }
 
     func validated(expected identity: OpenResourceInstallationIdentity? = nil) throws -> OpenResourceInstallationSidecar {
-        guard formatVersion == OpenResourceInstallationIdentity.sidecarFormatVersion,
+        let generic = DictionaryFormatterIdentifier.supportsGenericMDictV1(formatterIdentifier)
+        let converted = DictionaryFormatterIdentifier.supportsOpenResourceSQLite(formatterIdentifier)
+        guard (generic && formatVersion == OpenResourceInstallationIdentity.sidecarFormatVersion ||
+                converted && formatVersion == OpenResourceInstallationIdentity.convertedSidecarFormatVersion),
               OpenResourceInstallationMetadata.isCanonicalUUID(dictionaryID),
               OpenResourceInstallationMetadata.isSafeToken(resourceID), resourceRevision > 0,
-              manifestVersion > 0, payloadRelativePath == OpenResourceInstallationIdentity.payloadComponent,
+              manifestVersion > 0,
+              payloadRelativePath == (converted
+                ? OpenResourceInstallationIdentity.sourceComponent(for: formatterIdentifier)
+                : OpenResourceInstallationIdentity.payloadComponent),
               !payloadRelativePath.contains("/"), !payloadRelativePath.contains("\\"),
               payloadBytes > 0, OpenResourceInstallationMetadata.isSHA256(payloadSHA256),
               OpenResourceInstallationMetadata.isSHA256(manifestSHA256),
               ResourceManifestKeyID.isValid(verifiedKeyID),
               sourceKind == .openResource, storageOwnership == .appManagedOpenResource,
               DictionaryOwnershipPolicy.policy(for: sourceKind, ownership: storageOwnership) != nil,
-              !languages.isEmpty, DictionaryFormatterIdentifier.supportsGenericMDictV1(formatterIdentifier),
+              !languages.isEmpty, (generic || converted),
               expectedEntryCount.minimum <= expectedEntryCount.maximum else {
             throw OpenResourceInstallationError.invalidSidecar
+        }
+        if converted {
+            let digestValid = (officialDigestAlgorithm == "SHA-512" &&
+                officialDigest?.count == 128) ||
+                (officialDigestAlgorithm == "SHA-256" && officialDigest?.count == 64)
+            let allOutputFields = sourceURL != nil && digestValid && transformerVersion != nil &&
+                (outputSchemaVersion ?? 0) > 0 &&
+                outputPublicationID.flatMap(UUID.init(uuidString:)) != nil &&
+                outputSHA256.map(OpenResourceInstallationMetadata.isSHA256) == true &&
+                outputIntegrityStatus == "ok"
+            let noOutputFields = sourceURL == nil && officialDigestAlgorithm == nil &&
+                officialDigest == nil && transformerVersion == nil && outputSchemaVersion == nil &&
+                outputPublicationID == nil && outputSHA256 == nil && outputIntegrityStatus == nil
+            guard allOutputFields || noOutputFields else {
+                throw OpenResourceInstallationError.invalidSidecar
+            }
+            if allOutputFields {
+                if let resource = AuditedOpenResourceSecurityRegistry.resource(id: resourceID) {
+                    guard resourceRevision == resource.resourceRevision,
+                          resourceVersion == resource.version,
+                          payloadBytes == resource.downloadBytes,
+                          payloadSHA256 == resource.sha256,
+                          manifestSHA256 == resource.catalogMetadataSHA256,
+                          sourceURL == resource.downloadURL,
+                          officialDigestAlgorithm == resource.officialDigestAlgorithm,
+                          officialDigest == resource.officialDigest,
+                          transformerVersion == resource.transformerVersion,
+                          outputSchemaVersion == resource.outputSchemaVersion else {
+                        throw OpenResourceInstallationError.invalidSidecar
+                    }
+                } else if !LiveOfficialOpenResourcePolicy.accepts(
+                    resourceID: resourceID,
+                    formatterIdentifier: formatterIdentifier,
+                    sourceURL: sourceURL ?? ""
+                ) {
+                    throw OpenResourceInstallationError.invalidSidecar
+                }
+            }
         }
         if let identity {
             let expected = OpenResourceInstallationSidecar(identity: identity)

@@ -41,4 +41,29 @@ actor ResourcePayloadDownloadCoordinator {
             throw ResourcePayloadDownloadError.transportFailure
         }
     }
+
+    func download(starter resource: BundledOpenResourceDefinition,
+                  progress: @escaping ResourcePayloadFileDownloader.ProgressSink = { _ in })
+        async throws -> VerifiedPayloadStagingResult {
+        guard !operationInProgress else {
+            throw ResourcePayloadDownloadError.operationInProgress
+        }
+        operationInProgress = true
+        defer { operationInProgress = false }
+        let plan = try ResourcePayloadDownloadPlanBuilder.build(
+            starter: resource,
+            applicationAllowedHosts: policy.applicationAllowedHosts,
+            stagingRoot: stagingRoot,
+            policy: policy
+        )
+        do {
+            return try await downloader.download(plan: plan, progress: progress)
+        } catch is CancellationError {
+            throw ResourcePayloadDownloadError.cancelled
+        } catch let error as ResourcePayloadDownloadError {
+            throw error
+        } catch {
+            throw ResourcePayloadDownloadError.transportFailure
+        }
+    }
 }

@@ -338,9 +338,7 @@ final class DictionaryImportService {
         let requiredBytes = selections.reduce(UInt64(0)) {
             $0 &+ $1.preview.estimatedDiskBytes(selectedMDDIDs: $1.selectedMDDIDs)
         }
-        var nextPosition = (catalog.dictionaries
-            .filter { $0.queryLevel == .normal }
-            .map(\.sortPosition).max() ?? 0) + 1
+        var nextPosition = (catalog.dictionaries.map(\.sortPosition).max() ?? 0) + 1
         var items: [DictionaryImportPlanItem] = []
 
         for selection in selections {

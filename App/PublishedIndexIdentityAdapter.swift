@@ -7,6 +7,16 @@ let livePublishedIndexVerifier: OwnedDictionaryPublishedIndexVerifier = {
           descriptor.relativePaths.index == identity.relativePath else {
         return false
     }
+    if descriptor.sourceKind == .openResource,
+       descriptor.storageOwnership == .appManagedOpenResource,
+       DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+        descriptor.formatterIdentifier
+       ) {
+        return OpenResourceSQLiteRuntime.validatePublishedIndex(
+            descriptor: descriptor,
+            applicationSupportRootURL: managedRootURL
+        )
+    }
     return LocalDictionaryValidatePublishedIndex(
         managedRootURL.path,
         identity.relativePath,

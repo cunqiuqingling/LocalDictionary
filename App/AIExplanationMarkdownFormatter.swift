@@ -11,6 +11,9 @@ final class AIExplanationMarkdownFormatter {
             "",
             "> 由 \(provider) · \(model) 生成"
         ]
+        if let primary = explanation.recommendedEnglishExpressions.first {
+            lines += ["", "- 推荐英文：**\(inline(primary))**"]
+        }
         let pronunciations = explanation.pronunciations.prefix(4)
             .map(inline).filter { !$0.isEmpty }
         if !pronunciations.isEmpty {
@@ -28,13 +31,11 @@ final class AIExplanationMarkdownFormatter {
                 let english = inline(sense.definitionEN)
                 let chinese = inline(sense.definitionZH)
                 guard !english.isEmpty || !chinese.isEmpty else { continue }
-                if !english.isEmpty {
-                    lines.append("\(index + 1). **\(english)**")
-                } else {
-                    lines.append("\(index + 1). \(chinese)")
-                }
-                if !chinese.isEmpty, !english.isEmpty {
-                    lines.append("   - 中文释义：\(chinese)")
+                if !chinese.isEmpty {
+                    lines.append("\(index + 1). **\(chinese)**")
+                } else { lines.append("\(index + 1). \(english)") }
+                if !english.isEmpty, !chinese.isEmpty {
+                    lines.append("   - 英文定义：\(english)")
                 }
                 let usage = inline(sense.usageNoteZH)
                 if !usage.isEmpty { lines.append("   - 用法说明：\(usage)") }
@@ -62,6 +63,17 @@ final class AIExplanationMarkdownFormatter {
         }
         let caution = inline(explanation.caution)
         if !caution.isEmpty { lines += ["", "- 注意：\(caution)"] }
+        let alternatives = explanation.recommendedEnglishExpressions.dropFirst()
+            .map(inline).filter { !$0.isEmpty }
+        if !alternatives.isEmpty {
+            lines += ["", "- 其他可能表达：\(alternatives.joined(separator: "；"))"]
+        }
+        if let fallback = explanation.rawFallbackText {
+            let safeFallback = inline(fallback)
+            if !safeFallback.isEmpty {
+                lines += ["", "#### AI 返回的非结构化内容", "", safeFallback]
+            }
+        }
         let savedHeadword = headword?.trimmingCharacters(in: .whitespacesAndNewlines)
         return AIExplanationNoteSection(headword: savedHeadword?.isEmpty == false
                                             ? savedHeadword! : explanation.headword,

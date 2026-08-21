@@ -1,6 +1,6 @@
 # D1b-2B verified payload staging
 
-D1b-2B adds an isolated transport for one signed resource payload. It supports only
+D1b-2B adds an isolated transport for one verified resource payload. The remote-manifest path supports only
 `mirroredDownload`, `archiveFormat=none`, `dictionaryFormat=generic-mdict-v1`, and a
 single MDX file. It does not support ZIP extraction, MDD resources, resume data, or
 background downloads.
@@ -8,13 +8,14 @@ background downloads.
 The download plan is derived from an already verified Manifest resource. Its signed
 `allowedDownloadHosts` are intersected with an application-supplied host allowlist,
 and the initial URL, every redirect, and the final response URL must remain inside
-that exact-host intersection. The production application allowlist is empty, so the
-feature remains disabled. Tests use only synthetic `example.test` URLs through
-`URLProtocol`.
+that exact-host intersection. The production application allowlist contains only
+`download.freedict.org` for the immutable bundled starter; the remote manifest endpoint and trust
+store remain disabled. Tests use only synthetic `example.test` URLs through `URLProtocol`.
 
 The request is an ephemeral, cookie-free, cache-free HTTPS GET. It sends
 `Accept-Encoding: identity`, accepts only HTTP 200 and
-`application/octet-stream`, and does not use authorization headers. Redirects retain
+`application/octet-stream`; the typed FreeDict XZ starter additionally accepts only
+`application/x-xz`. It does not use authorization headers. Redirects retain
 the audited D1b-2A HTTPS and exact-host policy and are limited to five hops.
 
 All core size values are `UInt64`. The application hard limit is 512 MiB, while the

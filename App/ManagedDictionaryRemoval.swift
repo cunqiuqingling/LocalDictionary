@@ -114,7 +114,7 @@ struct ManagedDictionaryRemovalWorker: Sendable {
             throw ManagedDictionaryRemovalError.notManagedLocal
         }
         let dictionaryID = try canonicalUUID(descriptor.dictionaryID)
-        try validateCatalogPaths(descriptor.relativePaths, dictionaryID: dictionaryID)
+        try validateCatalogPaths(descriptor, dictionaryID: dictionaryID)
 
         let fileManager = FileManager()
         let roots = try managedRoots(dictionaryID: dictionaryID,
@@ -356,11 +356,29 @@ struct ManagedDictionaryRemovalWorker: Sendable {
                 pendingDeletionRoot, pendingDirectory)
     }
 
-    private func validateCatalogPaths(_ paths: DictionaryRelativePaths,
+    private func validateCatalogPaths(_ descriptor: DictionaryDescriptor,
                                       dictionaryID: String) throws {
-        guard let source = paths.dictionary,
-              isAllowedSourcePath(source, dictionaryID: dictionaryID) else {
-            throw ManagedDictionaryRemovalError.unsafeManagedPath
+        let paths = descriptor.relativePaths
+        let convertedOpenResource = descriptor.sourceKind == .openResource &&
+            descriptor.storageOwnership == .appManagedOpenResource &&
+            DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+                descriptor.formatterIdentifier
+            )
+        if convertedOpenResource {
+            if let source = paths.dictionary {
+                let expected = "Dictionaries/\(dictionaryID)/" +
+                    OpenResourceInstallationIdentity.sourceComponent(
+                        for: descriptor.formatterIdentifier
+                    )
+                guard source == expected else {
+                    throw ManagedDictionaryRemovalError.unsafeManagedPath
+                }
+            }
+        } else {
+            guard let source = paths.dictionary,
+                  isAllowedSourcePath(source, dictionaryID: dictionaryID) else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
         }
         if let index = paths.index,
            !isAllowedIndexPath(index, dictionaryID: dictionaryID) {
@@ -541,17 +559,29 @@ struct ManagedDictionaryRemovalWorker: Sendable {
                                               directory: Int32) throws {
         guard descriptor.sourceKind == .openResource,
               descriptor.storageOwnership == .appManagedOpenResource,
-              let expected = descriptor.openResourceMetadata,
-              descriptor.relativePaths.dictionary ==
-                "Dictionaries/\(descriptor.dictionaryID)/payload.mdx" else {
+              let expected = descriptor.openResourceMetadata else {
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
+        let converted = DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+            descriptor.formatterIdentifier
+        )
+        let expectedSourceComponent = converted ? OpenResourceInstallationIdentity.sourceComponent(
+            for: descriptor.formatterIdentifier
+        ) :
+            OpenResourceInstallationIdentity.payloadComponent
+        let expectedSourcePath =
+            "Dictionaries/\(descriptor.dictionaryID)/\(expectedSourceComponent)"
+        guard converted
+                ? descriptor.relativePaths.dictionary == nil ||
+                    descriptor.relativePaths.dictionary == expectedSourcePath
+                : descriptor.relativePaths.dictionary == expectedSourcePath
+        else { throw ManagedDictionaryRemovalError.unsafeManagedPath }
         let entries = try directoryEntries(directory)
-        guard entries.isSubset(of: [
+        let allowed = OpenResourceInstallationIdentity.convertedSourceComponents.union([
             OpenResourceInstallationIdentity.payloadComponent,
-            OpenResourceInstallationIdentity.sidecarComponent,
-            "index"
-        ]) else {
+            OpenResourceInstallationIdentity.sidecarComponent, "index"
+        ])
+        guard entries.isSubset(of: allowed) else {
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
         let sidecarFD = try openRegular(
@@ -566,21 +596,34 @@ struct ManagedDictionaryRemovalWorker: Sendable {
               sidecar.sourceKind == .openResource,
               sidecar.storageOwnership == .appManagedOpenResource,
               sidecar.payloadRelativePath ==
-                OpenResourceInstallationIdentity.payloadComponent,
+                expectedSourceComponent,
               sidecar.formatterIdentifier == descriptor.formatterIdentifier,
               metadata(from: sidecar) == expected else {
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
-        let payloadFD = try openRegular(
-            parent: directory,
-            component: OpenResourceInstallationIdentity.payloadComponent,
-            exactMode: 0o600
-        )
-        defer { Darwin.close(payloadFD) }
-        var payload = stat()
-        guard Darwin.fstat(payloadFD, &payload) == 0,
-              payload.st_size >= 0,
-              UInt64(payload.st_size) == sidecar.payloadBytes else {
+        if converted {
+            guard let published = descriptor.publishedIndexIdentity,
+                  sidecar.outputPublicationID == published.indexPublicationID,
+                  sidecar.outputSHA256 == published.indexSHA256,
+                  sidecar.outputSchemaVersion == published.schemaVersion,
+                  sidecar.outputIntegrityStatus == "ok" else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+        }
+        if entries.contains(expectedSourceComponent) {
+            let payloadFD = try openRegular(
+                parent: directory,
+                component: expectedSourceComponent,
+                exactMode: 0o600
+            )
+            defer { Darwin.close(payloadFD) }
+            var payload = stat()
+            guard Darwin.fstat(payloadFD, &payload) == 0,
+                  payload.st_size >= 0,
+                  UInt64(payload.st_size) == sidecar.payloadBytes else {
+                throw ManagedDictionaryRemovalError.unsafeManagedPath
+            }
+        } else if !converted {
             throw ManagedDictionaryRemovalError.unsafeManagedPath
         }
     }
@@ -771,10 +814,9 @@ struct ManagedDictionaryRemovalWorker: Sendable {
         let allowedRootFiles: Set<String>
         var allowedDirectories = Set(["index"])
         if openResource {
-            allowedRootFiles = [
-                OpenResourceInstallationIdentity.payloadComponent,
-                OpenResourceInstallationIdentity.sidecarComponent
-            ]
+            allowedRootFiles = OpenResourceInstallationIdentity.convertedSourceComponents
+                .union([OpenResourceInstallationIdentity.payloadComponent,
+                        OpenResourceInstallationIdentity.sidecarComponent])
         } else {
             allowedRootFiles = Set(entries.filter {
                 let ext = URL(fileURLWithPath: $0).pathExtension.lowercased()
@@ -1083,8 +1125,22 @@ final class ManagedDictionaryRemovalCoordinator {
                 try worker.makePlan(for: descriptor)
             }.value
         }
-        catch let error as ManagedDictionaryRemovalError { return .failed(error) }
-        catch { return .failed(.unsafeManagedPath) }
+        catch let error as ManagedDictionaryRemovalError {
+            if descriptor.storageOwnership == .appManagedOpenResource {
+                return await retireStaleOpenResourceCatalogRecord(
+                    descriptor, planningFailure: error
+                )
+            }
+            return .failed(error)
+        }
+        catch {
+            if descriptor.storageOwnership == .appManagedOpenResource {
+                return await retireStaleOpenResourceCatalogRecord(
+                    descriptor, planningFailure: .unsafeManagedPath
+                )
+            }
+            return .failed(.unsafeManagedPath)
+        }
 
         guard !isIndexing(dictionaryID) else { return .failed(.indexingInProgress) }
         let permit: ManagedDictionaryLifecyclePermit
@@ -1171,6 +1227,59 @@ final class ManagedDictionaryRemovalCoordinator {
             return await finished(.removed(cleanupDeferred: false), .retired)
         } catch {
             return await finished(.removed(cleanupDeferred: true), .retired)
+        }
+    }
+
+    /// A stale managed open-resource row must always be removable. If its directory can no longer
+    /// be proven safe, retire only the Catalog/runtime authority and preserve every filesystem
+    /// object. This never grants deletion authority based on a broken path or receipt.
+    private func retireStaleOpenResourceCatalogRecord(
+        _ descriptor: DictionaryDescriptor,
+        planningFailure: ManagedDictionaryRemovalError
+    ) async -> ManagedDictionaryRemovalResult {
+        let permit: ManagedDictionaryLifecyclePermit
+        do {
+            permit = try await lifecycleCoordinator.acquireExclusiveOperation(
+                for: descriptor.dictionaryID, operation: .remove
+            )
+        } catch {
+            return .failed(.removalAlreadyInProgress)
+        }
+        await queryService.invalidateRuntime(dictionaryID: descriptor.dictionaryID)
+        beforeRemoval?(descriptor.dictionaryID)
+        do {
+            let updated: DictionaryCatalog
+            if let catalogStore {
+                let mutation = try catalogStore.mutate { latest, _ in
+                    guard latest.dictionaries.contains(where: {
+                        $0.dictionaryID == descriptor.dictionaryID &&
+                            $0.storageOwnership == .appManagedOpenResource
+                    }) else { throw ManagedDictionaryRemovalError.dictionaryNotFound }
+                    latest = try DictionaryCatalogOrdering.removingAndCompacting(
+                        descriptor.dictionaryID, from: latest
+                    )
+                }
+                updated = mutation.catalog
+            } else {
+                updated = try DictionaryCatalogOrdering.removingAndCompacting(
+                    descriptor.dictionaryID, from: catalog
+                )
+                guard let saveCatalog else {
+                    throw ManagedDictionaryRemovalError.catalogWriteFailed
+                }
+                try saveCatalog(updated)
+            }
+            catalog = updated
+            await queryService.commitCatalog(updated)
+            onCatalogChanged?(updated)
+            await lifecycleCoordinator.complete(permit, disposition: .retired)
+            _ = planningFailure
+            return .removed(cleanupDeferred: true)
+        } catch {
+            await lifecycleCoordinator.complete(
+                permit, disposition: .available(incrementGeneration: true)
+            )
+            return .failed(.catalogWriteFailed)
         }
     }
 

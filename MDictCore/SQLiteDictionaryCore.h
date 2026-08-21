@@ -101,6 +101,10 @@ class SQLiteDictionaryCore {
       int source_descriptor,
       const fdsqlite::FDBoundReadOnlyFileCapability &index_capability,
       const PublishedIndexMetadata &expected_metadata);
+  IndexOpenResult openLegacyReadOnly(
+      int source_descriptor,
+      const fdsqlite::FDBoundReadOnlyFileCapability &index_capability,
+      const IndexSourceMetadata &expected_source_metadata);
   LookupResult lookup(const std::string &input,
                       size_t maximum_html_bytes = 0);
   uint64_t enumerateEntries(

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/owned-dictionary-lifecycle-reconciliation-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-owned-lifecycle.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "$HOME/Downloads/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then
     export DEVELOPER_DIR="$HOME/Downloads/Xcode.app/Contents/Developer"

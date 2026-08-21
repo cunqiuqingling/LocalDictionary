@@ -26,5 +26,7 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 liuzhentie (刘震铁, aka &quot;cunqiu&quot;)</string>
 </dict>
 </plist>

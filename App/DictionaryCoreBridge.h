@@ -111,6 +111,8 @@ class DictionaryBridgeStorage;
 
 @property(nonatomic, readonly, getter=isReady) BOOL ready;
 @property(nonatomic, copy, readonly) NSString *lastError;
+@property(nonatomic, copy, readonly) NSString *sourceSHA256;
+@property(nonatomic, copy, readonly) NSString *indexSHA256;
 
 - (instancetype)initWithDictionaryPath:(NSString *)dictionaryPath
                              indexPath:(NSString *)indexPath;
@@ -122,6 +124,12 @@ class DictionaryBridgeStorage;
                                       indexPath:(NSString *)indexPath
                              cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
                            cacheMaximumEntries:(NSUInteger)cacheMaximumEntries;
+- (instancetype)initLegacyReadOnlyWithDictionaryPath:(NSString *)dictionaryPath
+                                            indexPath:(NSString *)indexPath
+                                         dictionaryID:(NSString *)dictionaryID
+                                  formatterIdentifier:(NSString *)formatterIdentifier
+                                   cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
+                                 cacheMaximumEntries:(NSUInteger)cacheMaximumEntries;
 - (instancetype)initManagedReadOnlyWithRootPath:(NSString *)managedRootPath
                              sourceRelativePath:(NSString *)sourceRelativePath
                               indexRelativePath:(NSString *)indexRelativePath

@@ -191,10 +191,14 @@ struct PayloadFileIdentity: Equatable, Sendable {
 }
 
 private enum ResourcePayloadStagingPOSIX {
-    static func error(for value: Int32 = errno, durability: Bool = false) -> ResourcePayloadDownloadError {
+    static func error(
+        for value: Int32 = errno,
+        durability: Bool = false,
+        missing: ResourcePayloadDownloadError = .temporaryFileMissing
+    ) -> ResourcePayloadDownloadError {
         if durability { return .durabilityFailure }
         switch value {
-        case ENOENT: return .missing
+        case ENOENT: return missing
         case EEXIST: return .conflict
         case ELOOP, ENOTDIR: return .unsafePath
         case EACCES, EPERM: return .permissionDenied
@@ -348,8 +352,8 @@ struct ResourcePayloadStagingStore: Sendable {
             let verifiedComponent = "verified-\(canonicalID)"
             try ResourcePayloadStagingPOSIX.requireSingleComponent(operationComponent)
             try ResourcePayloadStagingPOSIX.requireSingleComponent(verifiedComponent)
-            let partialComponent = "payload.mdx.part"
-            let finalComponent = "payload.mdx"
+            let finalComponent = plan.installationIdentity.sourceComponent
+            let partialComponent = finalComponent + ".part"
             let sidecarComponent = OpenResourceInstallationIdentity.sidecarComponent
             let sidecarData = try OpenResourceInstallationSidecar(identity: plan.installationIdentity).encodedData()
             try ResourcePayloadStagingPOSIX.requireSingleComponent(partialComponent)
@@ -358,7 +362,11 @@ struct ResourcePayloadStagingStore: Sendable {
 
             let rootFD = try root.withDescriptor { $0 }
             let mkdirResult = operationComponent.withCString { Darwin.mkdirat(rootFD, $0, 0o700) }
-            guard mkdirResult == 0 else { throw ResourcePayloadStagingPOSIX.error() }
+            guard mkdirResult == 0 else {
+                throw ResourcePayloadStagingPOSIX.error(
+                    missing: .downloadDestinationMissing
+                )
+            }
             var operationDirectory: OwnedFileDescriptor?
             var payload: OwnedFileDescriptor?
             var sidecar: OwnedFileDescriptor?
@@ -366,7 +374,11 @@ struct ResourcePayloadStagingStore: Sendable {
                 let operationRaw = operationComponent.withCString {
                     Darwin.openat(rootFD, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 }
-                guard operationRaw >= 0 else { throw ResourcePayloadStagingPOSIX.error() }
+                guard operationRaw >= 0 else {
+                    throw ResourcePayloadStagingPOSIX.error(
+                        missing: .downloadDestinationMissing
+                    )
+                }
                 operationDirectory = OwnedFileDescriptor(operationRaw, closeAction: hooks.close)
                 let operationMetadata = try operationDirectory!.withDescriptor {
                     try ResourcePayloadStagingPOSIX.metadata(for: $0)
@@ -386,7 +398,11 @@ struct ResourcePayloadStagingStore: Sendable {
                                      mode_t(0o600))
                     }
                 }
-                guard payloadRaw >= 0 else { throw ResourcePayloadStagingPOSIX.error() }
+                guard payloadRaw >= 0 else {
+                    throw ResourcePayloadStagingPOSIX.error(
+                        missing: .downloadDestinationMissing
+                    )
+                }
                 payload = OwnedFileDescriptor(payloadRaw, closeAction: hooks.close)
                 guard Darwin.fchmod(payloadRaw, mode_t(0o600)) == 0 else {
                     throw ResourcePayloadStagingPOSIX.error()
@@ -403,7 +419,11 @@ struct ResourcePayloadStagingStore: Sendable {
                                      mode_t(0o600))
                     }
                 }
-                guard sidecarRaw >= 0 else { throw ResourcePayloadStagingPOSIX.error() }
+                guard sidecarRaw >= 0 else {
+                    throw ResourcePayloadStagingPOSIX.error(
+                        missing: .downloadDestinationMissing
+                    )
+                }
                 sidecar = OwnedFileDescriptor(sidecarRaw, closeAction: hooks.close)
                 guard Darwin.fchmod(sidecarRaw, mode_t(0o600)) == 0 else {
                     throw ResourcePayloadStagingPOSIX.error()
@@ -460,11 +480,19 @@ struct ResourcePayloadStagingStore: Sendable {
             throw ResourcePayloadDownloadError.unexpectedFileType
         }
         let result = rootURL.path.withCString { Darwin.mkdir($0, 0o700) }
-        if result != 0, errno != EEXIST { throw ResourcePayloadStagingPOSIX.error() }
+        if result != 0, errno != EEXIST {
+            throw ResourcePayloadStagingPOSIX.error(
+                missing: .stagingDirectoryMissing
+            )
+        }
         let descriptor = rootURL.path.withCString {
             Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         }
-        guard descriptor >= 0 else { throw ResourcePayloadStagingPOSIX.error() }
+        guard descriptor >= 0 else {
+            throw ResourcePayloadStagingPOSIX.error(
+                missing: .stagingDirectoryMissing
+            )
+        }
         let root = OwnedFileDescriptor(descriptor, closeAction: hooks.close)
         do {
             try ResourcePayloadStagingPOSIX.validateDirectory(
@@ -547,6 +575,8 @@ final class ResourcePayloadStagingOperation {
 
     deinit { closeDescriptors() }
 
+    var receivedBytes: UInt64 { writtenBytes }
+
     func append(_ data: Data, maximumBytes: UInt64, expectedBytes: UInt64) throws -> UInt64 {
         guard state == .prepared || state == .streaming else {
             throw ResourcePayloadDownloadError.writeFailure
@@ -555,11 +585,11 @@ final class ResourcePayloadStagingOperation {
         let next = writtenBytes.addingReportingOverflow(UInt64(data.count))
         guard !next.overflow, next.partialValue <= maximumBytes else {
             state = .failed
-            throw ResourcePayloadDownloadError.responseTooLarge
+            throw ResourcePayloadDownloadError.payloadTooLarge
         }
         guard next.partialValue <= expectedBytes else {
             state = .failed
-            throw ResourcePayloadDownloadError.sizeMismatch
+            throw ResourcePayloadDownloadError.contentLengthMismatch
         }
         do {
             try payload.withDescriptor { try hooks.writeAll($0, data) }
@@ -581,7 +611,9 @@ final class ResourcePayloadStagingOperation {
             throw ResourcePayloadDownloadError.stagingFailure
         }
         do {
-            guard writtenBytes == expectedBytes else { throw ResourcePayloadDownloadError.sizeMismatch }
+            guard writtenBytes == expectedBytes else {
+                throw ResourcePayloadDownloadError.contentLengthMismatch
+            }
             let digest = hasher.finalize().map { String(format: "%02x", $0) }.joined()
             guard digest == expectedSHA256 else { throw ResourcePayloadDownloadError.hashMismatch }
             state = .verified

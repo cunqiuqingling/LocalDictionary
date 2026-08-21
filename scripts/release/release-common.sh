@@ -12,7 +12,7 @@ RELEASE_PRODUCT="LocalDictionary"
 RELEASE_BUNDLE_ID="com.localdict.LocalDictionary"
 RELEASE_ARCHITECTURE="arm64"
 RELEASE_DEPLOYMENT_TARGET="15.0"
-RELEASE_BRANCH="feature/m24-release"
+RELEASE_BRANCH="feature/prerelease-offline-language"
 
 release_die() {
     print -u2 -- "release error: $*"

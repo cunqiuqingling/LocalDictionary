@@ -1257,6 +1257,48 @@ private func testOwnedRemoval(base: URL, smoke: inout Smoke) async throws {
     try smoke.check("runtime suspended before removal", category: \.barriers,
                     removedIDs == [identity.dictionaryID])
 
+    let staleRoot = base.appendingPathComponent("owned-removal-stale-open",
+                                                isDirectory: true)
+    let staleIdentity = try makeIdentity(
+        dictionaryID: "45000000-0000-4000-8000-000000000099",
+        resourceID: "owned-removal-stale", payload: payload
+    )
+    let staleDescriptor = openDescriptor(
+        staleIdentity, state: .missingResources, enabled: false
+    )
+    let staleCatalog = catalog([staleDescriptor])
+    let staleStore = DictionaryCatalogStore(
+        directoryURL: staleRoot.appendingPathComponent("Catalog")
+    )
+    try staleStore.save(staleCatalog)
+    let staleRuntime = RemovalRuntime()
+    let staleService = ManagedDictionaryQueryService(
+        catalog: staleCatalog, runtime: staleRuntime
+    )
+    let staleCoordinator = ManagedDictionaryRemovalCoordinator(
+        catalog: staleCatalog, catalogStore: staleStore,
+        applicationSupportRootURL: staleRoot, queryService: staleService,
+        isIndexing: { _ in false }
+    )
+    let staleRemoval = await staleCoordinator.remove(
+        dictionaryID: staleDescriptor.dictionaryID
+    )
+    try smoke.check("missing open resource remains removable",
+                    category: \.catalogTransactions,
+                    staleRemoval == .removed(cleanupDeferred: true) &&
+                        staleCoordinator.catalog.dictionaries.isEmpty)
+    let staleRemovedIDs = await staleRuntime.removedIDs()
+    try smoke.check("missing open resource runtime invalidated",
+                    category: \.barriers,
+                    staleRemovedIDs == [staleDescriptor.dictionaryID])
+    try smoke.check("missing open resource removal does not create or delete unknown files",
+                    category: \.posix,
+                    !FileManager.default.fileExists(
+                        atPath: staleRoot.appendingPathComponent(
+                            "Dictionaries/\(staleDescriptor.dictionaryID)"
+                        ).path
+                    ))
+
     var external = descriptor
     external.sourceKind = .externalReference
     external.storageOwnership = .externalReference

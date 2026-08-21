@@ -11,7 +11,15 @@ final class ResourceCenterController {
     private let manifestLoader: ResourceManifestRemoteLoader?
     private let payloadDownloader: ResourcePayloadDownloadCoordinator?
     private let installationCoordinator: OpenResourceInstallationCoordinator
+    private let freeDictInstallationCoordinator = FreeDictStarDictInstallationCoordinator()
+    private let auditedInstallationCoordinator =
+        AuditedOpenResourceInstallationCoordinator()
+    private let officialDiscoveryClient: OfficialOpenResourceDiscoveryClient
+    private let officialPayloadDownloader: OfficialOpenResourcePayloadDownloader
     private let indexCoordinator: ManagedDictionaryIndexCoordinator
+    private let backgroundWorkCoordinator: LocalHeavyWorkCoordinator
+    private var nativeLanguageCode: String
+    private var learningLanguageCode: String
     private var removalCoordinator: ManagedDictionaryRemovalCoordinator?
     private let dictionariesRoot: URL
     private let onCatalogChanged: CatalogObserver
@@ -19,12 +27,15 @@ final class ResourceCenterController {
     private(set) var catalog: DictionaryCatalog
     private(set) var snapshot: ResourceCenterSnapshot
     private var verifiedManifest: VerifiedResourceManifest?
+    private var discoveredResources: [BundledOpenResourceDefinition] = []
     private var verifiedAt: Date?
     private var operations: [String: ResourceCenterOperationState] = [:]
     private var failures: [String: String] = [:]
+    private var diagnostics: [String: String] = [:]
     private var activeTask: Task<Void, Never>?
     private var activeTaskID: UUID?
     private var finalizingResourceIDs: Set<String> = []
+    private var finalizationTasks: [String: Task<Void, Never>] = [:]
     private var pendingAutoEnableDictionaryIDs: Set<String> = []
     var onSnapshotChanged: SnapshotObserver?
 
@@ -34,6 +45,9 @@ final class ResourceCenterController {
         catalogStore: DictionaryCatalogStore,
         installationCoordinator: OpenResourceInstallationCoordinator,
         indexCoordinator: ManagedDictionaryIndexCoordinator,
+        backgroundWorkCoordinator: LocalHeavyWorkCoordinator = LocalHeavyWorkCoordinator(),
+        nativeLanguageCode: String = "zh-Hans",
+        learningLanguageCode: String = "en",
         removalCoordinator: ManagedDictionaryRemovalCoordinator? = nil,
         applicationSupportRoot: URL = DictionaryImportService.defaultApplicationSupportRootURL(),
         manifestStateStore: VerifiedManifestStateStore = VerifiedManifestStateStore(),
@@ -44,14 +58,24 @@ final class ResourceCenterController {
         self.catalogStore = catalogStore
         self.installationCoordinator = installationCoordinator
         self.indexCoordinator = indexCoordinator
+        self.backgroundWorkCoordinator = backgroundWorkCoordinator
+        self.nativeLanguageCode = nativeLanguageCode
+        self.learningLanguageCode = learningLanguageCode
         self.removalCoordinator = removalCoordinator
         self.manifestStateStore = manifestStateStore
         self.onCatalogChanged = onCatalogChanged
         dictionariesRoot = applicationSupportRoot.appendingPathComponent(
             "Dictionaries", isDirectory: true
         )
+        // Keep the fd-bound staging root as one direct child of the already-established App
+        // support root. The former nested ResourceCenter/Staging path failed before request
+        // creation when ResourceCenter did not yet exist: a single mkdir(Staging) returned ENOENT.
         let stagingRoot = applicationSupportRoot.appendingPathComponent(
-            "ResourceCenter/Staging", isDirectory: true
+            "ResourceCenter-Staging", isDirectory: true
+        )
+        officialDiscoveryClient = OfficialOpenResourceDiscoveryClient()
+        officialPayloadDownloader = OfficialOpenResourcePayloadDownloader(
+            stagingRoot: stagingRoot
         )
 
         if let appVersion = try? ManifestAppVersion(configuration.currentAppVersion),
@@ -90,44 +114,92 @@ final class ResourceCenterController {
         finalizeReadyUpdatesIfNeeded()
     }
 
+    func updateLanguagePair(nativeLanguageCode: String,
+                            learningLanguageCode: String) {
+        guard self.nativeLanguageCode != nativeLanguageCode ||
+                self.learningLanguageCode != learningLanguageCode else { return }
+        activeTask?.cancel()
+        activeTask = nil
+        activeTaskID = nil
+        self.nativeLanguageCode = nativeLanguageCode
+        self.learningLanguageCode = learningLanguageCode
+        discoveredResources = []
+        verifiedAt = nil
+        rebuildSnapshot()
+    }
+
     func refresh() {
         guard activeTask == nil else { return }
-        guard configuration.isRemoteCatalogConfigured,
-              let manifestLoader else {
-            verifiedManifest = nil
-            snapshot = .unavailable(catalog: catalog)
-            publishSnapshot()
-            return
-        }
-        setCatalogState(.loading, message: "正在安全验证资源目录…")
+        ManualEvidenceRecorder.shared.record(
+            "openResourceDiscoveryStarted",
+            strings: [
+                "nativeLanguage": nativeLanguageCode,
+                "learningLanguage": learningLanguageCode,
+                "discoveryMode": "officialLiveCatalog"
+            ]
+        )
+        setCatalogState(
+            .loading,
+            message: "正在按母语与学习语言从官方目录匹配双语词典…"
+        )
         let taskID = UUID()
         activeTaskID = taskID
         activeTask = Task { [weak self] in
             guard let self else { return }
             defer { finishActiveTask(taskID) }
             do {
-                let prior = try await manifestStateStore.load()
-                let prepared = try await manifestLoader.fetchAndPrepare(
-                    endpoint: configuration.manifestEndpoint,
-                    priorState: prior
+                let matching = try await officialDiscoveryClient.discover(
+                    nativeLanguageCode: nativeLanguageCode,
+                    learningLanguageCode: learningLanguageCode
                 )
-                _ = try await manifestStateStore.commitVerifiedState(prepared)
                 try Task.checkCancellation()
                 guard activeTaskID == taskID else { return }
-                verifiedManifest = prepared.verifiedManifest
+                discoveredResources = matching
+                ManualEvidenceRecorder.shared.record(
+                    "openResourceDiscoveryCompleted",
+                    strings: [
+                        "nativeLanguage": nativeLanguageCode,
+                        "learningLanguage": learningLanguageCode,
+                        "discoveryMode": "officialLiveCatalog",
+                        "resourceIDs": matching.map(\.resourceID).sorted().joined(separator: ",")
+                    ],
+                    integers: ["matchingResourceCount": Int64(matching.count)]
+                )
+                if configuration.isRemoteCatalogConfigured,
+                   let manifestLoader {
+                    let prior = try await manifestStateStore.load()
+                    let prepared = try await manifestLoader.fetchAndPrepare(
+                        endpoint: configuration.manifestEndpoint,
+                        priorState: prior
+                    )
+                    _ = try await manifestStateStore.commitVerifiedState(prepared)
+                    verifiedManifest = prepared.verifiedManifest
+                }
                 verifiedAt = Date()
                 setCatalogState(
                     .available,
-                    message: prepared.verifiedManifest.validated.manifest.resources.isEmpty
-                        ? "已验证的开放资源目录当前为空。"
-                        : "资源目录签名和许可证元数据已验证。"
+                    message: "已按当前语言组合实时匹配 \(matching.count) 本双语词典；" +
+                        "只有点击安装时才下载词典文件。"
                 )
             } catch is CancellationError {
                 guard activeTaskID == taskID else { return }
                 setCatalogState(.catalogUnavailable, message: "资源目录刷新已取消。")
+            } catch let error as OfficialOpenResourceDiscoveryError {
+                guard activeTaskID == taskID else { return }
+                ManualEvidenceRecorder.shared.record(
+                    "openResourceDiscoveryFailed",
+                    strings: [
+                        "nativeLanguage": nativeLanguageCode,
+                        "learningLanguage": learningLanguageCode,
+                        "typedReason": String(describing: error)
+                    ]
+                )
+                setCatalogState(
+                    error == .noMatchingResource ? .available : .catalogUnavailable,
+                    message: error.errorDescription ?? "未匹配到双语词典。"
+                )
             } catch {
                 guard activeTaskID == taskID else { return }
-                verifiedManifest = nil
                 setCatalogState(
                     .catalogInvalid,
                     message: ResourceCenterPresentation.safeFailureMessage(error)
@@ -137,6 +209,10 @@ final class ResourceCenterController {
     }
 
     func install(resourceID: String) {
+        if let starter = presentedResources.first(where: { $0.resourceID == resourceID }) {
+            installStarter(starter)
+            return
+        }
         guard activeTask == nil else { return }
         guard let verifiedManifest, let payloadDownloader else {
             failures[resourceID] = "开放词典下载尚未配置。"
@@ -148,7 +224,12 @@ final class ResourceCenterController {
             $0.openResourceMetadata?.resourceID == resourceID
         }
         let mode: OpenResourceInstallationMode
-        if let current {
+        if let current, ResourceCenterPresentation.requiresReinstallation(current) {
+            guard retireStaleRecordForReinstallation(current, resourceID: resourceID) else {
+                return
+            }
+            mode = .newInstallation
+        } else if let current {
             guard let candidate = verifiedManifest.validated.manifest.resources.first(where: {
                 $0.resourceID == resourceID
             }), let metadata = current.openResourceMetadata,
@@ -165,6 +246,7 @@ final class ResourceCenterController {
             mode = .newInstallation
         }
         failures[resourceID] = nil
+        diagnostics[resourceID] = "stage=preparing"
         operations[resourceID] = .downloading(received: 0, expected: nil)
         rebuildSnapshot()
         let taskID = UUID()
@@ -185,6 +267,10 @@ final class ResourceCenterController {
                                 received: progress.receivedBytes,
                                 expected: progress.expectedBytes
                             )
+                        if !progress.diagnosticLines.isEmpty {
+                            self?.diagnostics[resourceID] =
+                                progress.diagnosticLines.joined(separator: "\n")
+                        }
                         self?.rebuildSnapshot()
                     }
                 }
@@ -192,12 +278,23 @@ final class ResourceCenterController {
                 guard activeTaskID == taskID else { return }
                 operations[resourceID] = .installing
                 rebuildSnapshot()
-                let descriptor = try await installationCoordinator.install(
-                    staged,
-                    dictionariesRoot: dictionariesRoot,
-                    catalogStore: catalogStore,
-                    mode: mode
+                let permit = try await backgroundWorkCoordinator.acquire(
+                    .resourceInstallationFinalization
                 )
+                let descriptor: DictionaryDescriptor
+                do {
+                    try Task.checkCancellation()
+                    descriptor = try await installationCoordinator.install(
+                        staged,
+                        dictionariesRoot: dictionariesRoot,
+                        catalogStore: catalogStore,
+                        mode: mode
+                    )
+                    await permit.release()
+                } catch {
+                    await permit.release()
+                    throw error
+                }
                 guard activeTaskID == taskID else { return }
                 catalog = catalogStore.load()
                 if case .newInstallation = mode {
@@ -226,14 +323,307 @@ final class ResourceCenterController {
             } catch {
                 guard activeTaskID == taskID else { return }
                 failures[resourceID] = ResourceCenterPresentation.safeFailureMessage(error)
+                appendDiagnostic(resourceID,
+                                 "stage=failed error=\(Self.safeDiagnosticCode(error))")
                 operations[resourceID] = .failed
                 rebuildSnapshot()
             }
         }
     }
 
+    private func installStarter(_ resource: BundledOpenResourceDefinition) {
+        guard activeTask == nil else { return }
+        guard resource.isLiveDiscoveredResource || payloadDownloader != nil else {
+            failures[resource.resourceID] = "开放资源官方主机未通过生产配置。"
+            operations[resource.resourceID] = .failed
+            rebuildSnapshot()
+            return
+        }
+        let current = catalog.dictionaries.filter {
+            $0.openResourceMetadata?.resourceID == resource.resourceID
+        }.max {
+            ($0.openResourceMetadata?.resourceRevision ?? 0) <
+                ($1.openResourceMetadata?.resourceRevision ?? 0)
+        }
+        let mode: OpenResourceInstallationMode
+        if let current, ResourceCenterPresentation.requiresReinstallation(current) {
+            guard retireStaleRecordForReinstallation(
+                current, resourceID: resource.resourceID
+            ) else { return }
+            mode = .newInstallation
+        } else if let current {
+            guard let metadata = current.openResourceMetadata,
+                  resource.resourceRevision > metadata.resourceRevision else {
+                failures[resource.resourceID] = "当前目录版本已经安装。"
+                operations[resource.resourceID] = .failed
+                rebuildSnapshot()
+                return
+            }
+            mode = .update(replacingDictionaryID: current.dictionaryID)
+        } else {
+            mode = .newInstallation
+        }
+        failures[resource.resourceID] = nil
+        diagnostics[resource.resourceID] = "stage=preparing\ninitial_url=\(resource.downloadURL.absoluteString)"
+        operations[resource.resourceID] = .downloading(
+            received: 0,
+            expected: resource.downloadBytes > 0 ? resource.downloadBytes : nil
+        )
+        rebuildSnapshot()
+        let taskID = UUID()
+        activeTaskID = taskID
+        activeTask = Task { [weak self] in
+            guard let self else { return }
+            defer { finishActiveTask(taskID) }
+            do {
+                let staged: VerifiedPayloadStagingResult
+                let installResource: BundledOpenResourceDefinition
+                if resource.isLiveDiscoveredResource {
+                    let downloaded = try await officialPayloadDownloader.download(resource)
+                    staged = downloaded.0
+                    installResource = downloaded.1
+                    operations[resource.resourceID] = .downloaded
+                    appendDiagnostic(
+                        resource.resourceID,
+                        "stage=download_verified sha256=recorded_locally"
+                    )
+                    rebuildSnapshot()
+                } else {
+                    guard let payloadDownloader else {
+                        throw ResourcePayloadDownloadError.disabledConfiguration
+                    }
+                    staged = try await payloadDownloader.download(starter: resource) {
+                        [weak self] download in
+                        Task { @MainActor in
+                            guard self?.activeTaskID == taskID else { return }
+                            switch download.phase {
+                            case .verifying, .publishingToStaging:
+                                self?.operations[resource.resourceID] = .verifying
+                            case .completed:
+                                self?.operations[resource.resourceID] = .downloaded
+                            case .failed:
+                                break
+                            case .preparing, .downloading:
+                                self?.operations[resource.resourceID] = .downloading(
+                                    received: download.receivedBytes,
+                                    expected: download.expectedBytes
+                                )
+                            }
+                            if !download.diagnosticLines.isEmpty {
+                                self?.diagnostics[resource.resourceID] =
+                                    download.diagnosticLines.joined(separator: "\n")
+                            }
+                            self?.rebuildSnapshot()
+                        }
+                    }
+                    installResource = resource
+                }
+                try Task.checkCancellation()
+                operations[resource.resourceID] = .installing
+                rebuildSnapshot()
+                let permit = try await backgroundWorkCoordinator.acquire(
+                    .resourceInstallationFinalization
+                )
+                let result: FreeDictInstallationResult
+                do {
+                    let stageHandler: @Sendable (FreeDictInstallationStage) -> Void = {
+                        [weak self] stage in
+                        Task { @MainActor in
+                            guard self?.activeTaskID == taskID else { return }
+                            switch stage {
+                            case .validatingSource:
+                                self?.operations[resource.resourceID] = .verifying
+                                self?.appendDiagnostic(resource.resourceID,
+                                                       "stage=archive_validation")
+                            case .converting(let processed, let total):
+                                self?.operations[resource.resourceID] = .converting(
+                                    processed: processed, total: total
+                                )
+                                self?.appendDiagnostic(resource.resourceID,
+                                                       "stage=conversion processed=\(processed)")
+                            case .buildingIndex(let processed, let total):
+                                self?.operations[resource.resourceID] = .indexing
+                                _ = (processed, total)
+                                self?.appendDiagnostic(resource.resourceID,
+                                                       "stage=sqlite_build")
+                            case .validatingIndex:
+                                self?.operations[resource.resourceID] = .validatingIndex
+                                self?.appendDiagnostic(resource.resourceID,
+                                                       "stage=sqlite_integrity_check")
+                            case .publishing:
+                                self?.operations[resource.resourceID] = .publishing
+                                self?.appendDiagnostic(resource.resourceID,
+                                                       "stage=atomic_publish")
+                            }
+                            self?.rebuildSnapshot()
+                        }
+                    }
+                    if installResource.sourceFormat == .freeDictStarDictTarXZ {
+                        result = try await freeDictInstallationCoordinator.install(
+                            staged, resource: installResource,
+                            dictionariesRoot: dictionariesRoot,
+                            catalogStore: catalogStore, mode: mode, progress: stageHandler
+                        )
+                    } else {
+                        result = try await auditedInstallationCoordinator.install(
+                            staged, resource: installResource,
+                            dictionariesRoot: dictionariesRoot,
+                            catalogStore: catalogStore, mode: mode, progress: stageHandler
+                        )
+                    }
+                    await permit.release()
+                } catch {
+                    await permit.release()
+                    throw error
+                }
+                guard activeTaskID == taskID else { return }
+                catalog = catalogStore.load()
+                operations[resource.resourceID] = .installed
+                appendDiagnostic(
+                    resource.resourceID,
+                    installResource.officialDigest.isEmpty
+                        ? "sha256=recorded_in_installation_receipt"
+                        : "\(installResource.officialDigestAlgorithm.lowercased())=verified"
+                )
+                appendDiagnostic(resource.resourceID, "stage=completed")
+                onCatalogChanged(catalog)
+                rebuildSnapshot()
+                if case .update = mode { finalizeReadyUpdatesIfNeeded() }
+                _ = result
+            } catch is CancellationError {
+                guard activeTaskID == taskID else { return }
+                operations[resource.resourceID] = .cancelled
+                rebuildSnapshot()
+            } catch let error as FreeDictResourceError where error == .cancelled {
+                guard activeTaskID == taskID else { return }
+                operations[resource.resourceID] = .cancelled
+                rebuildSnapshot()
+            } catch let error as AuditedOpenResourceError where error == .cancelled {
+                guard activeTaskID == taskID else { return }
+                operations[resource.resourceID] = .cancelled
+                rebuildSnapshot()
+            } catch {
+                guard activeTaskID == taskID else { return }
+                failures[resource.resourceID] =
+                    (error as? FreeDictResourceError)?.errorDescription ??
+                    (error as? AuditedOpenResourceError)?.errorDescription ??
+                    ResourceCenterPresentation.safeFailureMessage(error)
+                appendDiagnostic(resource.resourceID,
+                    "stage=failed error=\(Self.safeDiagnosticCode(error))")
+                operations[resource.resourceID] = .failed
+                rebuildSnapshot()
+            }
+        }
+    }
+
+    /// Same-revision reinstall first retires only the stale Catalog authority. The old managed
+    /// directory is deliberately preserved when its identity is uncertain; the new installation
+    /// receives a fresh dictionary UUID and is published independently.
+    private func retireStaleRecordForReinstallation(
+        _ descriptor: DictionaryDescriptor,
+        resourceID: String
+    ) -> Bool {
+        do {
+            let mutation = try catalogStore.mutate { latest, _ in
+                latest = try DictionaryCatalogOrdering.removingAndCompacting(
+                    descriptor.dictionaryID, from: latest
+                )
+            }
+            catalog = mutation.catalog
+            onCatalogChanged(catalog)
+            return true
+        } catch {
+            failures[resourceID] = "无法保存重新安装状态；原有文件未被修改。"
+            operations[resourceID] = .failed
+            rebuildSnapshot()
+            return false
+        }
+    }
+
     func cancelCurrentOperation() {
         activeTask?.cancel()
+    }
+
+    func presentationWillClose() {
+        activeTask?.cancel()
+    }
+
+    var terminationActivity: (activeDownloadCount: Int, activeConversionCount: Int) {
+        var downloads = 0
+        var conversions = finalizationTasks.count
+        for operation in operations.values {
+            switch operation {
+            case .downloading, .downloaded, .verifying, .installing:
+                downloads += 1
+            case .converting, .indexing, .validatingIndex, .publishing:
+                conversions += 1
+            case .available, .installed, .updateAvailable, .needsReinstall, .removing,
+                 .failed, .cancelled:
+                break
+            }
+        }
+        return (downloads, conversions)
+    }
+
+    #if TERMINATION_INTEGRATION_TESTING
+    func installSyntheticTerminationOperation(_ kind: String) {
+        let resourceID = "synthetic-termination-resource"
+        let taskID = UUID()
+        activeTaskID = taskID
+        switch kind {
+        case "download", "heavy-wait":
+            operations[resourceID] = .downloading(received: 1, expected: 10)
+        case "conversion":
+            operations[resourceID] = .converting(processed: 1, total: 10)
+        default:
+            return
+        }
+        if kind == "heavy-wait" {
+            activeTask = Task { @MainActor [weak self, backgroundWorkCoordinator] in
+                do {
+                    let blocker = try await backgroundWorkCoordinator.acquire(.reverseIndex)
+                    guard let self else {
+                        await blocker.release()
+                        return
+                    }
+                    finalizationTasks[resourceID] = Task { [backgroundWorkCoordinator] in
+                        do {
+                            let permit = try await backgroundWorkCoordinator.acquire(
+                                .resourceInstallationFinalization
+                            )
+                            await permit.release()
+                        } catch {}
+                    }
+                    do {
+                        try await Task.sleep(nanoseconds: 60_000_000_000)
+                    } catch {}
+                    await blocker.release()
+                    finishActiveTask(taskID)
+                } catch {
+                    self?.finishActiveTask(taskID)
+                }
+            }
+            rebuildSnapshot()
+            return
+        }
+        activeTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 60_000_000_000)
+            } catch {}
+            await MainActor.run { self?.finishActiveTask(taskID) }
+        }
+        rebuildSnapshot()
+    }
+    #endif
+
+    func prepareForTermination() {
+        activeTask?.cancel()
+        activeTask = nil
+        activeTaskID = nil
+        finalizationTasks.values.forEach { $0.cancel() }
+        finalizationTasks.removeAll()
+        finalizingResourceIDs.removeAll()
+        onSnapshotChanged = nil
     }
 
     private func finishActiveTask(_ taskID: UUID) {
@@ -246,11 +636,15 @@ final class ResourceCenterController {
                                  message: String) {
         snapshot = ResourceCenterPresentation.snapshot(
             verifiedManifest: verifiedManifest,
+            bundledResources: presentedResources,
             catalog: catalog,
             catalogState: state,
             catalogMessage: message,
             operations: operations,
             failures: failures,
+            diagnostics: diagnostics,
+            nativeLanguageCode: nativeLanguageCode,
+            learningLanguageCode: learningLanguageCode,
             verifiedAt: verifiedAt
         )
         publishSnapshot()
@@ -259,12 +653,13 @@ final class ResourceCenterController {
     private func rebuildSnapshot() {
         let state: ResourceCenterCatalogState
         let message: String
-        if !configuration.isRemoteCatalogConfigured {
+        if discoveredResources.isEmpty {
             state = .catalogUnavailable
-            message = "尚未配置经过审核的开放资源目录；手动导入和已有词典不受影响。"
+            message = "打开或刷新资源中心后，将按当前母语与学习语言实时匹配双语词典。"
         } else if verifiedManifest == nil {
-            state = .catalogUnavailable
-            message = "资源目录尚未加载。"
+            state = .available
+            message = "已按当前语言组合实时匹配 \(discoveredResources.count) 本双语词典；" +
+                "只有点击安装时才下载词典文件。"
         } else {
             state = .available
             message = verifiedManifest?.validated.manifest.resources.isEmpty == true
@@ -273,11 +668,15 @@ final class ResourceCenterController {
         }
         snapshot = ResourceCenterPresentation.snapshot(
             verifiedManifest: verifiedManifest,
+            bundledResources: presentedResources,
             catalog: catalog,
             catalogState: state,
             catalogMessage: message,
             operations: operations,
             failures: failures,
+            diagnostics: diagnostics,
+            nativeLanguageCode: nativeLanguageCode,
+            learningLanguageCode: learningLanguageCode,
             verifiedAt: verifiedAt
         )
         publishSnapshot()
@@ -285,6 +684,59 @@ final class ResourceCenterController {
 
     private func publishSnapshot() {
         onSnapshotChanged?(snapshot)
+    }
+
+    private var presentedResources: [BundledOpenResourceDefinition] {
+        let dynamicIDs = Set(discoveredResources.map(\.resourceID))
+        return discoveredResources + BundledOpenResourceCatalog.resources.filter {
+            !dynamicIDs.contains($0.resourceID) && $0.isRecommended(
+                nativeLanguageCode: nativeLanguageCode,
+                learningLanguageCode: learningLanguageCode
+            )
+        }
+    }
+
+    private func appendDiagnostic(_ resourceID: String, _ line: String) {
+        let prior = diagnostics[resourceID].map { $0 + "\n" } ?? ""
+        let combined = prior + line
+        diagnostics[resourceID] = combined.split(separator: "\n")
+            .suffix(80).joined(separator: "\n")
+    }
+
+    private static func safeDiagnosticCode(_ error: Error) -> String {
+        if let value = error as? ResourcePayloadDownloadError {
+            return String(describing: value)
+        }
+        if let value = error as? FreeDictResourceError {
+            switch value {
+            case .unsafeArchive, .unsupportedSource, .malformedIndex:
+                return "archiveInvalid(\(String(describing: value)))"
+            case .publicationConflict:
+                return "publicationFailed(\(String(describing: value)))"
+            case .invalidStarterMetadata, .sourceDigestMismatch, .invalidEntry,
+                 .sqliteFailure, .integrityFailure:
+                return "converterFailed(\(String(describing: value)))"
+            case .cancelled:
+                return "cancelled"
+            }
+        }
+        if let value = error as? AuditedOpenResourceError {
+            switch value {
+            case .unsafeArchive, .malformedSource:
+                return "archiveInvalid(\(String(describing: value)))"
+            case .publicationConflict:
+                return "publicationFailed(\(String(describing: value)))"
+            case .invalidMetadata, .digestMismatch, .entryLimit, .sqliteFailure,
+                 .integrityFailure:
+                return "converterFailed(\(String(describing: value)))"
+            case .cancelled:
+                return "cancelled"
+            }
+        }
+        if let value = error as? OpenResourceInstallationError {
+            return String(describing: value)
+        }
+        return String(reflecting: type(of: error))
     }
 
     private func enableCompletedNewInstallIfNeeded() {
@@ -358,12 +810,19 @@ final class ResourceCenterController {
                     }
                     operations[resourceID] = .removing
                     rebuildSnapshot()
-                    Task { @MainActor [weak self] in
+                    finalizationTasks[resourceID] = Task { @MainActor [weak self] in
                         guard let self else { return }
                         await Task.yield()
+                        guard !Task.isCancelled else {
+                            finalizationTasks[resourceID] = nil
+                            finalizingResourceIDs.remove(resourceID)
+                            return
+                        }
                         let result = await removalCoordinator.remove(
                             dictionaryID: older.dictionaryID
                         )
+                        guard !Task.isCancelled else { return }
+                        finalizationTasks[resourceID] = nil
                         finalizingResourceIDs.remove(resourceID)
                         switch result {
                         case .removed:
@@ -388,11 +847,18 @@ final class ResourceCenterController {
                 // A prior launch already committed the safe switch. Resume only the identity-
                 // checked removal; never infer deletion authority from a path.
                 finalizingResourceIDs.insert(resourceID)
-                Task { @MainActor [weak self] in
+                finalizationTasks[resourceID] = Task { @MainActor [weak self] in
                     guard let self else { return }
+                    guard !Task.isCancelled else {
+                        finalizationTasks[resourceID] = nil
+                        finalizingResourceIDs.remove(resourceID)
+                        return
+                    }
                     let result = await removalCoordinator.remove(
                         dictionaryID: older.dictionaryID
                     )
+                    guard !Task.isCancelled else { return }
+                    finalizationTasks[resourceID] = nil
                     finalizingResourceIDs.remove(resourceID)
                     if case .failed = result {
                         failures[resourceID] = "旧版本清理已安全延后。"

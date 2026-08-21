@@ -437,6 +437,34 @@ enum DictionaryCatalogSmoke {
                                    now: now.addingTimeInterval(60))
         try expect(second == first, "repeated adaptation duplicated or rewrote legacy records")
 
+        var retired = first
+        guard let retiredIndex = retired.dictionaries.firstIndex(where: {
+            $0.dictionaryID == DictionarySourceID.century21.rawValue
+        }) else { throw SmokeFailure.failed("legacy retirement fixture missing") }
+        retired.dictionaries[retiredIndex].enabled = false
+        retired.dictionaries[retiredIndex].state = .disabled
+        retired.dictionaries[retiredIndex].retiredLegacyRegistrationAt =
+            now.addingTimeInterval(70)
+        let readaptedRetired = adapter.adapt(
+            config, into: retired, now: now.addingTimeInterval(80)
+        )
+        let tombstone = readaptedRetired.dictionaries.first {
+            $0.dictionaryID == DictionarySourceID.century21.rawValue
+        }
+        try expect(tombstone?.isRetiredLegacyRegistration == true &&
+                   tombstone?.enabled == false && tombstone?.state == .disabled,
+                   "legacy migration resurrected a user-retired registration")
+        try expect(!readaptedRetired.activeSortedDictionaries.contains {
+            $0.dictionaryID == DictionarySourceID.century21.rawValue
+        }, "retired legacy registration remained user-visible")
+        let roundTripped = try JSONDecoder().decode(
+            DictionaryCatalog.self, from: JSONEncoder().encode(readaptedRetired)
+        )
+        try expect(roundTripped.dictionaries.first {
+            $0.dictionaryID == DictionarySourceID.century21.rawValue
+        }?.isRetiredLegacyRegistration == true,
+        "legacy retirement tombstone did not persist")
+
         var userAdjusted = first
         userAdjusted.dictionaries[0].queryLevel = .normal
         userAdjusted.dictionaries[0].sortPosition = 99
@@ -454,6 +482,13 @@ enum DictionaryCatalogSmoke {
                                                                                    now: now)
         try expect(unavailable.dictionaries.allSatisfy { $0.state == .unavailable },
                    "missing legacy configuration left stale ready states")
+        let retiredWithoutConfig = adapter.markingUnresolvableLegacyReferencesUnavailable(
+            in: readaptedRetired, now: now.addingTimeInterval(90)
+        )
+        try expect(retiredWithoutConfig.dictionaries.first {
+            $0.dictionaryID == DictionarySourceID.century21.rawValue
+        }?.state == .disabled,
+        "missing legacy configuration rewrote a retirement tombstone")
 
         let encoded = try JSONEncoder().encode(first)
         let json = String(decoding: encoded, as: UTF8.self)

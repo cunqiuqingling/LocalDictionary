@@ -7,13 +7,14 @@
 - [ ] Human approved the marketing version and build number.
 - [ ] Worktree is clean, branch and HEAD are exact, and all public tests passed.
 - [ ] `audit-release.sh` passes with the reviewed Xcode selected by `DEVELOPER_DIR`.
-- [ ] Production Resource Center endpoint, allowed payload hosts, and trust keys are
-      empty.
+- [ ] Production Resource Center signed-manifest endpoint and trust keys remain empty. Live
+      language-pair discovery is limited to FreeDict's official directory and, for Chinese/English,
+      the official CC-CEDICT export; payload downloads stay on their exact reviewed official hosts.
 - [ ] Root GPL-3.0-only license, privacy text, third-party notice, mdict-cpp license, and
       miniz license are byte-identical to the bundled `ReleaseLegal` resources; the
       LibTomCrypt license matches after the documented one-space normalization.
-- [ ] Exactly one approved Developer ID Application identity is available.
-- [ ] Team ID and user-created notary Keychain profile name are supplied out of band.
+- [ ] For Developer ID mode only, exactly one approved Developer ID Application identity is
+      available and the Team ID/notary Keychain profile are supplied out of band.
 
 ## Archive, signing, and notarization
 
@@ -42,7 +43,7 @@
 - [ ] Final name is `LocalDictionary-<version>-macOS-arm64.zip`.
 - [ ] `SHA256SUMS` and `release-manifest.json` match the immutable final ZIP.
 - [ ] Release notes accurately state macOS 15+, Apple Silicon, privacy/network behavior,
-      empty production Resource Center catalog, manual MDX import, and known limits.
+      live language-pair Resource Center matching, manual MDX import, and known limits.
 - [ ] No commercial dictionary, user data, test fixture, secret, dSYM, or build cache is
       in the public ZIP.
 - [ ] Tag creation, push, draft creation, uploads, and publication each have explicit
@@ -60,8 +61,10 @@
    quarantine with `xattr`.
 4. Grant Accessibility only if using Option-Space selection lookup.
 5. Import an owned/licensed MDX manually. The app does not ship commercial dictionaries.
-6. The production Resource Center is intentionally empty until reviewed signed resource
-   configuration is deployed.
+6. Resource Center 打开、刷新或语言角色变化时，会从 FreeDict 官方目录实时匹配当前
+   母语/学习语言方向；中英组合还提供 CC-CEDICT 官方当前导出。WordNet 与 GCIDE 仅作为
+   English 相关组合的英英补充。浏览目录只获取元数据，只有用户点击安装后才下载正文并在
+   本机转换；安装凭据记录实际字节数与校验信息。
 7. Removing the app does not remove user data. To remove dictionaries, Catalog state,
    settings, or Keychain entries, use the corresponding app/system controls and review
    the data separately before deletion.

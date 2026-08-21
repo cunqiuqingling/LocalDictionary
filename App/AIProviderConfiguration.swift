@@ -1,6 +1,6 @@
 import Foundation
 
-let aiDictionaryPromptVersion = 1
+let aiDictionaryPromptVersion = 5
 
 enum AIProviderType: String, Codable, CaseIterable, Sendable {
     case googleGemini = "google-gemini"
@@ -20,6 +20,12 @@ enum AIProviderType: String, Codable, CaseIterable, Sendable {
         // Keep that identity so valid pre-migration cache entries remain readable.
         self == .googleGemini ? AIProviderType.openAICompatible.rawValue : rawValue
     }
+}
+
+enum AIProviderResponseCapability: String, Codable, Equatable, Sendable {
+    case supportsStructuredOutput
+    case supportsJSONMode
+    case plainTextOnly
 }
 
 struct AIProviderOptions: Codable, Equatable, Sendable {
@@ -99,6 +105,21 @@ struct AIProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
     var thinkingEnabled: Bool {
         get { false }
         set { _ = newValue }
+    }
+
+    var responseCapability: AIProviderResponseCapability {
+        let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if providerType == .openAICompatible,
+           normalizedModel.contains("deepseek-v4-flash") {
+            // This compatibility profile is intentionally instruction + tolerant parsing. Do not
+            // send a response_format field that a proxy/model combination may reject or ignore.
+            return .plainTextOnly
+        }
+        if !options.usesJSONResponseFormat { return .plainTextOnly }
+        switch providerType {
+        case .googleGemini, .zhipu, .openAICompatible:
+            return .supportsJSONMode
+        }
     }
 
     func validatedEndpointURL() throws -> URL {

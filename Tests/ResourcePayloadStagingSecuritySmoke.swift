@@ -500,6 +500,13 @@ enum ResourcePayloadStagingSecuritySmoke {
         try harness.check("missing root is created", FileManager.default.fileExists(atPath: missingRoot.path))
         missing.cleanup()
 
+        let nestedMissingRoot = root
+            .appendingPathComponent("missing-parent", isDirectory: true)
+            .appendingPathComponent("Staging", isDirectory: true)
+        try harness.expect("missing staging parent has a typed failure", .stagingDirectoryMissing) {
+            _ = try store().prepare(plan: try plan(root: nestedMissingRoot, payload: payload))
+        }
+
         let unsafeRoot = root.appendingPathComponent("unsafe-root", isDirectory: true)
         try FileManager.default.createDirectory(at: unsafeRoot, withIntermediateDirectories: true)
         guard chmod(unsafeRoot.path, 0o777) == 0 else { throw Failure(message: "chmod setup") }
@@ -542,7 +549,7 @@ enum ResourcePayloadStagingSecuritySmoke {
         }
 
         let tooLarge = try store().prepare(plan: try plan(root: root.appendingPathComponent("too-large", isDirectory: true), payload: payload))
-        try harness.expect("limit plus one rejected before write", .responseTooLarge) {
+        try harness.expect("limit plus one rejected before write", .payloadTooLarge) {
             _ = try tooLarge.append(payload + Data("x".utf8), maximumBytes: UInt64(payload.count), expectedBytes: UInt64(payload.count))
         }
         tooLarge.cleanup()
@@ -562,7 +569,7 @@ enum ResourcePayloadStagingSecuritySmoke {
                                            root: URL, payload: Data) throws {
         do {
             let operation = try prepared(root.appendingPathComponent("size-mismatch", isDirectory: true), payload: payload)
-            try harness.expect("expected size mismatch", .sizeMismatch) {
+            try harness.expect("expected size mismatch", .contentLengthMismatch) {
                 _ = try operation.finish(expectedBytes: UInt64(payload.count + 1), expectedSHA256: digest(payload))
             }
             operation.cleanup()

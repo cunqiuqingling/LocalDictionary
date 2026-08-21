@@ -1,7 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/open-resource-installation-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-resource-install.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 mkdir -p "$BUILD/module-cache"
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then

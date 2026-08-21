@@ -5,6 +5,7 @@ ROOT="${0:A:h:h}"
 CONFIG="$ROOT/App/ResourceCenterProductionConfiguration.swift"
 CONTROLLER="$ROOT/App/ResourceCenterController.swift"
 MANAGER="$ROOT/App/DictionaryManagerWindowController.swift"
+IMPORT_PREVIEW="$ROOT/App/DictionaryImportPreviewAccessory.swift"
 IMPORTER="$ROOT/App/MDictImportInspector.swift"
 FORMATTER="$ROOT/App/GenericMDictEntryFormatter.mm"
 PROJECT="$ROOT/App/LocalDictionary.xcodeproj/project.pbxproj"
@@ -28,7 +29,16 @@ reject_pattern() {
 }
 
 require_literal "$CONFIG" "manifestEndpoint: nil"
-require_literal "$CONFIG" "payloadAllowedHosts: []"
+require_literal "$CONFIG" "payloadAllowedHosts: ["
+for host in download.freedict.org wordnetcode.princeton.edu ftp.gnu.org; do
+  require_literal "$CONFIG" "\"$host\""
+done
+for hidden_host in www.mdbg.net kaikki.org; do
+  if /usr/bin/grep -Fq -- "\"$hidden_host\"" "$CONFIG"; then
+    print -u2 "hidden v0.1 starter host remains enabled: $hidden_host"
+    exit 1
+  fi
+done
 require_literal "$CONFIG" "trustedManifestKeys: []"
 reject_pattern 'ProcessInfo.*environment|getenv[(]|UserDefaults.*manifest|TextField.*URL' \
   "$CONFIG" "$CONTROLLER" "$MANAGER"
@@ -44,7 +54,9 @@ reject_pattern 'URLSession|Data[(]contentsOf:.*http|http://|/dev/fd|sqlite3_open
   "$CONTROLLER"
 
 require_literal "$MANAGER" "panel.canChooseDirectories = false"
-require_literal "$MANAGER" "我有权在本机使用该词典文件"
+require_literal "$MANAGER" "有权在本机使用的 .mdx 文件"
+require_literal "$IMPORT_PREVIEW" "导入即表示你确认有权在本机使用该词典文件"
+reject_pattern '需要确认本机使用权|suppressionButton' "$MANAGER" "$IMPORT_PREVIEW"
 require_literal "$IMPORTER" "let candidates: [DictionaryMDDCandidate] = []"
 require_literal "$ROOT/App/DictionaryImportService.swift" \
   "selection.preview.mddCandidates.isEmpty"
@@ -64,7 +76,8 @@ require_literal "$ROOT/App/ResourceManifestValidator.swift" \
   "resource.dictionaryFormat == .genericMDictV1"
 
 for source in ResourceCenterProductionConfiguration.swift ResourceCenterModels.swift \
-  ResourceCenterController.swift ResourceCenterViewController.swift; do
+  ResourceCenterController.swift ResourceCenterViewController.swift \
+  BundledOpenResourceCatalog.swift FreeDictStarDictResource.swift; do
   require_literal "$PROJECT" "$source in Sources"
 done
 

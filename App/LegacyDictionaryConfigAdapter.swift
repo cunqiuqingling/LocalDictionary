@@ -1,6 +1,67 @@
 import Foundation
 import SQLite3
 
+enum LegacyDictionaryRegistrationRetirementError: LocalizedError, Equatable, Sendable {
+    case dictionaryNotFound
+    case notLegacyExternalReference
+    case alreadyRetired
+
+    var errorDescription: String? {
+        switch self {
+        case .dictionaryNotFound: return "找不到要移除的旧配置词典。"
+        case .notLegacyExternalReference: return "该词典不是可退役的旧配置登记。"
+        case .alreadyRetired: return "该旧配置登记已经移除。"
+        }
+    }
+}
+
+/// Pure Catalog mutation for removing a legacy registration.  It deliberately has no file-system
+/// dependency: external MDX/MDD, SQLite and local.json are outside App deletion authority.
+enum LegacyDictionaryRegistrationRetirement {
+    static func retiring(
+        dictionaryID: String,
+        in catalog: DictionaryCatalog,
+        now: Date = Date()
+    ) throws -> DictionaryCatalog {
+        guard let index = catalog.dictionaries.firstIndex(where: {
+            $0.dictionaryID == dictionaryID
+        }) else { throw LegacyDictionaryRegistrationRetirementError.dictionaryNotFound }
+        let current = catalog.dictionaries[index]
+        guard current.sourceKind == .legacyReference,
+              current.storageOwnership == .externalReference else {
+            throw LegacyDictionaryRegistrationRetirementError.notLegacyExternalReference
+        }
+        guard !current.isRetiredLegacyRegistration else {
+            throw LegacyDictionaryRegistrationRetirementError.alreadyRetired
+        }
+        var updated = catalog
+        updated.dictionaries[index].enabled = false
+        updated.dictionaries[index].state = .disabled
+        updated.dictionaries[index].retiredLegacyRegistrationAt = now
+        updated.dictionaries[index].updatedAt = now
+        updated.updatedAt = now
+
+        let active = updated.dictionaries.filter { !$0.isRetiredLegacyRegistration }
+            .sorted {
+                if $0.sortPosition != $1.sortPosition {
+                    return $0.sortPosition < $1.sortPosition
+                }
+                return $0.dictionaryID < $1.dictionaryID
+            }
+        let retired = updated.dictionaries.filter(\.isRetiredLegacyRegistration)
+            .sorted { $0.dictionaryID < $1.dictionaryID }
+        let positions = Dictionary(uniqueKeysWithValues: (active + retired).enumerated().map {
+            ($0.element.dictionaryID, Int64($0.offset + 1))
+        })
+        for descriptorIndex in updated.dictionaries.indices {
+            updated.dictionaries[descriptorIndex].sortPosition =
+                positions[updated.dictionaries[descriptorIndex].dictionaryID] ??
+                updated.dictionaries[descriptorIndex].sortPosition
+        }
+        return updated
+    }
+}
+
 struct LegacyDictionaryConfigAdapter {
     private struct Definition {
         let id: DictionarySourceID
@@ -32,6 +93,9 @@ struct LegacyDictionaryConfigAdapter {
             let identifier = definition.id.rawValue
             if let existing = byID[identifier] {
                 guard existing.sourceKind == .legacyReference else { continue }
+                // The Catalog tombstone is the user's explicit removal choice.  Re-adapting
+                // local.json must not make that external reference reappear on every launch.
+                guard !existing.isRetiredLegacyRegistration else { continue }
                 var refreshed = existing
                 refreshed.state = inspection.state
                 refreshed.indexMetadata = inspection.metadata
@@ -87,6 +151,7 @@ struct LegacyDictionaryConfigAdapter {
         var changed = false
         updated.dictionaries = catalog.dictionaries.map { dictionary in
             guard dictionary.sourceKind == .legacyReference,
+                  !dictionary.isRetiredLegacyRegistration,
                   dictionary.state != .unavailable else { return dictionary }
             var unavailable = dictionary
             unavailable.state = .unavailable
@@ -102,23 +167,28 @@ struct LegacyDictionaryConfigAdapter {
         var values: [Definition] = []
         append(&values, id: .oxfordOALD8, displayName: "牛津高阶 8", position: 1,
                dictionaryPath: config.primaryDictionary, indexPath: config.indexPath,
-               formatter: "oxford-oald8.v1", capabilities: .oxford)
+               formatter: DictionaryFormatterIdentifier.oxfordOALD8V1,
+               capabilities: .oxford)
         append(&values, id: .century21, displayName: "21 世纪大英汉词典", position: 2,
                dictionaryPath: config.century21Dictionary,
                indexPath: config.century21IndexPath,
-               formatter: "century21.v1", capabilities: .century21)
+               formatter: DictionaryFormatterIdentifier.century21V1,
+               capabilities: .century21)
         append(&values, id: .newOxford, displayName: "新牛津英文", position: 3,
                dictionaryPath: config.newOxfordDictionary,
                indexPath: config.newOxfordIndexPath,
-               formatter: "new-oxford.v1", capabilities: .newOxford)
+               formatter: DictionaryFormatterIdentifier.newOxfordV1,
+               capabilities: .newOxford)
         append(&values, id: .medicalEnglishChinese, displayName: "英中医学辞海", position: 4,
                dictionaryPath: config.medicalDictionary,
                indexPath: config.medicalIndexPath,
-               formatter: "medical-en-zh-2003.v1", capabilities: .medical)
+               formatter: DictionaryFormatterIdentifier.medicalEnglishChineseV1,
+               capabilities: .medical)
         append(&values, id: .affixRootA, displayName: "The Affix Root of Vocabulary", position: 5,
                dictionaryPath: config.affixRootDictionary,
                indexPath: config.affixRootIndexPath,
-               formatter: "affix-root-a.v1", capabilities: .affixRoot)
+               formatter: DictionaryFormatterIdentifier.affixRootAV1,
+               capabilities: .affixRoot)
         return values
     }
 

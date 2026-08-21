@@ -174,9 +174,101 @@ private enum ResourceCenterSmoke {
                   unavailable.resources.isEmpty,
                   "empty production configuration did not fail closed")
         try check(ResourceCenterProductionConfiguration.current.manifestEndpoint == nil &&
-                  ResourceCenterProductionConfiguration.current.payloadAllowedHosts.isEmpty &&
+                  ResourceCenterProductionConfiguration.current.payloadAllowedHosts ==
+                    ["download.freedict.org", "wordnetcode.princeton.edu", "ftp.gnu.org"] &&
                   ResourceCenterProductionConfiguration.current.trustedManifestKeys.isEmpty,
-                  "production Resource Center trust must remain empty")
+                  "v0.1 starter catalog must use only visible stable hosts and no remote trust")
+
+        let starter = ResourceCenterPresentation.snapshot(
+            verifiedManifest: nil,
+            bundledResources: BundledOpenResourceCatalog.resources,
+            catalog: empty,
+            catalogState: .available,
+            catalogMessage: "bundled"
+        )
+        let starterByID = Dictionary(uniqueKeysWithValues: starter.resources.map {
+            ($0.id, $0)
+        })
+        try check(starter.resources.count == 2 &&
+                  starterByID["org.freedict.eng-zho"] == nil &&
+                  starterByID["org.princeton.wordnet.en"]?.sourceFormat ==
+                    "wordnet-data-tar-gzip" &&
+                  starterByID["org.gnu.gcide.en"]?.sourceFormat ==
+                    "gcide-markup-tar-xz" &&
+                  starterByID["org.cc-cedict.zh-en"] == nil &&
+                  starterByID["org.kaikki.zhwiktionary.en"] == nil,
+                  "v0.1 starter catalog visibility was not restricted to stable resources")
+        try check(Set(starter.resources.map(\.category)) ==
+                  Set(["语义词库", "单语词典"]),
+                  "starter resource categories were not disclosed")
+        try check(starter.resources.allSatisfy {
+            $0.sourceURL.hasPrefix("https://") && !$0.licenseName.isEmpty &&
+                $0.checksumSummary.contains("SHA-256")
+        }, "starter license/source/digest metadata missing")
+        try check(starter.recommendedResources.count == 2 &&
+                  starter.recommendedResources.allSatisfy(\.isRecommendedForLanguagePair),
+                  "static English supplements were not scoped to the learning language")
+
+        // CC-CEDICT's official live export uses chunked transfer, so discovery legitimately has
+        // no byte count.  The UI must not render that as "Zero KB", and after installation the
+        // durable receipt's measured payload size must win over the zero discovery placeholder.
+        let liveCC = try OfficialOpenResourceDiscoveryClient.resources(
+            from: Data("[]".utf8),
+            nativeLanguageCode: "zh-Hans",
+            learningLanguageCode: "en"
+        ).first { $0.resourceID == "org.cc-cedict.zh-en.live" }!
+        try check(liveCC.downloadBytes == 0,
+                  "synthetic live CC-CEDICT no longer exercises unknown discovery size")
+        let liveBeforeInstall = ResourceCenterPresentation.snapshot(
+            verifiedManifest: nil,
+            bundledResources: [liveCC],
+            catalog: empty,
+            catalogState: .available,
+            catalogMessage: "live"
+        )
+        try check(liveBeforeInstall.resources[0].installedSize == nil &&
+                  liveBeforeInstall.resources[0].canInstall,
+                  "unknown live size should remain installable without becoming zero bytes")
+
+        var liveDescriptor = openDescriptor(
+            dictionaryID: "00000000-0000-0000-0000-000000000001",
+            revision: liveCC.resourceRevision,
+            version: liveCC.version,
+            payloadDigest: digestA,
+            state: .ready,
+            enabled: true
+        )
+        liveDescriptor.displayName = liveCC.title
+        liveDescriptor.openResourceMetadata?.resourceID = liveCC.resourceID
+        liveDescriptor.openResourceMetadata?.payloadBytes = 4_321_987
+        let liveInstalledCatalog = DictionaryCatalog(
+            schemaVersion: 3,
+            createdAt: fixedDate,
+            updatedAt: fixedDate,
+            dictionaries: [liveDescriptor]
+        )
+        let liveAfterInstall = ResourceCenterPresentation.snapshot(
+            verifiedManifest: nil,
+            bundledResources: [liveCC],
+            catalog: liveInstalledCatalog,
+            catalogState: .available,
+            catalogMessage: "live"
+        )
+        try check(liveAfterInstall.resources[0].installedSize == 4_321_987 &&
+                  liveAfterInstall.resources[0].operationState == .installed,
+                  "installed live resource did not recover measured size from its receipt")
+
+        let unrelated = ResourceCenterPresentation.snapshot(
+            verifiedManifest: nil,
+            bundledResources: BundledOpenResourceCatalog.resources,
+            catalog: empty,
+            catalogState: .available,
+            catalogMessage: "bundled",
+            nativeLanguageCode: "ja",
+            learningLanguageCode: "de"
+        )
+        try check(unrelated.recommendedResources.isEmpty,
+                  "resource recommendation ignored the selected language pair")
 
         let available = ResourceCenterPresentation.snapshot(
             verifiedManifest: verified(resource()),
@@ -223,6 +315,20 @@ private enum ResourceCenterSmoke {
         try check(update.resources[0].operationState == .updateAvailable &&
                   update.resources[0].canUpdate,
                   "higher signed revision did not become an explicit update")
+
+        var staleCatalog = installedCatalog
+        staleCatalog.dictionaries[0].state = .missingResources
+        staleCatalog.dictionaries[0].enabled = false
+        let reinstall = ResourceCenterPresentation.snapshot(
+            verifiedManifest: verified(resource()),
+            catalog: staleCatalog,
+            catalogState: .available,
+            catalogMessage: "verified"
+        )
+        try check(reinstall.resources[0].operationState == .needsReinstall &&
+                  reinstall.resources[0].canInstall &&
+                  !reinstall.resources[0].canUpdate,
+                  "stale open-resource record did not expose one-click reinstall")
 
         let anomaly = ResourceCenterPresentation.snapshot(
             verifiedManifest: verified(resource(revision: 1, version: "1.0", digest: digestB)),

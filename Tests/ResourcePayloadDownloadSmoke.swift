@@ -397,6 +397,7 @@ private struct ResourcePayloadDownloadSmoke {
 
         var harness = PayloadHarness()
         try testPlanBuilder(&harness, base: base)
+        try await testBundledSourceTransport(&harness, base: base)
         try await testSuccessAndSHA(&harness, base: base)
         try await testSizeAndHashFailures(&harness, base: base)
         try await testFileSystemSafety(&harness, base: base)
@@ -404,6 +405,73 @@ private struct ResourcePayloadDownloadSmoke {
         try await testCancellationAndConcurrency(&harness, base: base)
         try await testDiskCapacity(&harness, base: base)
         print("Resource payload download smoke passed (\(harness.passed) checks)")
+    }
+
+    private static func testBundledSourceTransport(_ harness: inout PayloadHarness,
+                                                   base: URL) async throws {
+        let starter = BundledOpenResourceCatalog.freeDictEnglishChinese
+        let officialPolicy = try makePolicy(
+            hosts: ["download.freedict.org"], cap: starter.downloadBytes
+        )
+        let officialPlan = try ResourcePayloadDownloadPlanBuilder.build(
+            starter: starter,
+            applicationAllowedHosts: ["download.freedict.org"],
+            stagingRoot: base.appendingPathComponent("starter-plan"),
+            policy: officialPolicy
+        )
+        try harness.check("starter fixed host",
+                          officialPlan.allowedHosts == ["download.freedict.org"])
+        try harness.check("starter fixed SHA", officialPlan.expectedSHA256 == starter.sha256)
+        try harness.check("starter typed source component",
+                          officialPlan.installationIdentity.sourceComponent ==
+                            OpenResourceInstallationIdentity.starDictSourceComponent)
+
+        let payload = Data("synthetic-xz-download".utf8)
+        let policy = try makePolicy(cap: 1_024)
+        let identity = try OpenResourceInstallationIdentity(
+            dictionaryID: UUID().uuidString.lowercased(),
+            resourceID: "synthetic-freedict",
+            resourceRevision: 1,
+            resourceVersion: "1",
+            manifestVersion: 1,
+            manifestSHA256: String(repeating: "a", count: 64),
+            verifiedKeyID: "TEST-bundled",
+            payloadSHA256: digest(payload),
+            payloadBytes: UInt64(payload.count),
+            languages: ["en", "zh"],
+            license: OpenResourceLicenseMetadata(
+                name: "CC-BY-SA-3.0", version: "3.0",
+                url: "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
+                attribution: "test"
+            ),
+            sourceProject: "https://freedict.org/",
+            officialPageReference: "https://freedict.org/",
+            expectedEntryCount: OpenResourceEntryCountMetadata(minimum: 1, maximum: 1),
+            installedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            formatterIdentifier: DictionaryFormatterIdentifier.freeDictStarDictV1
+        )
+        let plan = ResourcePayloadDownloadPlan(
+            resourceID: identity.resourceID,
+            resourceRevision: identity.resourceRevision,
+            downloadURL: URL(string: payloadURL)!,
+            signedFileName: "synthetic.tar.xz",
+            expectedBytes: UInt64(payload.count),
+            maximumBytes: UInt64(payload.count),
+            expectedSHA256: digest(payload),
+            allowedHosts: [payloadHost],
+            stagingRoot: base.appendingPathComponent("xz-content-type"),
+            policy: policy,
+            installationIdentity: identity
+        )
+        MockPayloadURLProtocol.store.reset([
+            payloadURL: [response(payload, headers: ["Content-Type": "application/x-xz"])]
+        ])
+        let staged = try await makeDownloader().download(plan: plan)
+        try harness.check("official xz content type accepted for typed source",
+                          staged.actualByteCount == UInt64(payload.count))
+        try harness.check("typed source never staged as MDX",
+                          staged.payloadComponent ==
+                            OpenResourceInstallationIdentity.starDictSourceComponent)
     }
 
     private static func testPlanBuilder(_ harness: inout PayloadHarness,
@@ -536,22 +604,22 @@ private struct ResourcePayloadDownloadSmoke {
 
         try await run("Content-Length too large",
                       plan: response(payload, headers: ["Content-Length": "1025"]),
-                      expected: .responseTooLarge)
+                      expected: .payloadTooLarge)
         try await run("Content-Length mismatch",
                       plan: response(payload, headers: ["Content-Length": "7"]),
-                      expected: .sizeMismatch)
+                      expected: .contentLengthMismatch)
         try await run("missing length actual too large",
                       plan: response(payload + Data("x".utf8)),
-                      expected: .responseTooLarge)
+                      expected: .payloadTooLarge)
         try await run("final size too small",
                       plan: response(Data(payload.dropLast())),
-                      expected: .sizeMismatch)
+                      expected: .contentLengthMismatch)
         try await run("hash mismatch",
                       plan: response(Data("12345679".utf8)),
                       expected: .hashMismatch)
         try await run("206 rejected",
                       plan: response(payload, status: 206),
-                      expected: .unacceptableStatus(206))
+                      expected: .httpStatus(206))
         for encoding in ["gzip", "br", "deflate"] {
             try await run("encoding-\(encoding)",
                           plan: response(payload, headers: ["Content-Encoding": encoding]),
@@ -649,11 +717,11 @@ private struct ResourcePayloadDownloadSmoke {
         try await run("redirect outside allowlist",
                       responsePlan: .redirect(status: 302,
                                               location: "https://evil.example.test/file.mdx"),
-                      expected: .disallowedHost)
+                      expected: .redirectRejected("evil.example.test"))
         try await run("redirect downgrade",
                       responsePlan: .redirect(status: 302,
                                               location: "http://payload.example.test/file.mdx"),
-                      expected: .disallowedHost)
+                      expected: .redirectRejected("payload.example.test"))
 
         let finalRoot = base.appendingPathComponent("final-url", isDirectory: true)
         let finalPlan = try makePlan(payload: payload, root: finalRoot)

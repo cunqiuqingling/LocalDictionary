@@ -11,6 +11,7 @@ trap '/bin/rm -rf "$BUILD"' EXIT
     -framework AppKit \
     -framework NaturalLanguage \
     -lsqlite3 \
+    "$ROOT/App/ManualEvidenceRecorder.swift" \
     "$ROOT/App/QueryIntentClassifier.swift" \
     "$ROOT/App/OfflineTranslationModels.swift" \
     "$ROOT/App/LocalSentenceGlossaryService.swift" \

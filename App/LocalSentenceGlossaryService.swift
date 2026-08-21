@@ -7,6 +7,12 @@ struct LocalGlossaryLookupResult: Equatable, Sendable {
     let source: String
 }
 
+struct LocalGlossaryTranslationEvidence: Equatable, Sendable {
+    let suggestion: String
+    let source: String
+    let professional: Bool
+}
+
 struct LocalGlossaryDictionarySource: Sendable {
     let name: String
     let priority: Int
@@ -123,6 +129,40 @@ actor LocalSentenceGlossaryService {
         return LocalSentenceGlossary(sourceText: normalizedSentence,
                                      entries: Array(entries.prefix(Self.maximumEntries)),
                                      candidateQueryCount: queryCount)
+    }
+
+    func translationEvidence(for term: String) async
+        -> LocalGlossaryTranslationEvidence? {
+        let normalized = term.lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = normalized.split(separator: " ")
+        guard normalized.count >= 2, words.count <= 6,
+              words.allSatisfy({ word in
+                  word.allSatisfy { $0.isASCIIEnglishLetter || $0 == "-" }
+              }) else {
+            return nil
+        }
+        var queryCount = 0
+        var queries = [normalized]
+        if let lemma = Self.safeLemma(for: normalized), lemma != normalized {
+            queries.append(lemma)
+        }
+        if normalized.hasSuffix("ed"), normalized.count > 5 {
+            let restoredE = String(normalized.dropLast(2)) + "e"
+            if !queries.contains(restoredE) { queries.append(restoredE) }
+        }
+        for query in queries {
+            guard !Task.isCancelled,
+                  let hit = await lookup(query, queryCount: &queryCount) else { continue }
+            let definitions = Self.uniqueChinese(hit.definitions, maximum: 2)
+            guard !definitions.isEmpty else { continue }
+            return LocalGlossaryTranslationEvidence(
+                suggestion: definitions.joined(separator: "；"),
+                source: Self.clean(hit.source, limit: 80),
+                professional: hit.source.contains("医学") || hit.source.contains("专业")
+            )
+        }
+        return nil
     }
 
     private func lookup(_ term: String, queryCount: inout Int,

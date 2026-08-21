@@ -207,12 +207,28 @@ enum SelectedTextCleaner {
     static func clean(_ source: String) -> CleanedSelection {
         var value = collapseWhitespace(in: source)
         value = stripWrappingQuotes(from: value)
+        value = stripWrappingMarkdown(from: value)
         value = stripTrailingPunctuation(from: value)
         value = value.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !value.isEmpty else { return .empty }
         guard value.count <= maximumLength else { return .tooLong(value.count) }
         return .value(value)
+    }
+
+    /// Removes only balanced outer emphasis/code markers. Internal underscores, asterisks and
+    /// punctuation remain authoritative text, so scientific names and Markdown-heavy sentences
+    /// are not rewritten.
+    private static func stripWrappingMarkdown(from source: String) -> String {
+        var value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markers = ["**", "__", "`", "*", "_"]
+        for marker in markers where value.count > marker.count * 2 &&
+            value.hasPrefix(marker) && value.hasSuffix(marker) {
+            value.removeFirst(marker.count)
+            value.removeLast(marker.count)
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value
     }
 
     private static func collapseWhitespace(in source: String) -> String {

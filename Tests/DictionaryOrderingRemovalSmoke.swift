@@ -108,7 +108,7 @@ private func catalog(_ dictionaries: [DictionaryDescriptor]) -> DictionaryCatalo
 
 private func orderedIDs(_ value: DictionaryCatalog,
                         level: DictionaryQueryLevel) -> [String] {
-    value.sortedDictionaries.filter { $0.queryLevel == level }.map(\.dictionaryID)
+    value.activeSortedDictionaries.filter { $0.queryLevel == level }.map(\.dictionaryID)
 }
 
 @MainActor
@@ -146,6 +146,10 @@ private func testOrderingAndPersistence(root: URL) throws {
                                                    in: coordinator.catalog)
     _ = try coordinator.save(updated)
     let reloaded = store.load()
+    try expect(reloaded.sortedDictionaries.map(\.dictionaryID) == [
+        "p2", "p1", normal[0].dictionaryID, normal[1].dictionaryID,
+        fallback[0].dictionaryID, fallback[1].dictionaryID
+    ], "one unified cross-source order should persist")
     try expect(orderedIDs(reloaded, level: .preferred) == ["p2", "p1"],
                "preferred order should persist")
     try expect(orderedIDs(reloaded, level: .normal) == normal.map(\.dictionaryID),
@@ -153,14 +157,21 @@ private func testOrderingAndPersistence(root: URL) throws {
     try expect(orderedIDs(reloaded, level: .fallback) == ["00000000-0000-4000-8000-0000000000f2", "00000000-0000-4000-8000-0000000000f1"],
                "fallback order should persist")
 
-    do {
-        _ = try DictionaryCatalogOrdering.moving("p2", toDisplayedRow: 3, in: reloaded)
-        throw SmokeError.failed("cross-level drag must fail")
-    } catch DictionaryCatalogOrderingError.crossLevelMove {}
+    let crossSource = try DictionaryCatalogOrdering.moving(
+        "p2", toDisplayedRow: 3, in: reloaded
+    )
+    try expect(crossSource.sortedDictionaries.map(\.dictionaryID).prefix(4) == [
+        "p1", normal[0].dictionaryID, "p2", normal[1].dictionaryID
+    ], "legacy/imported cross-source drag was rejected")
+    let openFirst = try DictionaryCatalogOrdering.moving(
+        fallback[0].dictionaryID, toDisplayedRow: 0, in: crossSource
+    )
+    try expect(openFirst.sortedDictionaries.first?.dictionaryID == fallback[0].dictionaryID,
+               "open resource could not move ahead of imported/legacy dictionaries")
     try expect(!DictionaryCatalogOrdering.canMove("p2", direction: .up, in: reloaded),
-               "group first must not move up")
-    try expect(!DictionaryCatalogOrdering.canMove("p1", direction: .down, in: reloaded),
-               "group last must not move down")
+               "unified first dictionary must not move up")
+    try expect(DictionaryCatalogOrdering.canMove("p1", direction: .down, in: reloaded),
+               "legacy dictionary could not move down across a source boundary")
 
     let failedCoordinator = DictionaryCatalogOrderCoordinator(
         catalog: reloaded, catalogStore: store,
@@ -236,6 +247,73 @@ private func testRestoreDefaultsAndAdapter() throws {
         try expect(after.sortPosition == before.sortPosition,
                    "legacy adapter must preserve user order")
     }
+}
+
+@MainActor
+private func testLegacyRegistrationRetirement(base: URL) throws {
+    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    let source = base.appendingPathComponent("century.mdx")
+    let index = base.appendingPathComponent("century.sqlite")
+    let config = base.appendingPathComponent("local.json")
+    try Data("external-mdx-placeholder".utf8).write(to: source)
+    try Data("external-index-placeholder".utf8).write(to: index)
+    try Data("external-config-placeholder".utf8).write(to: config)
+    let snapshots = try [source, index, config].map { try Data(contentsOf: $0) }
+
+    var legacy = descriptor(
+        id: DictionarySourceID.century21.rawValue,
+        sourceKind: .legacyReference, level: .preferred, position: 1
+    )
+    legacy.displayName = "21 世纪大英汉词典"
+    let initial = catalog([legacy])
+    let retired = try LegacyDictionaryRegistrationRetirement.retiring(
+        dictionaryID: legacy.dictionaryID, in: initial,
+        now: fixedDate.addingTimeInterval(1)
+    )
+    let tombstone = retired.dictionaries.first
+    try expect(tombstone?.isRetiredLegacyRegistration == true &&
+               tombstone?.enabled == false && tombstone?.state == .disabled,
+               "legacy registration was not retired atomically")
+    try expect(retired.activeSortedDictionaries.isEmpty,
+               "retired legacy registration remained in the user-visible order")
+    for (offset, url) in [source, index, config].enumerated() {
+        try expect(try Data(contentsOf: url) == snapshots[offset],
+                   "legacy registration retirement modified an external file")
+    }
+    try expect(
+        (try? LegacyDictionaryRegistrationRetirement.retiring(
+            dictionaryID: legacy.dictionaryID, in: retired
+        )) == nil,
+        "retired legacy registration could be retired twice"
+    )
+    let imported = descriptor(
+        id: "00000000-0000-0000-0000-000000000099",
+        sourceKind: .managedLocal, level: .normal, position: 1
+    )
+    var reimported = retired
+    reimported.dictionaries.append(imported)
+    try expect(reimported.activeSortedDictionaries.map(\.dictionaryID) == [
+        imported.dictionaryID
+    ], "legacy tombstone blocked a new managed import")
+
+    // Production retirement is a full lifecycle mutation, not an ordering-only save.  Prove the
+    // tombstone survives a fresh Catalog load so local.json cannot resurrect it after relaunch.
+    let store = DictionaryCatalogStore(
+        directoryURL: base.appendingPathComponent("Catalog", isDirectory: true)
+    )
+    try store.save(initial)
+    _ = try store.mutate { latest, _ in
+        latest = try LegacyDictionaryRegistrationRetirement.retiring(
+            dictionaryID: legacy.dictionaryID, in: latest,
+            now: fixedDate.addingTimeInterval(2)
+        )
+    }
+    let relaunched = store.load()
+    try expect(
+        relaunched.dictionaries.first?.isRetiredLegacyRegistration == true &&
+            relaunched.activeSortedDictionaries.isEmpty,
+        "durable Catalog reload resurrected a retired legacy registration"
+    )
 }
 
 private actor MockRuntime: ManagedDictionaryQueryRuntime {
@@ -854,6 +932,9 @@ struct DictionaryOrderingRemovalSmoke {
         defer { try? FileManager.default.removeItem(at: base) }
         try testOrderingAndPersistence(root: base.appendingPathComponent("ordering"))
         try testRestoreDefaultsAndAdapter()
+        try testLegacyRegistrationRetirement(
+            base: base.appendingPathComponent("legacy-retirement")
+        )
         try await testQueryOrderingAndStaleResultProtection()
         try await testSuccessfulRemoval(base: base)
         try await testRemovalGuardsAndRollback(base: base)

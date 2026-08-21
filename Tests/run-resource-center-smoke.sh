@@ -35,6 +35,8 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/DictionaryCatalogStore.swift" \
   "$ROOT/App/DictionaryCatalogOrdering.swift" \
   "$ROOT/App/ResourceCenterProductionConfiguration.swift" \
+  "$ROOT/App/BundledOpenResourceCatalog.swift" \
+  "$ROOT/App/OfficialOpenResourceDiscovery.swift" \
   "$ROOT/App/ResourceCenterModels.swift" \
   "$ROOT/Tests/ResourceCenterSmoke.swift" \
   -o "$WORK/ResourceCenterSmoke"

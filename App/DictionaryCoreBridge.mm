@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -29,6 +30,8 @@ class DictionaryBridgeStorage {
   std::unique_ptr<localdict::MDictSourceCapability> managed_source;
   std::unique_ptr<localdict::fdsqlite::FDBoundReadOnlyFileCapability>
       managed_index;
+  std::string source_sha256;
+  std::string index_sha256;
   std::string error;
 };
 
@@ -178,7 +181,10 @@ std::string sha256Descriptor(int descriptor, uint64_t &size) {
   }
   CC_SHA256_CTX context;
   CC_SHA256_Init(&context);
-  std::array<unsigned char, 1024 * 1024> buffer {};
+  // Reverse-index builds run on a utility pthread whose usable stack is about 512 KiB on macOS.
+  // A 1 MiB std::array here crossed that thread's stack guard before the first descriptor read.
+  // Keep the bounded chunk size, but own the bytes on the heap.
+  std::vector<unsigned char> buffer(1024 * 1024);
   off_t offset = 0;
   while (offset < status.st_size) {
     const auto remaining = static_cast<uint64_t>(status.st_size - offset);
@@ -897,6 +903,89 @@ NSDictionary<NSString *, id> *LocalDictionaryBuildIndexFromManagedSource(
   return self;
 }
 
+- (instancetype)initLegacyReadOnlyWithDictionaryPath:(NSString *)dictionaryPath
+                                            indexPath:(NSString *)indexPath
+                                         dictionaryID:(NSString *)dictionaryID
+                                  formatterIdentifier:(NSString *)formatterIdentifier
+                                   cacheMaximumBytes:(NSUInteger)cacheMaximumBytes
+                                 cacheMaximumEntries:(NSUInteger)cacheMaximumEntries {
+  self = [super init];
+  if (!self) return self;
+  _storage = new DictionaryBridgeStorage();
+  try {
+    if (dictionaryPath.length == 0 || indexPath.length == 0 ||
+        dictionaryID.length == 0 || formatterIdentifier.length == 0) {
+      throw std::runtime_error("legacy typed identity is incomplete");
+    }
+    const std::string source_path = utf8(dictionaryPath);
+    const std::string index_path = utf8(indexPath);
+    const std::filesystem::path source_filesystem_path(source_path);
+    const std::filesystem::path index_filesystem_path(index_path);
+    if (!source_filesystem_path.is_absolute() ||
+        !index_filesystem_path.is_absolute() ||
+        !safeComponent(source_filesystem_path.filename().string()) ||
+        !safeComponent(index_filesystem_path.filename().string())) {
+      throw std::runtime_error("unsafe legacy descriptor path");
+    }
+    auto source_directory = localdict::MDictDirectoryCapability::OpenRoot(
+        source_filesystem_path.parent_path().string(), geteuid());
+    auto source = localdict::MDictSourceCapability::OpenAt(
+        source_directory, source_filesystem_path.filename().string(),
+        geteuid());
+    const auto index_parent_path = index_filesystem_path.parent_path();
+    if (index_parent_path == index_parent_path.root_path()) {
+      throw std::runtime_error("unsafe legacy index parent");
+    }
+    auto index_directory = openDirectoryRelative(
+        index_parent_path.parent_path().string(),
+        index_parent_path.filename().string());
+    auto index = localdict::fdsqlite::FDBoundReadOnlyFileCapability::OpenAt(
+        *index_directory, index_filesystem_path.filename().string());
+    if (!source.ValidForPublication() || !index.valid() ||
+        !index.NameStillMatches()) {
+      throw std::runtime_error("legacy descriptor binding changed");
+    }
+    const auto &identity = source.identity();
+    localdict::IndexSourceMetadata metadata;
+    metadata.size = static_cast<uint64_t>(identity.size);
+    metadata.modified_seconds = static_cast<int64_t>(identity.modified_seconds);
+    metadata.modified_nanoseconds =
+        static_cast<int64_t>(identity.modified_nanoseconds);
+    metadata.inode = static_cast<uint64_t>(identity.inode);
+    metadata.device = static_cast<uint64_t>(identity.device);
+    metadata.source_name = source.sourceName();
+    metadata.source_identifier = source_path;
+    uint64_t index_size = 0;
+    const std::string index_sha = sha256Descriptor(
+        index.descriptor(), index_size);
+    auto core = std::make_unique<localdict::SQLiteDictionaryCore>(
+        "", "", static_cast<size_t>(cacheMaximumBytes),
+        static_cast<size_t>(cacheMaximumEntries));
+    core->openLegacyReadOnly(source.borrowedDescriptor(), index, metadata);
+    uint64_t second_index_size = 0;
+    const std::string second_index_sha = sha256Descriptor(
+        index.descriptor(), second_index_size);
+    if (index_sha != second_index_sha || index_size != second_index_size ||
+        !source.ValidForPublication() || !index.valid() ||
+        !index.NameStillMatches()) {
+      throw std::runtime_error("legacy runtime identity changed while opening");
+    }
+    _storage->source_sha256 = source.sha256();
+    _storage->index_sha256 = index_sha;
+    _storage->managed_source =
+        std::make_unique<localdict::MDictSourceCapability>(std::move(source));
+    _storage->managed_index = std::make_unique<
+        localdict::fdsqlite::FDBoundReadOnlyFileCapability>(std::move(index));
+    _storage->core = std::move(core);
+  } catch (const std::exception &exception) {
+    _storage->error = exception.what();
+    _storage->core.reset();
+    _storage->managed_source.reset();
+    _storage->managed_index.reset();
+  }
+  return self;
+}
+
 - (instancetype)initManagedReadOnlyWithRootPath:(NSString *)managedRootPath
                              sourceRelativePath:(NSString *)sourceRelativePath
                               indexRelativePath:(NSString *)indexRelativePath
@@ -991,6 +1080,14 @@ NSDictionary<NSString *, id> *LocalDictionaryBuildIndexFromManagedSource(
   return _storage ? string(_storage->error) : @"Dictionary core unavailable";
 }
 
+- (NSString *)sourceSHA256 {
+  return _storage ? string(_storage->source_sha256) : @"";
+}
+
+- (NSString *)indexSHA256 {
+  return _storage ? string(_storage->index_sha256) : @"";
+}
+
 - (NSDictionary<NSString *, id> *)lookup:(NSString *)query {
   return [self lookup:query maximumHTMLBytes:0];
 }
@@ -1060,7 +1157,11 @@ NSDictionary<NSString *, id> *LocalDictionaryBuildIndexFromManagedSource(
     return @{@"success" : @NO, @"cancelled" : @YES};
   } catch (const std::exception &exception) {
     _storage->error = exception.what();
-    return @{@"success" : @NO, @"error" : @"反向索引建立失败。"};
+    NSString *detail = string(_storage->error);
+    NSString *kind = [detail localizedCaseInsensitiveContainsString:@"enumeration"]
+        ? @"enumerationUnsupported" : @"readFailure";
+    return @{@"success" : @NO, @"error" : @"反向索引建立失败。",
+              @"failureKind" : kind};
   }
 }
 

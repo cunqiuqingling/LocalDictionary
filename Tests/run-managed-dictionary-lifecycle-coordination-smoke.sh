@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/managed-dictionary-lifecycle-coordination-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-lifecycle.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
 fi

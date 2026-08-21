@@ -30,6 +30,22 @@ struct ManagedDictionaryQueryHit: Equatable, Sendable {
     let blocks: [GenericMDictBlock]
     let plainText: String
     let truncated: Bool
+    let sourcePriority: Int
+    let dictionaryOrder: Int64
+
+    init(dictionaryID: String, displayName: String, matchedHeadword: String,
+         blocks: [GenericMDictBlock], plainText: String, truncated: Bool,
+         sourcePriority: Int = DictionaryQueryLevel.normal.rank,
+         dictionaryOrder: Int64 = 0) {
+        self.dictionaryID = dictionaryID
+        self.displayName = displayName
+        self.matchedHeadword = matchedHeadword
+        self.blocks = blocks
+        self.plainText = plainText
+        self.truncated = truncated
+        self.sourcePriority = sourcePriority
+        self.dictionaryOrder = dictionaryOrder
+    }
 
     var noteDefinitions: [String] {
         var seen: Set<String> = []
@@ -149,36 +165,39 @@ actor ManagedDictionaryQueryService {
 
     func lookup(_ query: String,
                 preferredMatched: Bool = false) async -> ManagedDictionaryQueryBatch {
-        if preferredMatched {
-            return ManagedDictionaryQueryBatch(
-                hits: [], unavailableDictionaryIDs: [], skippedBecausePreferredMatched: true
-            )
-        }
         let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return .empty }
-        let normal = catalog.sortedDictionaries.filter(Self.isManagedLocalEligible)
-            .prefix(Self.maximumDictionariesPerQuery)
-        let normalCandidates = await collectTierCandidates(normal, query: clean, orderBase: 0)
-
-        // Existing normal-tier aggregation is retained.  Fallback resources only run when that
-        // entire tier produces no hit candidate, preserving preferred → managedLocal →
-        // openResource precedence. Candidate eligibility is deliberately not committed here; it is
-        // checked once for the complete batch after the final lifecycle snapshot.
-        var candidates = normalCandidates
-        let normalProducedHit = normalCandidates.contains {
-            guard case .hit(let hit) = $0.outcome else { return false }
-            return hit.dictionaryID == $0.dictionaryID
-        }
-        if !normalProducedHit, !Task.isCancelled {
-            let fallback = catalog.sortedDictionaries.filter(Self.isOpenResourceEligible)
-                .prefix(Self.maximumDictionariesPerQuery)
-            candidates.append(contentsOf: await collectTierCandidates(
-                fallback, query: clean, orderBase: normal.count
-            ))
-        }
+        // `preferredMatched` is retained for source compatibility only. A hit in a legacy
+        // dictionary no longer suppresses imported/open-resource dictionaries: all enabled,
+        // query-capable descriptors participate in the single user-defined order.
+        _ = preferredMatched
+        let eligible = catalog.sortedDictionaries.filter {
+            Self.isManagedLocalEligible($0) || Self.isOpenResourceEligible($0)
+        }.prefix(Self.maximumDictionariesPerQuery * 2)
+        let candidates = await collectTierCandidates(eligible, query: clean, orderBase: 0)
 
         // This is the entire public lookup's final suspension. Every lease release and precise
         // generation eviction has completed before this coherent coordinator snapshot.
+        let finalSnapshots = await lifecycleCoordinator.queryValidationSnapshots(
+            for: candidates.map(\.dictionaryID)
+        )
+        return finalizeBatch(candidates, lifecycleSnapshots: finalSnapshots)
+    }
+
+    /// Chinese planning is intentionally aggregate-first: every enabled local source that
+    /// advertises direct Chinese lookup is queried, including fallback open resources. The
+    /// English planner's normal-tier early exit must not suppress CC-CEDICT or another exact
+    /// Chinese source.
+    func lookupChinese(_ query: String) async -> ManagedDictionaryQueryBatch {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return .empty }
+        let eligible = catalog.sortedDictionaries.filter {
+            $0.capabilities.chineseLookup &&
+                (Self.isManagedLocalEligible($0) || Self.isOpenResourceEligible($0))
+        }.prefix(Self.maximumDictionariesPerQuery * 2)
+        let candidates = await collectTierCandidates(
+            eligible, query: clean, orderBase: 0
+        )
         let finalSnapshots = await lifecycleCoordinator.queryValidationSnapshots(
             for: candidates.map(\.dictionaryID)
         )
@@ -329,9 +348,11 @@ actor ManagedDictionaryQueryService {
             descriptor.storageOwnership == .appManagedOpenResource &&
             descriptor.queryLevel == .fallback && descriptor.enabled &&
             descriptor.state == .ready && descriptor.openResourceMetadata != nil &&
-            DictionaryFormatterIdentifier.supportsGenericMDictV1(
+            (DictionaryFormatterIdentifier.supportsGenericMDictV1(
                 descriptor.formatterIdentifier
-            )
+            ) || DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+                descriptor.formatterIdentifier
+            ))
     }
 }
 

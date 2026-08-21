@@ -32,7 +32,15 @@ struct ResourcePayloadFileDownloader: Sendable {
             operationID: operation.operationID,
             receivedBytes: 0,
             expectedBytes: plan.expectedBytes,
-            phase: .preparing
+            phase: .preparing,
+            diagnosticLines: [
+                "stage=preparing",
+                "operation=\(operation.operationID.uuidString.lowercased())",
+                "staging_allocated=true",
+                "temporary_file_created=true",
+                "initial_url=\(plan.downloadURL.absoluteString)",
+                "allowed_hosts=\(plan.allowedHosts.sorted().joined(separator: ","))"
+            ]
         ))
         let delegate = ResourcePayloadDownloadDelegate(
             plan: plan,
@@ -117,6 +125,7 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
     private var cancellationRequested = false
     private var redirectCount = 0
     private var visitedURLs: Set<String>
+    private var diagnosticLines: [String]
 
     init(plan: ResourcePayloadDownloadPlan,
          urlPolicy: ResourceNetworkURLPolicy,
@@ -127,6 +136,13 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
         self.operation = operation
         self.progress = progress
         visitedURLs = [urlPolicy.canonicalIdentifier(for: plan.downloadURL)]
+        diagnosticLines = [
+            "stage=connecting",
+            "operation=\(operation.operationID.uuidString.lowercased())",
+            "staging_allocated=true",
+            "temporary_file_created=true",
+            "initial_url=\(plan.downloadURL.absoluteString)"
+        ]
     }
 
     func perform(session: URLSession, request: URLRequest) async throws
@@ -157,6 +173,14 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
         self.continuation = continuation
         task = dataTask
         lock.unlock()
+        appendDiagnostic("stage=request_created")
+        progress(ResourcePayloadDownloadProgress(
+            operationID: operation.operationID,
+            receivedBytes: 0,
+            expectedBytes: plan.expectedBytes,
+            phase: .preparing,
+            diagnosticLines: diagnosticSnapshot()
+        ))
         dataTask.resume()
     }
 
@@ -183,7 +207,9 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                 if error == .tooManyRedirects {
                     throw ResourcePayloadDownloadError.invalidResponse
                 }
-                throw ResourcePayloadDownloadError.disallowedHost
+                throw ResourcePayloadDownloadError.redirectRejected(
+                    request.url?.host?.lowercased() ?? "unknown"
+                )
             }
             let identity = urlPolicy.canonicalIdentifier(for: target)
             lock.lock()
@@ -198,6 +224,9 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
             guard !inactive, !tooMany, !loop else {
                 throw ResourcePayloadDownloadError.invalidResponse
             }
+            appendDiagnostic(
+                "redirect=\(redirectCount) status=\(response.statusCode) target=\(target.absoluteString)"
+            )
             completionHandler(ResourcePayloadFileDownloader.request(
                 for: target,
                 policy: plan.policy
@@ -226,14 +255,17 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                 throw ResourcePayloadDownloadError.disallowedHost
             }
             guard http.statusCode == 200 else {
-                throw ResourcePayloadDownloadError.unacceptableStatus(http.statusCode)
+                throw ResourcePayloadDownloadError.httpStatus(http.statusCode)
             }
             let encoding = http.value(forHTTPHeaderField: "Content-Encoding")?
                 .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard encoding == nil || encoding?.isEmpty == true || encoding == "identity" else {
                 throw ResourcePayloadDownloadError.unsupportedContentEncoding
             }
-            guard Self.acceptsContentType(http.value(forHTTPHeaderField: "Content-Type")) else {
+            guard Self.acceptsContentType(
+                http.value(forHTTPHeaderField: "Content-Type"),
+                formatterIdentifier: plan.installationIdentity.formatterIdentifier
+            ) else {
                 throw ResourcePayloadDownloadError.unsupportedContentType
             }
             if let rawLength = http.value(forHTTPHeaderField: "Content-Length") {
@@ -244,10 +276,10 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                     throw ResourcePayloadDownloadError.invalidResponse
                 }
                 guard length <= plan.maximumBytes else {
-                    throw ResourcePayloadDownloadError.responseTooLarge
+                    throw ResourcePayloadDownloadError.payloadTooLarge
                 }
                 guard length == plan.expectedBytes else {
-                    throw ResourcePayloadDownloadError.sizeMismatch
+                    throw ResourcePayloadDownloadError.contentLengthMismatch
                 }
             }
             lock.lock()
@@ -256,11 +288,20 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
             lock.unlock()
             completionHandler(allowed ? .allow : .cancel)
             if allowed {
+                appendDiagnostic("stage=response_accepted")
+                appendDiagnostic("dns=resolved")
+                appendDiagnostic("tls=https")
+                appendDiagnostic("http_status=\(http.statusCode)")
+                appendDiagnostic("redirect_count=\(redirectCount)")
+                appendDiagnostic("final_host=\(responseURL.host?.lowercased() ?? "")")
+                appendDiagnostic("content_type=\(http.value(forHTTPHeaderField: "Content-Type") ?? "missing")")
+                appendDiagnostic("content_length=\(http.value(forHTTPHeaderField: "Content-Length") ?? "missing")")
                 progress(ResourcePayloadDownloadProgress(
                     operationID: operation.operationID,
                     receivedBytes: 0,
                     expectedBytes: plan.expectedBytes,
-                    phase: .downloading
+                    phase: .downloading,
+                    diagnosticLines: diagnosticSnapshot()
                 ))
             }
         } catch let error as ResourcePayloadDownloadError {
@@ -277,6 +318,7 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                     didReceive data: Data) {
         var event: ResourcePayloadDownloadProgress?
         var failure: ResourcePayloadDownloadError?
+        var failureContext: String?
         lock.lock()
         if !completed, !cancellationRequested {
             do {
@@ -293,15 +335,35 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                 )
             } catch let error as ResourcePayloadDownloadError {
                 failure = error
+                failureContext = "stage=stream_failed prior_bytes=\(operation.receivedBytes) " +
+                    "chunk_bytes=\(data.count) task_received=\(dataTask.countOfBytesReceived) " +
+                    "expected_bytes=\(plan.expectedBytes) maximum_bytes=\(plan.maximumBytes)"
             } catch {
                 failure = .writeFailure
             }
         }
         lock.unlock()
         if let failure {
+            if let failureContext { appendDiagnostic(failureContext) }
             finish(.failure(failure), cancelTask: true)
         } else if let event {
             progress(event)
+        }
+    }
+
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didFinishCollecting metrics: URLSessionTaskMetrics) {
+        if let transaction = metrics.transactionMetrics.last {
+            let dns = transaction.domainLookupStartDate != nil &&
+                transaction.domainLookupEndDate != nil ? "completed" : "reused_or_unreported"
+            appendDiagnostic("dns_metrics=\(dns)")
+            if let tls = transaction.negotiatedTLSProtocolVersion {
+                appendDiagnostic("tls_protocol=\(String(describing: tls))")
+            }
+            if let protocolName = transaction.networkProtocolName {
+                appendDiagnostic("network_protocol=\(protocolName)")
+            }
         }
     }
 
@@ -355,9 +417,13 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
             )
             guard completed.bytes == plan.expectedBytes else {
                 lock.unlock()
-                finish(.failure(.sizeMismatch), cancelTask: false)
+                finish(.failure(.contentLengthMismatch), cancelTask: false)
                 return
             }
+            diagnosticLines.append("actual_bytes=\(completed.bytes)")
+            diagnosticLines.append("sha256=verified value=\(completed.digest)")
+            diagnosticLines.append("stage=download_verified")
+            let completedDiagnostics = diagnosticLines
             self.completed = true
             let continuation = self.continuation
             self.continuation = nil
@@ -382,7 +448,8 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
                 operationID: operation.operationID,
                 receivedBytes: completed.bytes,
                 expectedBytes: plan.expectedBytes,
-                phase: .completed
+                phase: .completed,
+                diagnosticLines: completedDiagnostics
             ))
             continuation?.resume(returning: result)
             return
@@ -421,16 +488,54 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
         task = nil
         operation.cleanup()
         lock.unlock()
+        appendDiagnostic("stage=failed error=\(String(describing: error))")
+        progress(ResourcePayloadDownloadProgress(
+            operationID: operation.operationID,
+            receivedBytes: UInt64(max(0, taskToCancel?.countOfBytesReceived ?? 0)),
+            expectedBytes: plan.expectedBytes,
+            phase: .failed,
+            diagnosticLines: diagnosticSnapshot()
+        ))
         taskToCancel?.cancel()
         continuation?.resume(throwing: error)
     }
 
-    private static func acceptsContentType(_ value: String?) -> Bool {
+    private static func acceptsContentType(_ value: String?,
+                                           formatterIdentifier: String) -> Bool {
         guard let raw = value?.split(separator: ";", maxSplits: 1).first else {
             return false
         }
-        return raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ==
-            "application/octet-stream"
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if formatterIdentifier == DictionaryFormatterIdentifier.freeDictStarDictV1 ||
+            formatterIdentifier == DictionaryFormatterIdentifier.gcideMarkupV1 {
+            return normalized == "application/x-xz" || normalized == "application/octet-stream"
+        }
+        if formatterIdentifier == DictionaryFormatterIdentifier.ccCedictTextV1 ||
+            formatterIdentifier == DictionaryFormatterIdentifier.wordNetDataV1 {
+            return normalized == "application/x-gzip" || normalized == "application/gzip" ||
+                normalized == "application/octet-stream"
+        }
+        if formatterIdentifier == DictionaryFormatterIdentifier.kaikkiWiktionaryJSONLV1 {
+            return normalized == "application/json" || normalized == "application/x-ndjson" ||
+                normalized == "application/octet-stream" || normalized == "text/plain"
+        }
+        return normalized == "application/octet-stream"
+    }
+
+    private func appendDiagnostic(_ line: String) {
+        lock.lock()
+        diagnosticLines.append(line)
+        if diagnosticLines.count > 80 {
+            diagnosticLines.removeFirst(diagnosticLines.count - 80)
+        }
+        lock.unlock()
+    }
+
+    private func diagnosticSnapshot() -> [String] {
+        lock.lock()
+        let value = diagnosticLines
+        lock.unlock()
+        return value
     }
 
     private static func safeTransportError(_ error: Error) -> ResourcePayloadDownloadError {
@@ -439,6 +544,14 @@ private final class ResourcePayloadDownloadDelegate: NSObject,
         switch urlError.code {
         case .cancelled: return .cancelled
         case .timedOut: return .timedOut
+        case .cannotFindHost, .dnsLookupFailed: return .dnsFailure
+        case .secureConnectionFailed, .serverCertificateHasBadDate,
+             .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+             .serverCertificateNotYetValid, .clientCertificateRejected,
+             .clientCertificateRequired:
+            return .tlsFailure
+        case .notConnectedToInternet, .networkConnectionLost:
+            return urlError.code == .networkConnectionLost ? .connectionLost : .networkUnavailable
         default: return .transportFailure
         }
     }

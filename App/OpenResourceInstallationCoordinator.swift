@@ -124,7 +124,7 @@ actor OpenResourceInstallationCoordinator {
     }
 
     private nonisolated static func nextFallbackPosition(in catalog: DictionaryCatalog) -> Int64 {
-        (catalog.dictionaries.filter { $0.queryLevel == .fallback }.map(\.sortPosition).max() ?? -1) + 1
+        (catalog.dictionaries.map(\.sortPosition).max() ?? 0) + 1
     }
 }
 

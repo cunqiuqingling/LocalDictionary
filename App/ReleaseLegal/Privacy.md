@@ -78,9 +78,18 @@ LocalDictionary 不主动向 AI Provider 发送整本词典内容、本地词典
 
 ## Resource Center
 
-- 当前 production manifest endpoint、payload host allowlist 和信任公钥均为空，因此默认不发起资源目录或 payload 网络请求。
-- 未来只有在应用版本内同时注入经过审核的 endpoint、host allowlist 和公钥后，Resource Center 才能获取已签名目录；用户仍需主动选择安装或更新。
-- 远程资源必须经过签名、HTTPS/host、大小、SHA-256、许可证、再分发证据和 receipt 验证。
+- App 的签名 manifest endpoint 与信任公钥仍为空。打开、刷新 Resource Center 或切换
+  母语/学习语言时，App 会访问 FreeDict 官方目录，实时筛选当前语言对可用的双语词典；
+  中英组合还会显示 CC-CEDICT 官方当前导出。WordNet 与 GCIDE 只作为 English 相关组合的
+  英英补充。
+- 浏览列表只下载有限的目录 metadata，不下载词典正文。只有用户点击“下载并安装”后，App
+  才连接相应的精确官方 HTTPS 主机并运行 typed converter。FreeDict 校验官方目录给出的
+  SHA-512；官方当前导出没有上游摘要时，App 在下载后计算 SHA-256，并把实际字节数与摘要
+  写入本机安装 receipt，而不是把易变大小或哈希写死在 App 中。
+- 每项资源都必须具有可显示的许可证 metadata、明确语言方向、受限下载与 typed source
+  format；转换结果仅在本机发布为内部 SQLite。
+- App Bundle 不包含 Starter 词典正文，App 不重新托管正文，也不把原始资源或转换结果上传
+  到项目方或 AI Provider。
 - 手动 MDX 导入不使用网络，不上传词典，也不扫描用户未选择的位置。
 - 已安装词典、本地查询和手动导入不依赖 Resource Center 网络可用性。
 

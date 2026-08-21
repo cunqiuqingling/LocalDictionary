@@ -2,12 +2,17 @@ import Foundation
 
 /// The only production injection point for the remote Resource Center trust boundary.
 ///
-/// Shipping with no endpoint, hosts, or keys is intentional. A reviewed application release
-/// must replace all three values together; UI input and environment variables are never trusted.
+/// Shipping with no dynamic endpoint or trust keys is intentional. The v0.1 payload hosts below
+/// belong only to immutable, release-reviewed starter definitions. Enabling a remote catalog must
+/// supply a reviewed endpoint and trust keys; UI input and environment variables are never trusted.
 struct ResourceCenterProductionConfiguration: Sendable {
     static let current = ResourceCenterProductionConfiguration(
         manifestEndpoint: nil,
-        payloadAllowedHosts: [],
+        payloadAllowedHosts: [
+            "download.freedict.org",
+            "wordnetcode.princeton.edu",
+            "ftp.gnu.org"
+        ],
         trustedManifestKeys: [],
         currentAppVersion: "0.1"
     )

@@ -25,10 +25,18 @@ uploaded. AI requests occur only when a user has configured a provider and activ
 uses the AI feature; its API key is stored in macOS Keychain. LocalDictionary does not
 sell user data.
 
-The production Resource Center endpoint, payload-host allowlist, and trust store are
-currently empty, so it presents a safe empty state and performs no default resource
-network request. Commercial dictionaries and dictionary payloads are not distributed
-with the app.
+The production signed-manifest endpoint and trust store remain empty. Resource Center reads the
+current Native/Learning language pair when it opens, refreshes, or the pair changes. It queries
+FreeDict's official directory for matching bilingual dictionaries and, for Chinese/English,
+offers the official current CC-CEDICT export. Princeton WordNet and GNU GCIDE remain English-only
+supplements and are never represented as Chinese lookup sources.
+
+Browsing Resource Center fetches directory metadata only. A payload is downloaded from its exact
+reviewed official host only after the user clicks Install, then converted locally with its typed
+converter. FreeDict's published SHA-512 is verified; where an upstream current export has no
+published digest, LocalDictionary records the downloaded file's SHA-256 and actual byte count in
+the local installation receipt. Commercial dictionaries and open-resource payloads are not
+distributed with the app.
 
 ## Install and verify
 
@@ -49,7 +57,8 @@ MDX only when you have the right to use it.
 - Scanned PDFs require OCR outside LocalDictionary.
 - Selection extraction varies by application; copying text into the search field
   remains the fallback.
-- The production Resource Center currently has no listed resources.
+- Availability of a matching bilingual open dictionary depends on the official project directory
+  and the current Native/Learning language pair.
 - Basic system translation quality varies by language pair and installed Apple model;
   it is not represented as AI-quality or guaranteed.
 

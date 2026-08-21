@@ -90,17 +90,23 @@ Xcode Scheme 的 Release 构建也会运行 Bundle 敏感内容审计。日常�
 
 仓库不包含五本开发者本地商业词典、商业 MDX/MDD、索引或词典正文。用户必须自行确认所导入词典的合法来源与使用权限。专用 formatter 只是解析和展示代码，不授予任何商业词典内容权利。
 
-开放资源中心位于“词典管理”，复用已签名 manifest、精确 host allowlist、SHA-256、
-receipt、Catalog v3、fd-bound 建索引与查询链。当前 production endpoint、payload hosts
-和 trust store 均为空，因此默认显示安全空状态，不影响手动导入或已有词典。使用说明和
+开放资源中心位于“词典管理”。它会在打开、刷新以及母语/学习语言变化时读取当前语言组合，
+再从 FreeDict 官方实时目录匹配方向相符的双语资源；中英组合还会提供 CC-CEDICT 项目当前
+编辑版。Princeton WordNet 和 GNU GCIDE 只在 English 相关组合中作为英英补充。资源正文
+只有在用户点击安装后才下载，并由对应 typed converter 在本机生成独立内部 SQLite。
+FreeDict 校验官方目录给出的 SHA-512；没有上游摘要的当前导出只在下载后记录本机 SHA-256，
+用于确认已安装文件和重启凭据一致，不把版本、字节数或内容哈希写死在 App。旧固定资源定义
+仅用于兼容既有安装凭据，不参与新的实时推荐。该路径不生成或重新托管 MDX，也不影响手动
+导入或已有词典。使用说明和
 部署所需输入见 [docs/resource-center.md](docs/resource-center.md) 与
 [docs/resource-center-deployment.md](docs/resource-center-deployment.md)。
 
 `managedLocal` 导入会把用户明确选择的 MDX 复制到 `~/Library/Application Support/LocalDictionary/Dictionaries/` 下的 App 托管目录。五本开发者本地 `legacyReference` 只通过本机私有兼容配置使用；该 `local.json` 位于 `~/Library/Application Support/LocalDictionary/LegacyConfig/`，不是普通用户构建要求，也不会进入 App Bundle。项目不提供商业词典下载链接。
 
-LocalDictionary 的 GPL-3.0-only 不覆盖用户导入的词典数据。Resource Center
-只允许经过许可证审核且满足签名、host、SHA-256 与 receipt 边界的开放资源；当前
-production catalog 为空。准入规则见
+LocalDictionary 的 GPL-3.0-only 不覆盖用户导入或主动下载的词典数据。Resource Center
+只允许经过许可证审核且满足精确官方 host、有界下载、typed conversion 与 receipt 边界的
+开放资源。资源许可证与归属会在安装前显示；旧隐藏资源的通知仍保留。资源由用户从各项目
+官方来源主动下载，App 只生成本机内部查询索引。准入规则见
 [docs/d1-resource-policy.md](docs/d1-resource-policy.md)。
 
 ## AI 功能

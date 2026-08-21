@@ -145,7 +145,10 @@ if /usr/bin/grep -Fq "$SYNTHETIC_CONFIG_VALUE" "$INSTALL_OUTPUT" || \
 fi
 
 PROJECT_FILE="$ROOT/App/LocalDictionary.xcodeproj/project.pbxproj"
-! /usr/bin/grep -q 'Copy optional local configuration\|../config/local.json' "$PROJECT_FILE"
+if /usr/bin/grep -q 'Copy optional local configuration\|../config/local.json' "$PROJECT_FILE"; then
+    print -u2 "project unexpectedly embeds the optional private local configuration"
+    exit 1
+fi
 /usr/bin/grep -q 'Audit App Bundle' "$PROJECT_FILE"
 /usr/bin/grep -q 'audit-app-bundle.sh' "$ROOT/scripts/install-local-app.sh"
 

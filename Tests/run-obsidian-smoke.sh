@@ -45,6 +45,7 @@ done
     -I"$UPSTREAM/src" -I"$UPSTREAM/src/include" \
     -I"$ROOT/ThirdParty/vendor" \
     -I"$SDKROOT/usr/include/libxml2" \
+    "$ROOT/MDictCore/FDBoundSQLiteReadOnlyVFS.cpp" \
     "$ROOT/MDictCore/SQLiteDictionaryCore.cpp" \
     "$ROOT/App/DictionarySemanticModel.mm" \
     "$ROOT/App/OxfordEntryFormatter.mm" \
@@ -58,6 +59,7 @@ done
 "$WORK/oxford-structured-entry-smoke" "$ROOT/config/local.json" "$STRUCTURED_JSON"
 
 "$SWIFTC" -sdk "$SDKROOT" -module-cache-path "$WORK/module-cache" \
+    "$ROOT/App/QueryIntentClassifier.swift" \
     "$ROOT/App/ObsidianNoteStore.swift" \
     "$ROOT/Tests/ObsidianNoteStoreSmoke.swift" \
     -o "$WORK/obsidian-note-store-smoke"

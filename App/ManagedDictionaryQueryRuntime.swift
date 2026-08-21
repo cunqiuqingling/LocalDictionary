@@ -26,6 +26,7 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     }
 
     private let validator: ManagedDictionaryRuntimeValidator
+    private let applicationSupportRootURL: URL
     private let formatter = GenericMDictEntryFormatter()
     /// Generation is part of the cache identity.  Lifecycle operations drain leases before
     /// invalidating this cache, so an old runtime cannot be reused by a newly published index.
@@ -41,6 +42,7 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     init(applicationSupportRootURL: URL =
          DictionaryImportService.defaultApplicationSupportRootURL(),
          expectedSchemaVersion: Int = Int(liveDictionaryIndexSchemaVersion)) {
+        self.applicationSupportRootURL = applicationSupportRootURL
         validator = ManagedDictionaryRuntimeValidator(
             applicationSupportRootURL: applicationSupportRootURL,
             expectedSchemaVersion: expectedSchemaVersion
@@ -68,6 +70,19 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
                 generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         guard !Task.isCancelled else { return .miss }
+        if DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+            descriptor.formatterIdentifier
+        ) {
+            do {
+                return try OpenResourceSQLiteRuntime.lookup(
+                    descriptor: descriptor,
+                    query: query,
+                    applicationSupportRootURL: applicationSupportRootURL
+                )
+            } catch {
+                return .identityMismatch
+            }
+        }
         do {
             guard let persistent = descriptor.publishedIndexIdentity else {
                 return .identityMismatch
@@ -138,7 +153,9 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
                 matchedHeadword: matched?.isEmpty == false ? matched! : query,
                 blocks: blocks,
                 plainText: plainText,
-                truncated: sanitized.truncated || (raw["htmlTruncated"] as? Bool == true)
+                truncated: sanitized.truncated || (raw["htmlTruncated"] as? Bool == true),
+                sourcePriority: descriptor.queryLevel.rank,
+                dictionaryOrder: descriptor.sortPosition
             ))
         } catch is CancellationError {
             return .miss
