@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT="${0:A:h:h}"
 RELEASE="$ROOT/scripts/release"
 WORK="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-release-tooling.XXXXXX")"
-trap '/bin/rm -rf "$WORK"' EXIT
+DIRTY_MARKER="$ROOT/.release-tooling-smoke-dirty.$$"
+trap '/bin/rm -rf "$WORK"; /bin/rm -f "$DIRTY_MARKER"' EXIT
 ASSERTIONS=0
 
 expect_failure() {
@@ -25,8 +26,10 @@ expect_failure build-existing-output "$RELEASE/build-release.sh" \
 expect_failure dirty-formal "$RELEASE/build-release.sh" \
     --mode developer-id --version 0.1 --output "$WORK/formal" \
     --expected-head deadbeef --identity "Developer ID Application: Synthetic" --team-id SYNTHETIC
+/usr/bin/touch "$DIRTY_MARKER"
 expect_failure no-dirty-opt-in "$RELEASE/build-release.sh" \
     --mode unsigned-dry-run --version 0.1 --output "$WORK/no-opt-in"
+/bin/rm -f "$DIRTY_MARKER"
 expect_failure notary-no-submit "$RELEASE/notarize-release.sh"
 expect_failure notary-profile-only "$RELEASE/notarize-release.sh" \
     --keychain-profile synthetic-profile
