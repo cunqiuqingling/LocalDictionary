@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/ai-service-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-ai-service.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then
     export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
@@ -18,12 +19,14 @@ xcrun --sdk macosx swiftc \
   -parse-as-library \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/QueryIntentClassifier.swift" \
+  "$ROOT/App/ManualEvidenceRecorder.swift" \
   "$ROOT/App/AIProviderConfiguration.swift" \
   "$ROOT/App/AIKeychainStore.swift" \
   "$ROOT/App/AIProviderCredentialSession.swift" \
   "$ROOT/App/AIProviderProfileManager.swift" \
   "$ROOT/App/AIProviderSettingsSession.swift" \
   "$ROOT/App/AISentenceAnalysis.swift" \
+  "$ROOT/App/OfflineTranslationModels.swift" \
   "$ROOT/App/InlineLookupModels.swift" \
   "$ROOT/App/AIProviderClient.swift" \
   "$ROOT/App/AIExplanationCache.swift" \
@@ -36,6 +39,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/ObsidianNoteStore.swift" \
   "$ROOT/App/AIExplanationMarkdownFormatter.swift" \
   "$ROOT/App/SentenceAnalysisMarkdownFormatter.swift" \
+  "$ROOT/App/AISettingsWindowController.swift" \
   "$ROOT/Tests/AIServiceSmoke.swift" \
   -framework AppKit -framework NaturalLanguage -framework Security -lsqlite3 \
   -o "$BUILD/AIServiceSmoke"

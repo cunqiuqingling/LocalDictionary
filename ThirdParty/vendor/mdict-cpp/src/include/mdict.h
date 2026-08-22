@@ -6,17 +6,22 @@
  * See the LICENSE file for details.
  */
 
-#include <utility>
-
 #pragma once
 
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
+#include <memory>
 #include <string>  // std::stof
+#include <utility>
 #include <vector>
 
 #include "mdict_extern.h"
+
+// D1b-3A-2A: ResourceLimits, checked arithmetic and bounded zlib.
+#include "resource_limits.h"
+#include "checked_arithmetic.h"
+#include "bounded_zlib.h"
+#include "resource_test_observer.h"
 
 /**
  * mdx struct analysis
@@ -120,6 +125,18 @@
 
 namespace mdict {
 
+class MdictRandomAccessReader;
+
+enum class MdictInputKind {
+  mdx,
+  mdd,
+};
+
+struct MdictSourceReadStatistics {
+  uint64_t read_calls = 0;
+  uint64_t bytes_read = 0;
+};
+
 #define ENCRYPT_NO_ENC 0
 #define ENCRYPT_RECORD_ENC 1
 #define ENCRYPT_KEY_INFO_ENC 2
@@ -139,6 +156,7 @@ namespace mdict {
 
 /**
  * key block info class definition
+ * D1b-3A-2A: size/offset fields widened from unsigned long to uint64_t.
  */
 class key_block_info {
  public:
@@ -146,14 +164,16 @@ class key_block_info {
   std::string first_key;
   // last key of this key block
   std::string last_key;
-  // key block start offset
-  unsigned long key_block_start_offset;
-  // key block compressed size
-  unsigned long key_block_comp_size;
-  unsigned long key_block_comp_accumulator;
+  // key block start offset (cumulative within key-block section)
+  uint64_t key_block_start_offset;
+  // key block compressed size (on-disk, includes 8-byte prefix)
+  uint64_t key_block_comp_size;
+  uint64_t key_block_comp_accumulator;
   // key block decompressed size
-  unsigned long key_block_decomp_size;
-  unsigned long key_block_decomp_accumulator;
+  uint64_t key_block_decomp_size;
+  uint64_t key_block_decomp_accumulator;
+  // Number of entries declared by this key-block metadata record.
+  uint64_t declared_entry_count;
 
   /**
    * constructor
@@ -164,9 +184,9 @@ class key_block_info {
    * @param kb_decomp_size key block decompressed size
    */
   key_block_info(std::string first_key, std::string last_key,
-                 unsigned long kb_start_ofset, unsigned long kb_comp_size,
-                 unsigned long kb_decomp_size, unsigned long kb_comp_accu,
-                 unsigned long kb_decomp_accu) {
+                 uint64_t kb_start_ofset, uint64_t kb_comp_size,
+                 uint64_t kb_decomp_size, uint64_t kb_comp_accu,
+                 uint64_t kb_decomp_accu, uint64_t declared_entries) {
     this->key_block_comp_size = kb_comp_size;
     this->key_block_decomp_size = kb_decomp_size;
     this->key_block_start_offset = kb_start_ofset;
@@ -174,6 +194,7 @@ class key_block_info {
     this->last_key = last_key;
     this->key_block_comp_accumulator = kb_comp_accu;
     this->key_block_decomp_accumulator = kb_decomp_accu;
+    this->declared_entry_count = declared_entries;
   }
 };
 
@@ -182,19 +203,31 @@ class key_list_item {
   unsigned long record_start;
   std::string key_word;
   key_list_item(unsigned long kid, std::string kw)
-      : record_start(kid), key_word(std::move(kw)) {}
+      : record_start(kid), key_word(std::move(kw)) {
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+    observeKeyItemCreated();
+#endif
+  }
+  // This explicit destructor exists only in the test-observer build.  The
+  // production type keeps its implicit destructor and therefore has no test
+  // lifecycle hook, symbol, or altered special-member semantics.
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+  ~key_list_item() {
+    observeKeyItemDestroyed();
+  }
+#endif
 };
 
 class record_header_item {
  public:
-  unsigned long block_id;
-  unsigned long compressed_size;
-  unsigned long decompressed_size;
-  unsigned long compressed_size_accumulator;
-  unsigned long decompressed_size_accumulator;
-  record_header_item(unsigned long bid, unsigned long comp_size,
-                     unsigned long uncomp_size, unsigned long comp_accu,
-                     unsigned long decomp_accu)
+  uint64_t block_id;
+  uint64_t compressed_size;
+  uint64_t decompressed_size;
+  uint64_t compressed_size_accumulator;
+  uint64_t decompressed_size_accumulator;
+  record_header_item(uint64_t bid, uint64_t comp_size,
+                     uint64_t uncomp_size, uint64_t comp_accu,
+                     uint64_t decomp_accu)
       : block_id(bid),
         compressed_size(comp_size),
         decompressed_size(uncomp_size),
@@ -237,18 +270,44 @@ class record {
 class Mdict {
  public:
   /**
-   * constructor
+   * constructor (production defaults)
    * @param fn dictionary file name
    */
   Mdict(std::string fn) noexcept;
 
   /**
-   * constructor with additional files
+   * constructor with explicit resource limits
+   * @param fn dictionary file name
+   * @param limits resource limits (must pass validate())
+   */
+  Mdict(std::string fn, ResourceLimits limits) noexcept;
+
+  /**
+   * constructor with additional files (production defaults)
    * @param fn dictionary file name
    * @param aff_fn affix file name
    * @param dic_fn dictionary file name
    */
   Mdict(std::string fn, std::string aff_fn, std::string dic_fn) noexcept;
+
+  /**
+   * constructor with additional files and explicit resource limits
+   * @param fn dictionary file name
+   * @param aff_fn affix file name
+   * @param dic_fn dictionary file name
+   * @param limits resource limits (must pass validate())
+   */
+  Mdict(std::string fn, std::string aff_fn, std::string dic_fn,
+        ResourceLimits limits) noexcept;
+
+  /**
+   * Construct a dictionary backed by a duplicate of an already-open,
+   * read-only descriptor. The descriptor is borrowed for this call only;
+   * the returned parser owns an independent F_DUPFD_CLOEXEC duplicate.
+   */
+  static std::unique_ptr<Mdict> fromFileDescriptor(
+      int descriptor, MdictInputKind kind,
+      ResourceLimits limits = ResourceLimits::productionDefaults());
 
   /**
    * deconstructor
@@ -319,6 +378,32 @@ class Mdict {
   int dictionaryEncoding() const { return encoding; }
   const std::string &headerXML() const { return header_buffer; }
 
+  // ——— Test-only metrics accessors ———
+  // These are const getters that expose internal metadata for offline
+  // resource-measurement tools.  They are never called by the App target
+  // and do not change any production behaviour.
+  uint32_t headerBytesSize() const { return header_bytes_size; }
+  uint64_t keyBlockCount() const { return key_block_num; }
+  uint64_t keyBlockInfoCompressedSize() const { return key_block_info_size; }
+  uint64_t keyBlockInfoDecompressedSize() const { return key_block_info_decompress_size; }
+  uint64_t keyBlockCompressedSize() const { return key_block_size; }
+  uint64_t recordBlockCount() const { return record_block_number; }
+  uint64_t recordBlockInfoSize() const { return record_block_info_size; }
+  uint64_t recordBlockHeaderSizeValue() const { return record_block_header_size; }
+  uint64_t recordBlockCompressedSize() const { return record_block_size; }
+
+  // D1b-3A-2A: test-only accessors for limits and file size.
+  const ResourceLimits &resourceLimits() const { return limits_; }
+  uint64_t actualFileBytes() const { return actual_file_size_; }
+  MdictSourceReadStatistics sourceReadStatistics() const;
+  int encryptionMode() const { return encrypt; }
+  const std::vector<key_block_info *> &keyBlockInfoList() const {
+    return key_block_info_list;
+  }
+  const std::vector<record_header_item *> &recordHeaderList() const {
+    return record_header;
+  }
+
   /**
    * Reduce search range for a phrase
    * @param phrase The phrase to search for
@@ -372,6 +457,12 @@ class Mdict {
    */
   void read_header();
 
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+  // Opens this synthetic fixture and executes only the real Header parser.
+  // This is intentionally absent from production builds.
+  void readHeaderForResourceTest();
+#endif
+
   /**
    * Read the key block header
    */
@@ -394,8 +485,8 @@ class Mdict {
    * @return 0 on success, non-zero on failure
    */
   int decode_key_block_info(char *key_block_info_buffer,
-                            unsigned long kb_info_buff_len, int key_block_num,
-                            int entries_num);
+                            uint64_t kb_info_buff_len, uint64_t key_block_num,
+                            uint64_t entries_num);
 
   /**
    * Decode a key block from a buffer
@@ -450,14 +541,25 @@ class Mdict {
   bool endsWith(const std::string &fullString, const std::string &ending);
 
  private:
+  Mdict(MdictInputKind kind, ResourceLimits limits);
+  void initializeSource();
+
   /********************************
    *     general section           *
    ********************************/
   // dictionary file name
   const std::string filename;
 
-  // file input stream
-  std::ifstream instream;
+  // Path-backed legacy callers and fd-backed callers share this narrow
+  // random-access boundary. The fd implementation owns its duplicate.
+  std::unique_ptr<MdictRandomAccessReader> source_;
+  bool fd_source_ = false;
+
+  // D1b-3A-2A: immutable resource limits for this parse session.
+  ResourceLimits limits_ = ResourceLimits::productionDefaults();
+
+  // D1b-3A-2A: actual file size obtained from the opened stream (not stat).
+  uint64_t actual_file_size_ = 0;
 
   /********************************
    *     header section           *
@@ -483,14 +585,17 @@ class Mdict {
 
   // key block start offset
   // key_block_start_offset = header_bytes_size + 8;
-  uint32_t key_block_start_offset = 0;
+  // D1b-3A-2A: widened from uint32_t to uint64_t.
+  uint64_t key_block_start_offset = 0;
 
   // key_block_info_start_offset = key_block_start_offset + info_size (>=2.0:
   // 40+4, <2.0: 16)
-  uint32_t key_block_info_start_offset = 0;
+  // D1b-3A-2A: widened from uint32_t to uint64_t.
+  uint64_t key_block_info_start_offset = 0;
   // key block compressed start offset = this->key_block_info_start_offset +
   // key_block_info_size
-  uint32_t key_block_compressed_start_offset = 0;
+  // D1b-3A-2A: widened from uint32_t to uint64_t.
+  uint64_t key_block_compressed_start_offset = 0;
 
   // ---------------------
   //     block key info part
@@ -549,14 +654,14 @@ class Mdict {
 
   /**
    * split key block from key block buffer
-   * @param key_block the key block buffer
-   * @param key_block_len the key block buffer length
+   * @param key_block the key block buffer (non-null)
+   * @param key_block_len the key block buffer length in bytes (must be > 0)
+   * @param block_id the block index (for diagnostics / future use)
+   * D1b-3A-2A-R1: key_block_len widened to uint64_t; block_id to size_t.
    */
-  // # void split_key_block(unsigned char *key_block, unsigned long
-  //  key_block_len);
-  std::vector<key_list_item *> split_key_block(unsigned char *key_block,
-                                               unsigned long key_block_len,
-                                               unsigned long block_id);
+  std::vector<std::unique_ptr<key_list_item>> split_key_block_owned(
+      unsigned char *key_block, uint64_t key_block_len, size_t block_id,
+      uint64_t declared_entry_count, uint64_t remaining_global_entries);
 
   /********************************
    *     INNER DICTIONARY PART    *

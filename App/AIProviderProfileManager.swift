@@ -163,8 +163,7 @@ actor AIProviderProfileManager {
         let catalog = AIProviderCatalog(
             profiles: profiles,
             automaticFallbackEnabled: false,
-            automaticSentenceAnalysisEnabled:
-                legacy?.automaticSentenceAnalysisEnabled ?? false
+            automaticSentenceAnalysisEnabled: false
         )
         let normalized = try catalog.normalizedForSave()
         var newlyWritten: [String] = []

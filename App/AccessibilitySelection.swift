@@ -3,11 +3,24 @@ import ApplicationServices
 import Carbon.HIToolbox
 
 enum AccessibilitySelectionResult {
-    case text(String)
+    case text(AccessibilitySelectionCapture)
     case noSelection
     case permissionDenied
     case secureInput
     case unavailable
+}
+
+struct AccessibilitySelectionCapture: Equatable {
+    let text: String
+    /// AX global display coordinates. Consumers must convert to the chosen NSScreen coordinate
+    /// space once; Retina backing scale must not be applied to these point values.
+    let selectionRects: [CGRect]
+    let capturedAt: Date
+
+    func isFresh(now: Date = Date(), maximumAge: TimeInterval = 1.5) -> Bool {
+        now.timeIntervalSince(capturedAt) >= 0 &&
+            now.timeIntervalSince(capturedAt) <= maximumAge && !text.isEmpty
+    }
 }
 
 final class AccessibilitySelectionReader {
@@ -23,17 +36,28 @@ final class AccessibilitySelectionReader {
         if let focusedElement = elementAttribute(kAXFocusedUIElementAttribute as CFString,
                                                  from: appElement) {
             if isSecureTextElement(focusedElement) { return .secureInput }
-            if let selection = selectedText(from: focusedElement), !selection.isEmpty {
+            if let selection = selectedCapture(from: focusedElement) {
                 return .text(selection)
             }
         }
 
         if let focusedWindow = elementAttribute(kAXFocusedWindowAttribute as CFString,
                                                 from: appElement),
-           let selection = selectedText(from: focusedWindow), !selection.isEmpty {
+           let selection = selectedCapture(from: focusedWindow) {
             return .text(selection)
         }
         return .noSelection
+    }
+
+    private func selectedCapture(from element: AXUIElement)
+        -> AccessibilitySelectionCapture? {
+        guard let text = selectedText(from: element), !text.isEmpty else { return nil }
+        let rects = selectedRange(from: element).map {
+            lineRects(for: $0, element: element)
+        } ?? markerSelectionRect(from: element).map { [$0] } ?? []
+        return AccessibilitySelectionCapture(
+            text: text, selectionRects: rects.filter(Self.validRect), capturedAt: Date()
+        )
     }
 
     private func selectedText(from element: AXUIElement) -> String? {
@@ -53,6 +77,102 @@ final class AccessibilitySelectionReader {
         )
         guard error == .success else { return nil }
         return value as? String
+    }
+
+    private func selectedRange(from element: AXUIElement) -> CFRange? {
+        guard let value = attribute(kAXSelectedTextRangeAttribute as CFString, from: element),
+              CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = unsafeBitCast(value, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cfRange else { return nil }
+        var range = CFRange()
+        return AXValueGetValue(axValue, .cfRange, &range) && range.length > 0 ? range : nil
+    }
+
+    private func lineRects(for selectedRange: CFRange,
+                           element: AXUIElement) -> [CGRect] {
+        var values: [CGRect] = []
+        let selectedEnd = selectedRange.location + selectedRange.length
+        var cursor = selectedRange.location
+        var visitedLines = 0
+        while cursor < selectedEnd, visitedLines < 256 {
+            guard let lineNumber = parameterizedNumber(
+                kAXLineForIndexParameterizedAttribute as CFString,
+                parameter: cursor as CFNumber, from: element
+            ), let lineRange = parameterizedRange(
+                kAXRangeForLineParameterizedAttribute as CFString,
+                parameter: lineNumber as CFNumber, from: element
+            ) else { break }
+            let intersectionStart = max(cursor, lineRange.location)
+            let intersectionEnd = min(selectedEnd, lineRange.location + lineRange.length)
+            guard intersectionEnd > intersectionStart else { break }
+            let intersection = CFRange(location: intersectionStart,
+                                       length: intersectionEnd - intersectionStart)
+            if let rect = parameterizedRect(
+                kAXBoundsForRangeParameterizedAttribute as CFString,
+                range: intersection, from: element
+            ) { values.append(rect) }
+            cursor = max(intersectionEnd, cursor + 1)
+            visitedLines += 1
+        }
+        if values.isEmpty, let rect = parameterizedRect(
+            kAXBoundsForRangeParameterizedAttribute as CFString,
+            range: selectedRange, from: element
+        ) { values.append(rect) }
+        return values
+    }
+
+    private func markerSelectionRect(from element: AXUIElement) -> CGRect? {
+        guard let marker = attribute(kAXSelectedTextMarkerRangeAttribute as CFString,
+                                     from: element) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element, kAXBoundsForTextMarkerRangeParameterizedAttribute as CFString,
+            marker, &value
+        ) == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = unsafeBitCast(value, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cgRect else { return nil }
+        var rect = CGRect.zero
+        return AXValueGetValue(axValue, .cgRect, &rect) ? rect : nil
+    }
+
+    private func parameterizedNumber(_ name: CFString, parameter: CFTypeRef,
+                                     from element: AXUIElement) -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element, name, parameter, &value
+        ) == .success else { return nil }
+        return (value as? NSNumber)?.intValue
+    }
+
+    private func parameterizedRange(_ name: CFString, parameter: CFTypeRef,
+                                    from element: AXUIElement) -> CFRange? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element, name, parameter, &value
+        ) == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = unsafeBitCast(value, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cfRange else { return nil }
+        var range = CFRange()
+        return AXValueGetValue(axValue, .cfRange, &range) ? range : nil
+    }
+
+    private func parameterizedRect(_ name: CFString, range: CFRange,
+                                   from element: AXUIElement) -> CGRect? {
+        var mutableRange = range
+        guard let parameter = AXValueCreate(.cfRange, &mutableRange) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+            element, name, parameter, &value
+        ) == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = unsafeBitCast(value, to: AXValue.self)
+        guard AXValueGetType(axValue) == .cgRect else { return nil }
+        var rect = CGRect.zero
+        return AXValueGetValue(axValue, .cgRect, &rect) ? rect : nil
+    }
+
+    private static func validRect(_ value: CGRect) -> Bool {
+        !value.isNull && !value.isInfinite && !value.isEmpty &&
+            value.origin.x.isFinite && value.origin.y.isFinite
     }
 
     private func isSecureTextElement(_ element: AXUIElement) -> Bool {
@@ -87,12 +207,28 @@ enum SelectedTextCleaner {
     static func clean(_ source: String) -> CleanedSelection {
         var value = collapseWhitespace(in: source)
         value = stripWrappingQuotes(from: value)
+        value = stripWrappingMarkdown(from: value)
         value = stripTrailingPunctuation(from: value)
         value = value.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !value.isEmpty else { return .empty }
         guard value.count <= maximumLength else { return .tooLong(value.count) }
         return .value(value)
+    }
+
+    /// Removes only balanced outer emphasis/code markers. Internal underscores, asterisks and
+    /// punctuation remain authoritative text, so scientific names and Markdown-heavy sentences
+    /// are not rewritten.
+    private static func stripWrappingMarkdown(from source: String) -> String {
+        var value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markers = ["**", "__", "`", "*", "_"]
+        for marker in markers where value.count > marker.count * 2 &&
+            value.hasPrefix(marker) && value.hasSuffix(marker) {
+            value.removeFirst(marker.count)
+            value.removeLast(marker.count)
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return value
     }
 
     private static func collapseWhitespace(in source: String) -> String {
@@ -137,6 +273,7 @@ enum SelectedTextCleaner {
     }
 }
 
+@MainActor
 final class AccessibilityPermissionPrompter {
     private let promptShownKey = "AccessibilityPermissionPromptWasShown"
 

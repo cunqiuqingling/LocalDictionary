@@ -27,9 +27,6 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
     private let automaticFallbackButton = NSButton(
         checkboxWithTitle: "自动切换备用服务", target: nil, action: nil
     )
-    private let automaticSentenceButton = NSButton(
-        checkboxWithTitle: "自动解析完整英文句子", target: nil, action: nil
-    )
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
     private let progressIndicator = NSProgressIndicator()
     private let testButton = NSButton(title: "测试连接", target: nil, action: nil)
@@ -83,8 +80,6 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
                 self.session = AIProviderSettingsSession(snapshot: snapshot)
                 self.automaticFallbackButton.state = snapshot.catalog.automaticFallbackEnabled
                     ? .on : .off
-                self.automaticSentenceButton.state =
-                    snapshot.catalog.automaticSentenceAnalysisEnabled ? .on : .off
                 self.rebuildProfileSelector()
                 self.loadSelectedDraftAtomically()
                 self.setBusy(false)
@@ -101,7 +96,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func configureWindow(_ window: NSWindow) {
-        window.title = "AI 服务设置"
+        window.title = t("AI 服务设置", "AI Service Settings")
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.minSize = NSSize(width: 680, height: 590)
@@ -114,7 +109,15 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         addButton.action = #selector(showAddMenu(_:))
         deleteButton.target = self
         deleteButton.action = #selector(deleteProvider)
-        let selectorRow = NSStackView(views: [label("当前服务："), profileSelector,
+        addButton.title = t("添加服务…", "Add Service…")
+        deleteButton.title = t("删除服务", "Delete Service")
+        enabledButton.title = t("启用此服务", "Enable This Service")
+        automaticFallbackButton.title = t("自动切换备用服务", "Automatically Use Backup Service")
+        testButton.title = t("测试连接", "Test Connection")
+        clearKeyButton.title = t("清除密钥", "Clear Key")
+        clearCacheButton.title = t("清除 AI 缓存", "Clear AI Cache")
+        saveButton.title = t("保存", "Save")
+        let selectorRow = NSStackView(views: [label(t("当前服务：", "Current Service:")), profileSelector,
                                                addButton, deleteButton])
         selectorRow.orientation = .horizontal
         selectorRow.alignment = .centerY
@@ -126,7 +129,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         profileStatusLabel.textColor = .secondaryLabelColor
         profileStatusLabel.lineBreakMode = .byTruncatingTail
         let priorityRow = NSStackView(views: [profileStatusLabel, flexibleSpacer(),
-                                              label("优先级："), priorityPopup])
+                                              label(t("优先级：", "Priority:")), priorityPopup])
         priorityRow.orientation = .horizontal
         priorityRow.alignment = .centerY
         priorityRow.spacing = 6
@@ -167,12 +170,12 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
 
         let form = NSGridView(views: [
             [label(""), enabledButton],
-            [label("服务类型"), providerTypePopup],
-            [label("服务名称"), displayNameField],
+            [label(t("服务类型", "Service Type")), providerTypePopup],
+            [label(t("服务名称", "Service Name")), displayNameField],
             [label("Base URL"), baseURLField],
-            [label("模型名称"), modelField],
-            [label("API 密钥"), keyStack],
-            [label("特有选项"), providerOptionsStack]
+            [label(t("模型名称", "Model")), modelField],
+            [label(t("API 密钥", "API Key")), keyStack],
+            [label(t("特有选项", "Provider Options")), providerOptionsStack]
         ])
         form.column(at: 0).xPlacement = .trailing
         form.column(at: 1).xPlacement = .fill
@@ -180,15 +183,20 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         form.rowSpacing = 9
 
         automaticFallbackButton.controlSize = .small
-        automaticSentenceButton.controlSize = .small
-        let automaticSentenceHelp = NSTextField(wrappingLabelWithString:
-            "启用后，选中的完整英文句子会自动发送到所配置的 AI 服务，用于翻译和语法分析。")
+        let automaticSentenceHelp = NSTextField(wrappingLabelWithString: t(
+            "AI 不会自动发送单词或句子；只有点击对应的 AI 按钮后，当前内容才会发送到所配置的服务。",
+            "Words and sentences are never sent automatically. Content is sent only after you " +
+                "click the corresponding AI button."
+        ))
         automaticSentenceHelp.textColor = .secondaryLabelColor
         automaticSentenceHelp.font = .systemFont(ofSize: 11)
         automaticSentenceHelp.maximumNumberOfLines = 2
 
-        let privacy = NSTextField(wrappingLabelWithString:
-            "AI 查询只发送当前搜索词或句子；本地词典内容、笔记、文件路径和查询历史不会上传。")
+        let privacy = NSTextField(wrappingLabelWithString: t(
+            "AI 查询只发送当前搜索词或句子；本地词典内容、笔记、文件路径和查询历史不会上传。",
+            "AI requests send only the current query or sentence. Local dictionaries, notes, " +
+                "file paths, and query history are not uploaded."
+        ))
         privacy.textColor = .secondaryLabelColor
         privacy.font = .systemFont(ofSize: 11)
         privacy.maximumNumberOfLines = 2
@@ -234,7 +242,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         let separator = NSBox()
         separator.boxType = .separator
         let stack = NSStackView(views: [selectorRow, priorityRow, separator, form,
-                                        automaticFallbackButton, automaticSentenceButton,
+                                        automaticFallbackButton,
                                         automaticSentenceHelp, privacy, statusLabel, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -390,32 +398,22 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         let replacementKey = session?.pendingAPIKey(for: providerID)
         setTesting(true)
-        showStatus("正在测试基础连接…", isError: false)
+        showStatus("正在验证传输、模型与响应兼容性…", isError: false)
         connectionTestTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.connectionTestTask = nil }
             do {
-                try await service.testConnection(configuration: profile,
-                                                 replacementKey: replacementKey)
+                let report = try await service.testCompatibility(
+                    configuration: profile, replacementKey: replacementKey
+                )
+                guard !Task.isCancelled else { return }
+                self.connectionTestTask = nil
+                self.finishTesting()
+                self.showStatus(report.summary, isError: !report.hasRecommendedEnglish)
             } catch {
                 guard !Task.isCancelled else { return }
+                self.connectionTestTask = nil
                 self.finishTesting()
-                self.showStatus("连接失败：\(error.localizedDescription)", isError: true)
-                return
-            }
-            guard !Task.isCancelled else { return }
-            self.showStatus("基础连接成功，正在验证句子解析…", isError: false)
-            do {
-                try await service.testSentenceFunction(configuration: profile,
-                                                       replacementKey: replacementKey)
-                guard !Task.isCancelled else { return }
-                self.finishTesting()
-                self.showStatus("连接及句子解析成功", isError: false)
-            } catch {
-                guard !Task.isCancelled else { return }
-                self.finishTesting()
-                self.showStatus("连接成功，但句子解析失败：\(error.localizedDescription)",
-                                isError: true)
+                self.showStatus("兼容性测试失败：\(error.localizedDescription)", isError: true)
             }
         }
     }
@@ -450,7 +448,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
     @objc private func saveConfiguration() {
         syncEditorIntoSelectedDraft()
         session?.automaticFallbackEnabled = automaticFallbackButton.state == .on
-        session?.automaticSentenceAnalysisEnabled = automaticSentenceButton.state == .on
+        session?.automaticSentenceAnalysisEnabled = false
         let proposed: AIProviderCatalog
         do {
             guard let value = try session?.catalogForSaving() else {
@@ -592,7 +590,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
 
     private func setTesting(_ testing: Bool) {
         testButton.isEnabled = !testing
-        testButton.title = testing ? "测试中…" : "测试连接"
+        testButton.title = testing ? t("测试中…", "Testing…") : t("测试连接", "Test Connection")
         if testing { progressIndicator.startAnimation(nil) }
         else { progressIndicator.stopAnimation(nil) }
         profileSelector.isEnabled = !testing
@@ -627,7 +625,6 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         modelField.isEnabled = !busy
         keyField.isEnabled = !busy
         automaticFallbackButton.isEnabled = !busy
-        automaticSentenceButton.isEnabled = !busy
         testButton.isEnabled = !busy && !isTestingConnection
         clearKeyButton.isEnabled = !busy
         clearCacheButton.isEnabled = !busy
@@ -642,7 +639,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         connectionTestTask = nil
         connectionTestGate.finish()
         progressIndicator.stopAnimation(nil)
-        testButton.title = "测试连接"
+        testButton.title = t("测试连接", "Test Connection")
         session = nil
     }
 
@@ -658,9 +655,223 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         return field
     }
 
+    private func t(_ chinese: String, _ english: String) -> String {
+        AppLocalization.text(chinese, english)
+    }
+
     private func flexibleSpacer() -> NSView {
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return spacer
+    }
+}
+
+@MainActor
+final class LanguageSettingsWindowController: NSWindowController, NSWindowDelegate {
+    private let store: LanguagePreferencesStore
+    private let nativePopup = NSPopUpButton()
+    private let learningPopup = NSPopUpButton()
+    private let uiPopup = NSPopUpButton()
+    private let statusLabel = NSTextField(wrappingLabelWithString: "")
+
+    init(store: LanguagePreferencesStore = .shared) {
+        self.store = store
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 350),
+            styleMask: [.titled, .closable], backing: .buffered, defer: true
+        )
+        super.init(window: window)
+        configureWindow(window)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func show() {
+        let preferences = store.load()
+        select(preferences.nativeLanguage, in: nativePopup)
+        select(preferences.learningLanguage, in: learningPopup)
+        uiPopup.selectItem(at: uiIndex(preferences.uiLanguage))
+        updatePairStatus(preferences)
+        NSApp.activate(ignoringOtherApps: true)
+        window?.center()
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func configureWindow(_ window: NSWindow) {
+        window.title = AppLocalization.text("语言设置", "Language Settings")
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.minSize = NSSize(width: 520, height: 330)
+
+        addSupportedLanguages(to: nativePopup)
+        nativePopup.isEnabled = true
+        nativePopup.setAccessibilityIdentifier("language-settings-native")
+        nativePopup.toolTip = AppLocalization.text(
+            "选择你最容易理解说明和译文的语言。当前版本提供简体中文和 English。",
+            "Choose the language you understand best. This release provides Simplified Chinese and English."
+        )
+
+        addSupportedLanguages(to: learningPopup)
+        learningPopup.isEnabled = true
+        learningPopup.setAccessibilityIdentifier("language-settings-learning")
+        learningPopup.toolTip = AppLocalization.text(
+            "选择要学习和进行语法分析的语言；不能与母语相同。",
+            "Choose the language to study and analyze; it must differ from the native language."
+        )
+
+        uiPopup.addItems(withTitles: [
+            AppLocalization.text("跟随母语", "Follow Native Language"),
+            AppLocalization.languageName(.simplifiedChinese),
+            AppLocalization.languageName(.english)
+        ])
+        uiPopup.setAccessibilityIdentifier("language-settings-ui")
+
+        let form = NSGridView(views: [
+            [label(AppLocalization.text("母语", "Native Language")), nativePopup],
+            [label(AppLocalization.text("学习语言", "Learning Language")), learningPopup],
+            [label(AppLocalization.text("界面语言", "UI Language")), uiPopup]
+        ])
+        form.column(at: 0).xPlacement = .trailing
+        form.column(at: 1).xPlacement = .fill
+        form.rowSpacing = 14
+
+        let explanation = NSTextField(wrappingLabelWithString: AppLocalization.text(
+            "母语与学习语言会立即决定 Apple 离线翻译方向和 AI 学习对象。界面语言可以独立覆盖，并在重新打开应用后生效。",
+            "Native and Learning languages immediately control Apple offline translation direction and the AI study object. UI language can be overridden and applies after reopening the app."
+        ))
+        explanation.textColor = .secondaryLabelColor
+        explanation.maximumNumberOfLines = 3
+
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.maximumNumberOfLines = 2
+        statusLabel.setAccessibilityIdentifier("language-settings-status")
+
+        let save = NSButton(
+            title: AppLocalization.text("保存", "Save"),
+            target: self, action: #selector(savePreferences)
+        )
+        save.keyEquivalent = "\r"
+        save.toolTip = save.title
+        save.setAccessibilityIdentifier("language-settings-save")
+        let cancel = NSButton(
+            title: AppLocalization.text("取消", "Cancel"),
+            target: self, action: #selector(cancel)
+        )
+        cancel.keyEquivalent = "\u{1b}"
+        cancel.toolTip = cancel.title
+        let footer = NSStackView(views: [flexibleSpacer(), cancel, save])
+        footer.orientation = .horizontal
+        footer.spacing = 8
+
+        let stack = NSStackView(views: [form, explanation, statusLabel, footer])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 18
+        stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 22, right: 28)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        explanation.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(stack)
+        window.contentView = content
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            explanation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
+            statusLabel.widthAnchor.constraint(equalTo: explanation.widthAnchor),
+            footer.widthAnchor.constraint(equalTo: explanation.widthAnchor)
+        ])
+    }
+
+    @objc private func savePreferences() {
+        let ui: UILanguagePreference
+        switch uiPopup.indexOfSelectedItem {
+        case 1: ui = .simplifiedChinese
+        case 2: ui = .english
+        default: ui = .followNative
+        }
+        guard let native = selectedLanguage(in: nativePopup),
+              let learning = selectedLanguage(in: learningPopup) else {
+            statusLabel.stringValue = AppLocalization.text(
+                "请选择母语和学习语言。", "Choose both Native and Learning languages."
+            )
+            return
+        }
+        guard native != learning else {
+            statusLabel.stringValue = AppLocalization.text(
+                "母语和学习语言不能相同。", "Native and Learning languages must differ."
+            )
+            return
+        }
+        let value = LanguagePreferences(
+            nativeLanguage: native, learningLanguage: learning, uiLanguage: ui
+        )
+        if store.save(value) {
+            statusLabel.stringValue = AppLocalization.text(
+                "已保存；Apple 离线翻译方向已更新。重新打开应用后界面语言生效。",
+                "Saved; Apple offline translation directions are updated. Reopen the app to apply the UI language."
+            )
+        } else {
+            statusLabel.stringValue = AppLocalization.text(
+                "语言设置未能保存，原设置保持不变。",
+                "Language settings could not be saved; the previous settings remain unchanged."
+            )
+        }
+    }
+
+    @objc private func cancel() { close() }
+
+    private func addSupportedLanguages(to popup: NSPopUpButton) {
+        for language in [LanguageIdentifier.simplifiedChinese, .english] {
+            popup.addItem(withTitle: AppLocalization.languageName(language))
+            popup.lastItem?.representedObject = language.rawValue
+        }
+    }
+
+    private func selectedLanguage(in popup: NSPopUpButton) -> LanguageIdentifier? {
+        guard let raw = popup.selectedItem?.representedObject as? String else { return nil }
+        return LanguageIdentifier(rawValue: raw)
+    }
+
+    private func select(_ language: LanguageIdentifier, in popup: NSPopUpButton) {
+        if let item = popup.itemArray.first(where: {
+            ($0.representedObject as? String) == language.rawValue
+        }) {
+            popup.select(item)
+        }
+    }
+
+    private func updatePairStatus(_ preferences: LanguagePreferences) {
+        let native = AppLocalization.languageName(preferences.nativeLanguage)
+        let learning = AppLocalization.languageName(preferences.learningLanguage)
+        statusLabel.stringValue = AppLocalization.text(
+            "当前 Apple 离线翻译语言对：\(native) ⇄ \(learning)。",
+            "Current Apple offline translation pair: \(native) ⇄ \(learning)."
+        )
+    }
+
+    private func uiIndex(_ value: UILanguagePreference) -> Int {
+        switch value {
+        case .followNative: return 0
+        case .simplifiedChinese: return 1
+        case .english: return 2
+        }
+    }
+
+
+    private func label(_ value: String) -> NSTextField {
+        let field = NSTextField(labelWithString: value)
+        field.alignment = .right
+        return field
+    }
+
+    private func flexibleSpacer() -> NSView {
+        let view = NSView()
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return view
     }
 }

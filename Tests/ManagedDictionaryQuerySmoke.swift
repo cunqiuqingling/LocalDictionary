@@ -19,6 +19,7 @@ private actor MockManagedRuntime: ManagedDictionaryQueryRuntime {
     }
 
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         queriedIDs.append(descriptor.dictionaryID)
         return outcomes[descriptor.dictionaryID] ?? .miss
@@ -27,6 +28,10 @@ private actor MockManagedRuntime: ManagedDictionaryQueryRuntime {
     func reset() { resetCount += 1 }
 
     func remove(dictionaryID: String) {
+        removedIDs.append(dictionaryID)
+    }
+
+    func remove(dictionaryID: String, generation: UInt64) {
         removedIDs.append(dictionaryID)
     }
 
@@ -40,6 +45,10 @@ private func descriptor(id: String, position: Int64, enabled: Bool = true,
                             DictionaryFormatterIdentifier.genericMDictV1)
     -> DictionaryDescriptor {
     let now = Date(timeIntervalSince1970: 1_700_000_000)
+    let publicationID = "00000000-0000-0000-0000-000000000003"
+    let sourceSHA = String(repeating: "0", count: 64)
+    let indexSHA = String(repeating: "1", count: 64)
+    let indexPath = "Dictionaries/\(id)/index/dictionary.\(publicationID).sqlite"
     return DictionaryDescriptor(
         dictionaryID: id,
         displayName: "Managed \(id)",
@@ -51,17 +60,28 @@ private func descriptor(id: String, position: Int64, enabled: Bool = true,
         indexMetadata: DictionaryIndexMetadata(
             schemaVersion: 1, entryCount: 1, indexFileSize: 1,
             sourceFileSize: 1, sourceModifiedAt: now,
-            sourceSHA256: String(repeating: "0", count: 64), indexedAt: now
+            sourceSHA256: sourceSHA, indexedAt: now
         ),
         formatterIdentifier: formatterIdentifier,
         capabilities: .unknown,
         relativePaths: DictionaryRelativePaths(
             dictionary: "Dictionaries/\(id)/source/test.mdx",
             resources: [],
-            index: "Dictionaries/\(id)/index/dictionary.sqlite"
+            index: state == .ready ? indexPath : nil
         ),
         createdAt: now,
-        updatedAt: now
+        updatedAt: now,
+        publishedIndexIdentity: state == .ready ? PublishedIndexIdentity(
+            indexPublicationID: publicationID,
+            indexSHA256: indexSHA,
+            indexFileSize: 1,
+            sourceSHA256: sourceSHA,
+            sourceFileSize: 1,
+            schemaVersion: 1,
+            entryCount: 1,
+            indexedAt: now,
+            relativePath: indexPath
+        ) : nil
     )
 }
 
@@ -118,7 +138,9 @@ private func validatedFixture(root: URL, schema: Int = 1,
     throws -> DictionaryDescriptor {
     let sourcePath = layout.relativePath(dictionaryID: id)
     let source = root.appendingPathComponent(sourcePath)
-    let index = root.appendingPathComponent("Dictionaries/\(id)/index/dictionary.sqlite")
+    let publicationID = "00000000-0000-0000-0000-000000000003"
+    let indexPath = "Dictionaries/\(id)/index/dictionary.\(publicationID).sqlite"
+    let index = root.appendingPathComponent(indexPath)
     try FileManager.default.createDirectory(at: source.deletingLastPathComponent(),
                                             withIntermediateDirectories: true)
     try FileManager.default.createDirectory(at: index.deletingLastPathComponent(),
@@ -134,6 +156,8 @@ private func validatedFixture(root: URL, schema: Int = 1,
     sqlite3_close(database)
     let sourceSize = UInt64(try source.resourceValues(forKeys: [.fileSizeKey]).fileSize!)
     let indexSize = UInt64(try index.resourceValues(forKeys: [.fileSizeKey]).fileSize!)
+    let indexSHA = digest(try Data(contentsOf: index))
+    let sourceSHA = digestOverride ?? digest(bytes)
     let now = Date(timeIntervalSince1970: 1_700_000_000)
     return DictionaryDescriptor(
         dictionaryID: id,
@@ -144,18 +168,29 @@ private func validatedFixture(root: URL, schema: Int = 1,
         enabled: true,
         state: .ready,
         indexMetadata: DictionaryIndexMetadata(
-            schemaVersion: 1, entryCount: 1, indexFileSize: indexSize,
+            schemaVersion: schema, entryCount: 1, indexFileSize: indexSize,
             sourceFileSize: sourceSize, sourceModifiedAt: now,
-            sourceSHA256: digestOverride ?? digest(bytes), indexedAt: now
+            sourceSHA256: sourceSHA, indexedAt: now
         ),
         formatterIdentifier: formatterIdentifier,
         capabilities: .unknown,
         relativePaths: DictionaryRelativePaths(
             dictionary: sourcePath, resources: [],
-            index: "Dictionaries/\(id)/index/dictionary.sqlite"
+            index: indexPath
         ),
         createdAt: now,
-        updatedAt: now
+        updatedAt: now,
+        publishedIndexIdentity: PublishedIndexIdentity(
+            indexPublicationID: publicationID,
+            indexSHA256: indexSHA,
+            indexFileSize: indexSize,
+            sourceSHA256: sourceSHA,
+            sourceFileSize: sourceSize,
+            schemaVersion: schema,
+            entryCount: 1,
+            indexedAt: now,
+            relativePath: indexPath
+        )
     )
 }
 
@@ -184,14 +219,9 @@ private func testRoutingAndStateFiltering() async throws {
                           unsupportedFormatter]),
         runtime: runtime
     )
-    let skipped = await service.lookup("prompt", preferredMatched: true)
-    try expect(skipped.skippedBecausePreferredMatched && skipped.hits.isEmpty,
-               "preferred hit must skip managed dictionaries")
-    let skippedSnapshot = await runtime.snapshot()
-    try expect(skippedSnapshot.0.isEmpty,
-               "preferred hit must not call managed runtime")
-
-    let batch = await service.lookup("prompt")
+    let batch = await service.lookup("prompt", preferredMatched: true)
+    try expect(!batch.skippedBecausePreferredMatched,
+               "legacy preferred hit must not suppress the unified dictionary list")
     try expect(batch.hits.map(\.dictionaryID) == ["a", "c"],
                "canonical and legacy formatter identifiers should both query")
     try expect(batch.unavailableDictionaryIDs == ["b"], "single failure should be isolated")
@@ -205,7 +235,89 @@ private func testRoutingAndStateFiltering() async throws {
 
     await service.replaceCatalog(catalog([second]))
     let replacedSnapshot = await runtime.snapshot()
-    try expect(replacedSnapshot.1 == 1, "catalog replacement should reset runtimes")
+    try expect(replacedSnapshot.1 == 0,
+               "catalog replacement must not close a runtime before its lifecycle drain")
+}
+
+private func testZeroPreferredAndUnifiedCrossSourceOrder() async throws {
+    let importedID = "00000000-0000-0000-0000-000000000051"
+    let openID = "00000000-0000-0000-0000-000000000052"
+    let imported = descriptor(id: importedID, position: 2)
+    var open = descriptor(id: openID, position: 1, level: .fallback)
+    open.sourceKind = .openResource
+    open.storageOwnership = .appManagedOpenResource
+    open.openResourceMetadata = OpenResourceInstallationMetadata(
+        resourceID: "org.synthetic.english", resourceRevision: 1,
+        resourceVersion: "1", manifestVersion: 1,
+        manifestSHA256: String(repeating: "a", count: 64),
+        verifiedKeyID: "synthetic-key",
+        payloadSHA256: String(repeating: "b", count: 64), payloadBytes: 1,
+        sidecarRelativePath: "Dictionaries/\(openID)/resource-installation.json",
+        languages: ["en"],
+        license: OpenResourceLicenseMetadata(
+            name: "Synthetic", version: "1", url: "https://example.invalid",
+            attribution: "Synthetic"
+        ),
+        sourceProject: "Synthetic", officialPageReference: "https://example.invalid",
+        expectedEntryCount: OpenResourceEntryCountMetadata(minimum: 1, maximum: 1),
+        installedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
+    let runtime = MockManagedRuntime(outcomes: [
+        importedID: .hit(hit(id: importedID)), openID: .hit(hit(id: openID))
+    ])
+    let service = ManagedDictionaryQueryService(
+        catalog: catalog([imported, open]), runtime: runtime
+    )
+
+    let ordered = await service.lookup("prompt")
+    try expect(ordered.hits.map(\.dictionaryID) == [openID, importedID],
+               "zero-preferred catalog did not honor unified cross-source order")
+    let queried = await runtime.snapshot().0
+    try expect(queried == [openID, importedID],
+               "query runtime did not enumerate zero-preferred catalog in user order")
+}
+
+private func testChineseAggregateQueriesNormalAndOpenResource() async throws {
+    let normalID = "00000000-0000-0000-0000-000000000041"
+    let openID = "00000000-0000-0000-0000-000000000042"
+    var normal = descriptor(id: normalID, position: 0)
+    normal.capabilities.chineseLookup = true
+    var open = descriptor(id: openID, position: 1, level: .fallback)
+    open.sourceKind = .openResource
+    open.storageOwnership = .appManagedOpenResource
+    open.capabilities.chineseLookup = true
+    open.relativePaths.dictionary = "Dictionaries/\(openID)/payload.mdx"
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    open.openResourceMetadata = OpenResourceInstallationMetadata(
+        resourceID: "org.synthetic.zh-en", resourceRevision: 1,
+        resourceVersion: "1", manifestVersion: 1,
+        manifestSHA256: String(repeating: "a", count: 64),
+        verifiedKeyID: "synthetic-key",
+        payloadSHA256: String(repeating: "b", count: 64), payloadBytes: 1,
+        sidecarRelativePath: "Dictionaries/\(openID)/resource-installation.json",
+        languages: ["zh", "en"],
+        license: OpenResourceLicenseMetadata(
+            name: "Synthetic", version: "1", url: "https://example.invalid",
+            attribution: "Synthetic"
+        ),
+        sourceProject: "Synthetic",
+        officialPageReference: "https://example.invalid",
+        expectedEntryCount: OpenResourceEntryCountMetadata(minimum: 1, maximum: 1),
+        installedAt: now
+    )
+    let runtime = MockManagedRuntime(outcomes: [
+        normalID: .hit(hit(id: normalID)),
+        openID: .hit(hit(id: openID))
+    ])
+    let service = ManagedDictionaryQueryService(
+        catalog: catalog([normal, open]), runtime: runtime
+    )
+    let batch = await service.lookupChinese("文化")
+    try expect(batch.hits.map(\.dictionaryID) == [normalID, openID],
+               "Chinese planner must aggregate normal and open-resource direct lookup")
+    let queried = await runtime.snapshot().0
+    try expect(queried == [normalID, openID],
+               "normal-tier hit must not suppress CC-CEDICT/open-resource Chinese lookup")
 }
 
 private func testRuntimeValidationAndReadOnlySQLite() throws {
@@ -337,6 +449,8 @@ private func testSafeCollectionSnapshot() throws {
 struct ManagedDictionaryQuerySmoke {
     static func main() async throws {
         try await testRoutingAndStateFiltering()
+        try await testZeroPreferredAndUnifiedCrossSourceOrder()
+        try await testChineseAggregateQueriesNormalAndOpenResource()
         try testRuntimeValidationAndReadOnlySQLite()
         try testSafeCollectionSnapshot()
         print("Managed dictionary query smoke: PASS")

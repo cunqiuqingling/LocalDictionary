@@ -15,21 +15,12 @@ struct MDictImportInspector: Sendable {
     }
 
     func previews(for selectedURL: URL) throws -> [DictionaryImportPreview] {
-        let fileManager = FileManager.default
         let resourceValues = try selectedURL.resourceValues(forKeys: [.isDirectoryKey])
-        let mdxURLs: [URL]
-        if resourceValues.isDirectory == true {
-            mdxURLs = try fileManager.contentsOfDirectory(
-                at: selectedURL,
-                includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
-                options: [.skipsHiddenFiles]
-            ).filter { $0.pathExtension.caseInsensitiveCompare("mdx") == .orderedSame }
-        } else {
-            guard selectedURL.pathExtension.caseInsensitiveCompare("mdx") == .orderedSame else {
-                throw DictionaryImportError.invalidSelection
-            }
-            mdxURLs = [selectedURL]
+        guard resourceValues.isDirectory != true,
+              selectedURL.pathExtension.caseInsensitiveCompare("mdx") == .orderedSame else {
+            throw DictionaryImportError.invalidSelection
         }
+        let mdxURLs = [selectedURL]
 
         guard !mdxURLs.isEmpty else { throw DictionaryImportError.noMDXFiles }
         return try mdxURLs
@@ -65,7 +56,8 @@ struct MDictImportInspector: Sendable {
         let mdxSize = try validatedRegularFileSize(mdxURL, extension: "mdx")
         let header = try readHeaderSummary(from: mdxURL, fileSize: mdxSize)
         let digest = try sha256(of: mdxURL)
-        let candidates = try mddCandidates(for: mdxURL)
+        // M23 supports one MDX payload only. Do not inspect sibling MDD files or infer resources.
+        let candidates: [DictionaryMDDCandidate] = []
         let modifiedAt = try? mdxURL.resourceValues(forKeys: [.contentModificationDateKey])
             .contentModificationDate
         let automatic = candidates.count == 1 ? Set([candidates[0].id]) : []
@@ -82,28 +74,6 @@ struct MDictImportInspector: Sendable {
             mddCandidates: candidates,
             automaticallySelectedMDDIDs: automatic
         )
-    }
-
-    private func mddCandidates(for mdxURL: URL) throws -> [DictionaryMDDCandidate] {
-        let fileManager = FileManager.default
-        let directory = mdxURL.deletingLastPathComponent()
-        let expectedBase = normalizedBaseName(of: mdxURL)
-        return try fileManager.contentsOfDirectory(
-            at: directory,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey],
-            options: [.skipsHiddenFiles]
-        ).filter {
-            $0.pathExtension.caseInsensitiveCompare("mdd") == .orderedSame &&
-                normalizedBaseName(of: $0) == expectedBase
-        }.map { url in
-            DictionaryMDDCandidate(
-                url: url,
-                fileName: url.lastPathComponent,
-                fileSize: try validatedRegularFileSize(url, extension: "mdd")
-            )
-        }.sorted {
-            $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending
-        }
     }
 
     private func validatedRegularFileSize(_ url: URL, extension expected: String) throws -> UInt64 {
@@ -213,18 +183,6 @@ struct MDictImportInspector: Sendable {
             throw DictionaryImportError.invalidMDX("缺少 MDict 元数据")
         }
         return delegate.attributes
-    }
-
-    private func normalizedBaseName(of url: URL) -> String {
-        var base = url.deletingPathExtension().lastPathComponent
-            .precomposedStringWithCanonicalMapping
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let suffix = (base as NSString).pathExtension
-        if !suffix.isEmpty, suffix.allSatisfy(\.isNumber) {
-            base = (base as NSString).deletingPathExtension
-        }
-        return base.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     private func readExactly(_ count: Int, from handle: FileHandle) throws -> Data {

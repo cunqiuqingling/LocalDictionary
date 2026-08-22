@@ -1,0 +1,1 @@
+#include "../MDictCore/FDBoundSQLiteReadOnlyVFS.cpp"

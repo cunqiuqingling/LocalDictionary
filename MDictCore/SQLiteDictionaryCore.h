@@ -17,6 +17,9 @@ class Mdict;
 }
 
 namespace localdict {
+namespace fdsqlite {
+class FDBoundReadOnlyFileCapability;
+}
 
 struct IndexOpenResult {
   bool rebuilt = false;
@@ -48,6 +51,26 @@ struct IndexBuildResult {
   uint64_t entry_count = 0;
 };
 
+struct IndexSourceMetadata {
+  uint64_t size = 0;
+  int64_t modified_seconds = 0;
+  int64_t modified_nanoseconds = 0;
+  uint64_t inode = 0;
+  uint64_t device = 0;
+  std::string source_name;
+  std::string source_identifier;
+};
+
+struct PublishedIndexMetadata {
+  std::string dictionary_id;
+  std::string publication_id;
+  std::string source_sha256;
+  uint64_t source_size = 0;
+  int schema_version = 0;
+  uint64_t entry_count = 0;
+  std::string builder_format_version;
+};
+
 class IndexBuildCancelled final : public std::exception {
  public:
   const char *what() const noexcept override { return "index build cancelled"; }
@@ -67,8 +90,28 @@ class SQLiteDictionaryCore {
   IndexOpenResult openExistingReadOnly();
   IndexBuildResult buildIndex(
       const std::function<bool()> &cancellation_check = {});
+  IndexBuildResult buildIndexFromFileDescriptor(
+      int source_descriptor, const IndexSourceMetadata &source_metadata,
+      const std::function<bool()> &cancellation_check = {});
+  IndexBuildResult buildManagedIndexFromFileDescriptor(
+      int source_descriptor, const IndexSourceMetadata &source_metadata,
+      const PublishedIndexMetadata &published_metadata,
+      const std::function<bool()> &cancellation_check = {});
+  IndexOpenResult openManagedReadOnly(
+      int source_descriptor,
+      const fdsqlite::FDBoundReadOnlyFileCapability &index_capability,
+      const PublishedIndexMetadata &expected_metadata);
+  IndexOpenResult openLegacyReadOnly(
+      int source_descriptor,
+      const fdsqlite::FDBoundReadOnlyFileCapability &index_capability,
+      const IndexSourceMetadata &expected_source_metadata);
   LookupResult lookup(const std::string &input,
                       size_t maximum_html_bytes = 0);
+  uint64_t enumerateEntries(
+      size_t maximum_html_bytes,
+      const std::function<bool()> &cancellation_check,
+      const std::function<bool(const std::string &, const std::string &, bool)>
+          &visitor);
   CacheStats cacheStats() const;
 
   static std::string normalizeQuery(const std::string &input);
@@ -93,6 +136,12 @@ class SQLiteDictionaryCore {
   std::string readWithCache(const IndexedRecord &record, bool &cache_hit);
   void insertCache(const std::string &key, std::string value);
   void closeDatabase();
+  IndexBuildResult buildIndexWithSource(
+      std::unique_ptr<mdict::Mdict> source,
+      const IndexSourceMetadata &source_metadata,
+      const PublishedIndexMetadata *published_metadata,
+      bool use_precreated_destination,
+      const std::function<bool()> &cancellation_check);
 
   std::string dictionary_path_;
   std::string index_path_;

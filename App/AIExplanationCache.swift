@@ -15,6 +15,13 @@ struct AICachedSentenceAnalysis: Sendable {
     let createdAt: Date
 }
 
+struct AICachedTextTranslation: Sendable {
+    let translation: AITextTranslation
+    let providerDisplayName: String
+    let model: String
+    let createdAt: Date
+}
+
 struct AICachedInlineWordQuick: Sendable {
     let result: InlineWordQuickAIResult
     let providerDisplayName: String
@@ -33,11 +40,12 @@ enum AICacheError: LocalizedError {
     var errorDescription: String? { "AI 缓存暂不可用。" }
 }
 
-final class AIExplanationCache {
+final class AIExplanationCache: @unchecked Sendable {
     static let maximumEntries = 256
-    static let wordResponseSchemaVersion = 2
-    static let sentenceResponseSchemaVersion = 1
-    static let inlineResponseSchemaVersion = 1
+    static let wordResponseSchemaVersion = 8
+    static let sentenceResponseSchemaVersion = 4
+    static let textTranslationResponseSchemaVersion = 6
+    static let inlineResponseSchemaVersion = 3
 
     let databaseURL: URL
     private let queue = DispatchQueue(label: "LocalDictionary.AICache", qos: .utility)
@@ -185,6 +193,74 @@ final class AIExplanationCache {
         }
     }
 
+    func textTranslationValue(for text: String,
+                              configuration: AIProviderConfiguration,
+                              identity: AITranslationCacheIdentity? = nil) async throws
+        -> AICachedTextTranslation? {
+        try await perform { database in
+            let key = Self.textTranslationCacheKey(
+                text: text, configuration: configuration, identity: identity
+            )
+            let sql = """
+            SELECT response_json, provider_name, model, created_at
+            FROM ai_explanation_cache WHERE cache_key = ? LIMIT 1;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw AICacheError.unavailable
+            }
+            defer { sqlite3_finalize(statement) }
+            Self.bind(key, to: statement, at: 1)
+            guard sqlite3_step(statement) == SQLITE_ROW,
+                  let bytes = sqlite3_column_blob(statement, 0) else { return nil }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            guard let decoded = try? JSONDecoder().decode(AITextTranslation.self, from: data),
+                  let validated = try? decoded.validated(expectedSourceText: text) else {
+                try Self.delete(key: key, database: database)
+                return nil
+            }
+            return AICachedTextTranslation(
+                translation: validated,
+                providerDisplayName: Self.text(statement, column: 1),
+                model: Self.text(statement, column: 2),
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
+            )
+        }
+    }
+
+    func storeTextTranslation(_ translation: AITextTranslation,
+                              text: String,
+                              configuration: AIProviderConfiguration,
+                              identity: AITranslationCacheIdentity? = nil) async throws {
+        let validated = try translation.validated(expectedSourceText: text)
+        let data = try JSONEncoder().encode(validated)
+        try await perform { database in
+            let sql = """
+            INSERT OR REPLACE INTO ai_explanation_cache
+            (cache_key, response_json, created_at, provider_name, model, prompt_version)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw AICacheError.unavailable
+            }
+            defer { sqlite3_finalize(statement) }
+            Self.bind(Self.textTranslationCacheKey(
+                text: text, configuration: configuration, identity: identity
+            ),
+                      to: statement, at: 1)
+            _ = data.withUnsafeBytes { bytes in
+                sqlite3_bind_blob(statement, 2, bytes.baseAddress, Int32(data.count), SQLITE_TRANSIENT)
+            }
+            sqlite3_bind_double(statement, 3, Date().timeIntervalSince1970)
+            Self.bind(configuration.providerDisplayName, to: statement, at: 4)
+            Self.bind(configuration.model, to: statement, at: 5)
+            sqlite3_bind_int(statement, 6, Int32(aiTextTranslationPromptVersion))
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw AICacheError.unavailable }
+            try Self.trim(database)
+        }
+    }
+
     func inlineWordQuickValue(for query: String,
                               configuration: AIProviderConfiguration) async throws
         -> AICachedInlineWordQuick? {
@@ -295,11 +371,21 @@ final class AIExplanationCache {
                                                      configuration: configuration))
     }
 
+    func removeTextTranslation(for text: String,
+                               configuration: AIProviderConfiguration,
+                               identity: AITranslationCacheIdentity? = nil) async throws {
+        try await remove(key: Self.textTranslationCacheKey(
+            text: text, configuration: configuration, identity: identity
+        ))
+    }
+
     private func remove(key: String) async throws {
         try await perform { database in try Self.delete(key: key, database: database) }
     }
 
-    private func perform<T>(_ operation: @escaping (OpaquePointer) throws -> T) async throws -> T {
+    private func perform<T: Sendable>(
+        _ operation: @escaping @Sendable (OpaquePointer) throws -> T
+    ) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [databaseURL] in
                 do {
@@ -368,6 +454,7 @@ final class AIExplanationCache {
                 stableDigest(configuration.normalizedBaseURL.lowercased()),
                 configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                 normalizedQuery,
+                languageRoleIdentity(for: query),
                 String(aiDictionaryPromptVersion),
                 responsePolicyIdentity(configuration),
                 String(wordResponseSchemaVersion)]
@@ -384,9 +471,32 @@ final class AIExplanationCache {
                 stableDigest(configuration.normalizedBaseURL.lowercased()),
                 configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                 normalized,
+                languageRoleIdentity(for: sentence),
                 String(aiSentencePromptVersion),
                 responsePolicyIdentity(configuration),
                 String(sentenceResponseSchemaVersion)]
+            .joined(separator: "\u{1F}")
+    }
+
+    static func textTranslationCacheKey(text: String,
+                                        configuration: AIProviderConfiguration,
+                                        identity: AITranslationCacheIdentity? = nil) -> String {
+        let normalized = SentenceTextNormalizer.normalize(text)
+            .precomposedStringWithCanonicalMapping
+        let context = LanguageContext.make(query: normalized)
+        let resolvedIdentity = identity ?? AITranslationCacheIdentity(
+            context: context,
+            targetLanguage: context.translationTargetLanguage ?? context.learningLanguage
+        )
+        return ["cache-v3", "text-translation", "long-text-full",
+                configuration.providerID.uuidString.lowercased(),
+                configuration.providerType.rawValue,
+                stableDigest(configuration.normalizedBaseURL.lowercased()),
+                configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                "query-hash=" + stableDigest(normalized),
+                resolvedIdentity.cacheComponents.joined(separator: ":"),
+                responsePolicyIdentity(configuration),
+                String(textTranslationResponseSchemaVersion)]
             .joined(separator: "\u{1F}")
     }
 
@@ -407,23 +517,37 @@ final class AIExplanationCache {
                 stableDigest(configuration.normalizedBaseURL.lowercased()),
                 configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
                 normalized,
+                languageRoleIdentity(for: query),
                 String(intent.promptVersion),
                 responsePolicyIdentity(configuration),
                 String(inlineResponseSchemaVersion)]
             .joined(separator: "\u{1F}")
     }
 
-    private struct DecodedInline<Value> {
+    private static func languageRoleIdentity(for text: String) -> String {
+        let preferences = LanguagePreferencesStore.shared.load()
+        let context = LanguageContext.make(query: text, preferences: preferences)
+        return [
+            context.queryLanguage?.rawValue ?? "undetermined",
+            context.queryRelation.rawValue,
+            preferences.nativeLanguage.rawValue,
+            preferences.learningLanguage.rawValue,
+            context.studyTextLanguage.rawValue,
+            context.explanationLanguage.rawValue
+        ].joined(separator: ":")
+    }
+
+    private struct DecodedInline<Value: Sendable>: Sendable {
         let value: Value
         let provider: String
         let model: String
         let createdAt: Date
     }
 
-    private func decodedInlineValue<Value>(
+    private func decodedInlineValue<Value: Sendable>(
         for query: String, intent: AIRequestIntent,
         configuration: AIProviderConfiguration,
-        decode: @escaping (Data) -> Value?
+        decode: @escaping @Sendable (Data) -> Value?
     ) async throws -> DecodedInline<Value>? {
         try await perform { database in
             let key = Self.inlineCacheKey(query: query, intent: intent,
@@ -506,7 +630,7 @@ final class AIExplanationCache {
     }
 
     private static func responsePolicyIdentity(_ configuration: AIProviderConfiguration) -> String {
-        "json=\(configuration.options.usesJSONResponseFormat ? 1 : 0);thinking=disabled"
+        "response=\(configuration.responseCapability.rawValue);thinking=disabled"
     }
 
     private static func queryIntentIdentity(_ intent: QueryIntent) -> String {

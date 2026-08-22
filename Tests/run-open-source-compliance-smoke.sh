@@ -60,7 +60,9 @@ require_literal "$ROOT/LICENSE" "END OF TERMS AND CONDITIONS"
 
 require_literal "$ROOT/README.md" \
   "LocalDictionary original project code is licensed under GPL-3.0-only."
-reject_pattern 'GPL-3\.0-or-later' "$ROOT/README.md" "$ROOT/docs/provenance.md"
+reject_pattern \
+  'LocalDictionary original project code is licensed under GPL-3\.0-or-later|原创项目代码.*GPL-3\.0-or-later' \
+  "$ROOT/README.md" "$ROOT/docs/provenance.md"
 reject_pattern 'original project code (is|are|采用|使用).*(MIT|Apache|MPL)' \
   "$ROOT/README.md" "$ROOT/docs/provenance.md"
 
@@ -84,8 +86,9 @@ reject_pattern 'Unlicense' "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/docs/provenance
 
 reject_pattern 'SPDX-License-Identifier:[[:space:]]*GPL-3\.0' "$ROOT/ThirdParty/vendor"
 require_literal "$ROOT/README.md" "仓库不包含五本开发者本地商业词典"
-require_literal "$ROOT/README.md" "首次公开阶段只提供源码"
-require_literal "$ROOT/README.md" "暂不提供官方签名或公证的"
+require_literal "$ROOT/README.md" "首次公开发行支持零费用"
+require_literal "$ROOT/README.md" "没有 Developer ID 签名"
+require_literal "$ROOT/README.md" "Gatekeeper 不保证直接打开"
 
 reject_pattern 'Fully offline|完全离线' "$ROOT/docs/privacy.md"
 require_literal "$ROOT/docs/privacy.md" "可选 AI 功能会连接用户配置的第三方服务"

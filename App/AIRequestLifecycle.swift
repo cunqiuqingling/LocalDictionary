@@ -25,6 +25,61 @@ struct AIRequestLifecycle: Sendable {
     }
 }
 
+/// Per-sentence operation ownership used by the production long-text controller.
+/// Retrying one sentence supersedes only that sentence; sibling sentences remain independent.
+struct AISentenceOperationGate: Sendable {
+    struct Token: Hashable, Sendable {
+        let sentenceID: String
+        let operationID: UUID
+        let generation: UInt64
+    }
+
+    private var generations: [String: UInt64] = [:]
+    private var active: [String: Token] = [:]
+
+    var activeCount: Int { active.count }
+
+    mutating func begin(sentenceID: String) -> Token {
+        let generation = (generations[sentenceID] ?? 0) &+ 1
+        generations[sentenceID] = generation
+        let token = Token(sentenceID: sentenceID, operationID: UUID(),
+                          generation: generation)
+        active[sentenceID] = token
+        return token
+    }
+
+    func accepts(_ token: Token) -> Bool {
+        active[token.sentenceID] == token
+    }
+
+    func activeOperationID(for sentenceID: String) -> UUID? {
+        active[sentenceID]?.operationID
+    }
+
+    @discardableResult
+    mutating func finish(_ token: Token) -> Bool {
+        guard accepts(token) else { return false }
+        active[token.sentenceID] = nil
+        return true
+    }
+
+    mutating func invalidateAll() {
+        active.removeAll()
+    }
+}
+
+enum AIRequestCancellationReason: String, Equatable, Sendable {
+    case userQueryChanged
+    case userRetry
+    case userCacheClear
+    case appQuit
+    case providerAbort
+    case studyTextSuperseded
+    case providerOrModelChanged
+    case generationMismatch
+    case internalReplacement
+}
+
 enum AIRequestUserMessage {
     static func message(for error: Error) -> String {
         if let failure = error as? AIProviderRequestFailure {
@@ -73,6 +128,23 @@ enum AIRequestUserMessage {
             return "AI 服务暂时不可用，请稍后重试。"
         case .invalidJSON, .schemaInvalid, .invalidResponse:
             return "服务返回格式无法解析，请重试或更换 AI 服务。"
+        case .noOpTranslation:
+            return "AI 本次未返回有效译文，可重新尝试。"
+        case .wrongTargetLanguage(let expected, _):
+            return "AI 本次未返回目标语言（\(expected.chineseName)）译文，可重新尝试。"
+        case .studyTextUnavailable(let expected):
+            return "尚未生成可用的 \(expected.chineseName) 学习文本。"
+        case .emptyResponse, .providerEmptyResponse:
+            return "AI 服务没有返回可显示的内容，请重试或更换模型。"
+        case .providerReasoningOnly:
+            return "AI 服务本次只返回了内部推理，没有返回可显示内容，请重试。"
+        case .normalizationDroppedVisibleContent:
+            return "AI 返回了内容，但本次无法安全显示，请重试。"
+        case .malformedProviderEnvelope:
+            return "AI 服务返回了无法识别的响应格式，请重试或更换模型。"
+        case .refused(let reason):
+            return reason.map { "AI 服务拒绝了本次请求：\($0)" }
+                ?? "AI 服务拒绝了本次请求，请调整输入后重试。"
         case .responseTooLarge:
             return "服务返回内容过长，已停止处理；请缩短输入后重试。"
         case .cancelled:

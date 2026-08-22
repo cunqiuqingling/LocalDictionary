@@ -23,6 +23,10 @@ expected=(
   mdict-cpp/src/encode/char_decoder.h
   mdict-cpp/src/include/adler32.h
   mdict-cpp/src/include/binutils.h
+  mdict-cpp/src/include/bounded_zlib.h
+  mdict-cpp/src/include/checked_arithmetic.h
+  mdict-cpp/src/include/resource_limits.h
+  mdict-cpp/src/include/resource_test_observer.h
   mdict-cpp/src/include/mdict.h
   mdict-cpp/src/include/mdict_extern.h
   mdict-cpp/src/include/mdict_simple_key.h

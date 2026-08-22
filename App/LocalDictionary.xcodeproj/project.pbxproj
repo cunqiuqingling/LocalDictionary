@@ -15,14 +15,17 @@
 		A10000000000000000000006 /* HTMLTextCleaner.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000006 /* HTMLTextCleaner.swift */; };
 		A10000000000000000000007 /* DictionaryCoreBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000007 /* DictionaryCoreBridge.mm */; };
 		A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000008 /* SQLiteDictionaryCore.cpp */; };
-		A10000000000000000000009 /* mdict.cc in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* mdict.cc */; };
-		A1000000000000000000000A /* binutils.cc in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* binutils.cc */; };
+		A10000000000000000000009 /* mdict.cc in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000009 /* mdict.cc */; settings = {COMPILER_FLAGS = "-Wno-shorten-64-to-32"; }; };
+		A1000000000000000000000A /* binutils.cc in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000A /* binutils.cc */; settings = {COMPILER_FLAGS = "-Wno-shorten-64-to-32"; }; };
 		A1000000000000000000000B /* adler32.cc in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000B /* adler32.cc */; };
 		A1000000000000000000000C /* rmd128.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000C /* rmd128.c */; };
 		A1000000000000000000000D /* miniz.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000D /* miniz.c */; };
 		A1000000000000000000000E /* miniz_tinfl.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000E /* miniz_tinfl.c */; };
 		A1000000000000000000000F /* miniz_tdef.c in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000F /* miniz_tdef.c */; };
 		A10000000000000000000046 /* RIPEMD128Adapter.c in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000050 /* RIPEMD128Adapter.c */; };
+		A10000000000000000000074 /* ManagedMDictSource.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000074 /* ManagedMDictSource.cpp */; };
+		A10000000000000000000076 /* FDBoundSQLiteReadOnlyVFS.cpp in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000076 /* FDBoundSQLiteReadOnlyVFS.cpp */; };
+		A10000000000000000000077 /* PublishedIndexIdentityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000078 /* PublishedIndexIdentityAdapter.swift */; };
 		A10000000000000000000012 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000012 /* Cocoa.framework */; };
 		A10000000000000000000013 /* Carbon.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000013 /* Carbon.framework */; };
 		A10000000000000000000014 /* libsqlite3.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000014 /* libsqlite3.tbd */; };
@@ -80,6 +83,7 @@
 		A10000000000000000000062 /* StrictResourceManifestDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000062 /* StrictResourceManifestDecoder.swift */; };
 		A10000000000000000000063 /* ResourceManifestValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000063 /* ResourceManifestValidator.swift */; };
 		A10000000000000000000064 /* ResourceManifestSignature.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000064 /* ResourceManifestSignature.swift */; };
+		A10000000000000000000071 /* ResourceManifestKeyID.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000071 /* ResourceManifestKeyID.swift */; };
 		A10000000000000000000065 /* ResourceManifestVerifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000065 /* ResourceManifestVerifier.swift */; };
 		A10000000000000000000066 /* VerifiedManifestStateStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000066 /* VerifiedManifestStateStore.swift */; };
 		A10000000000000000000067 /* ResourceNetworkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000067 /* ResourceNetworkModels.swift */; };
@@ -89,7 +93,34 @@
 		A1000000000000000000006B /* ResourcePayloadDownloadModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006B /* ResourcePayloadDownloadModels.swift */; };
 		A1000000000000000000006C /* ResourcePayloadStagingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006C /* ResourcePayloadStagingStore.swift */; };
 		A1000000000000000000006D /* ResourcePayloadFileDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */; };
+		A1000000000000000000006F /* OpenResourceInstallationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006F /* OpenResourceInstallationModels.swift */; };
+		A10000000000000000000070 /* OpenResourceInstallationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000070 /* OpenResourceInstallationCoordinator.swift */; };
+		A10000000000000000000072 /* OwnedDictionaryLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */; };
+		A10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift */; };
 		A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */; };
+		A10000000000000000000080 /* ResourceCenterProductionConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000080 /* ResourceCenterProductionConfiguration.swift */; };
+		A10000000000000000000081 /* ResourceCenterModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000081 /* ResourceCenterModels.swift */; };
+		A10000000000000000000082 /* ResourceCenterController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000082 /* ResourceCenterController.swift */; };
+		A10000000000000000000083 /* ResourceCenterViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000083 /* ResourceCenterViewController.swift */; };
+		A10000000000000000000084 /* ReleaseLegal in Resources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000085 /* ReleaseLegal */; };
+		A10000000000000000000090 /* Translation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000090 /* Translation.framework */; };
+		A10000000000000000000091 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000091 /* SwiftUI.framework */; };
+		A10000000000000000000092 /* CryptoKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000000000000000000092 /* CryptoKit.framework */; };
+		A10000000000000000000093 /* OfflineTranslationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000093 /* OfflineTranslationModels.swift */; };
+		A10000000000000000000094 /* SystemTranslationHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000094 /* SystemTranslationHost.swift */; };
+		A10000000000000000000095 /* LongTextAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000095 /* LongTextAnalysis.swift */; };
+		A10000000000000000000096 /* ReverseLookup.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000096 /* ReverseLookup.swift */; };
+		A10000000000000000000097 /* ReverseIndexCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000097 /* ReverseIndexCoordinator.swift */; };
+		A10000000000000000000098 /* SelectionButtonPlacement.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000098 /* SelectionButtonPlacement.swift */; };
+		A10000000000000000000099 /* BundledOpenResourceCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000099 /* BundledOpenResourceCatalog.swift */; };
+		A1000000000000000000009A /* FreeDictStarDictResource.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000009A /* FreeDictStarDictResource.swift */; };
+		A1000000000000000000009B /* AuditedOpenResourceInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000009B /* AuditedOpenResourceInstaller.swift */; };
+		A1000000000000000000009C /* libarchive.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = B1000000000000000000009C /* libarchive.tbd */; };
+		A1000000000000000000009D /* ReverseIndexInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000009D /* ReverseIndexInventory.swift */; };
+		A1000000000000000000009E /* DictionaryPanelFooterLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000009E /* DictionaryPanelFooterLayout.swift */; };
+		A1000000000000000000009F /* ManualEvidenceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000009F /* ManualEvidenceRecorder.swift */; };
+		A20000000000000000000001 /* HelpAndAboutWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* HelpAndAboutWindowController.swift */; };
+		A30000000000000000000001 /* OfficialOpenResourceDiscovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = B30000000000000000000001 /* OfficialOpenResourceDiscovery.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -114,6 +145,11 @@
 		B1000000000000000000000F /* miniz_tdef.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = miniz_tdef.c; path = ../ThirdParty/vendor/miniz/miniz_tdef.c; sourceTree = "<group>"; };
 		B10000000000000000000050 /* RIPEMD128Adapter.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; name = RIPEMD128Adapter.c; path = ../MDictCore/RIPEMD128Adapter.c; sourceTree = "<group>"; };
 		B10000000000000000000051 /* RIPEMD128Adapter.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = RIPEMD128Adapter.h; path = ../MDictCore/RIPEMD128Adapter.h; sourceTree = "<group>"; };
+		B10000000000000000000074 /* ManagedMDictSource.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = ManagedMDictSource.cpp; path = ../MDictCore/ManagedMDictSource.cpp; sourceTree = "<group>"; };
+		B10000000000000000000075 /* ManagedMDictSource.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = ManagedMDictSource.h; path = ../MDictCore/ManagedMDictSource.h; sourceTree = "<group>"; };
+		B10000000000000000000076 /* FDBoundSQLiteReadOnlyVFS.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = FDBoundSQLiteReadOnlyVFS.cpp; path = ../MDictCore/FDBoundSQLiteReadOnlyVFS.cpp; sourceTree = "<group>"; };
+		B10000000000000000000077 /* FDBoundSQLiteReadOnlyVFS.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = FDBoundSQLiteReadOnlyVFS.h; path = ../MDictCore/FDBoundSQLiteReadOnlyVFS.h; sourceTree = "<group>"; };
+		B10000000000000000000078 /* PublishedIndexIdentityAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PublishedIndexIdentityAdapter.swift; sourceTree = "<group>"; };
 		B10000000000000000000012 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = System/Library/Frameworks/Cocoa.framework; sourceTree = SDKROOT; };
 		B10000000000000000000013 /* Carbon.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Carbon.framework; path = System/Library/Frameworks/Carbon.framework; sourceTree = SDKROOT; };
 		B10000000000000000000014 /* libsqlite3.tbd */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.text-based-dylib-definition; name = libsqlite3.tbd; path = usr/lib/libsqlite3.tbd; sourceTree = SDKROOT; };
@@ -177,6 +213,7 @@
 		B10000000000000000000062 /* StrictResourceManifestDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrictResourceManifestDecoder.swift; sourceTree = "<group>"; };
 		B10000000000000000000063 /* ResourceManifestValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestValidator.swift; sourceTree = "<group>"; };
 		B10000000000000000000064 /* ResourceManifestSignature.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestSignature.swift; sourceTree = "<group>"; };
+		B10000000000000000000071 /* ResourceManifestKeyID.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestKeyID.swift; sourceTree = "<group>"; };
 		B10000000000000000000065 /* ResourceManifestVerifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceManifestVerifier.swift; sourceTree = "<group>"; };
 		B10000000000000000000066 /* VerifiedManifestStateStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifiedManifestStateStore.swift; sourceTree = "<group>"; };
 		B10000000000000000000067 /* ResourceNetworkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceNetworkModels.swift; sourceTree = "<group>"; };
@@ -186,7 +223,35 @@
 		B1000000000000000000006B /* ResourcePayloadDownloadModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadDownloadModels.swift; sourceTree = "<group>"; };
 		B1000000000000000000006C /* ResourcePayloadStagingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadStagingStore.swift; sourceTree = "<group>"; };
 		B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadFileDownloader.swift; sourceTree = "<group>"; };
+		B1000000000000000000006F /* OpenResourceInstallationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenResourceInstallationModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000070 /* OpenResourceInstallationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenResourceInstallationCoordinator.swift; sourceTree = "<group>"; };
+		B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwnedDictionaryLifecycle.swift; sourceTree = "<group>"; };
+		B10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagedDictionaryLifecycleCoordinator.swift; sourceTree = "<group>"; };
 		B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourcePayloadDownloadCoordinator.swift; sourceTree = "<group>"; };
+		B10000000000000000000080 /* ResourceCenterProductionConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterProductionConfiguration.swift; sourceTree = "<group>"; };
+		B10000000000000000000081 /* ResourceCenterModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000082 /* ResourceCenterController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterController.swift; sourceTree = "<group>"; };
+		B10000000000000000000083 /* ResourceCenterViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceCenterViewController.swift; sourceTree = "<group>"; };
+		B10000000000000000000084 /* LocalDictionaryRelease.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LocalDictionaryRelease.entitlements; sourceTree = "<group>"; };
+		B10000000000000000000085 /* ReleaseLegal */ = {isa = PBXFileReference; lastKnownFileType = folder; path = ReleaseLegal; sourceTree = "<group>"; };
+		B10000000000000000000090 /* Translation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Translation.framework; path = System/Library/Frameworks/Translation.framework; sourceTree = SDKROOT; };
+		B10000000000000000000091 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		B10000000000000000000092 /* CryptoKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CryptoKit.framework; path = System/Library/Frameworks/CryptoKit.framework; sourceTree = SDKROOT; };
+		B10000000000000000000093 /* OfflineTranslationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineTranslationModels.swift; sourceTree = "<group>"; };
+		B10000000000000000000094 /* SystemTranslationHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemTranslationHost.swift; sourceTree = "<group>"; };
+		B10000000000000000000095 /* LongTextAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTextAnalysis.swift; sourceTree = "<group>"; };
+		B10000000000000000000096 /* ReverseLookup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReverseLookup.swift; sourceTree = "<group>"; };
+		B10000000000000000000097 /* ReverseIndexCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReverseIndexCoordinator.swift; sourceTree = "<group>"; };
+		B10000000000000000000098 /* SelectionButtonPlacement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionButtonPlacement.swift; sourceTree = "<group>"; };
+		B10000000000000000000099 /* BundledOpenResourceCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundledOpenResourceCatalog.swift; sourceTree = "<group>"; };
+		B1000000000000000000009A /* FreeDictStarDictResource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreeDictStarDictResource.swift; sourceTree = "<group>"; };
+		B1000000000000000000009B /* AuditedOpenResourceInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditedOpenResourceInstaller.swift; sourceTree = "<group>"; };
+		B1000000000000000000009C /* libarchive.tbd */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.text-based-dylib-definition; name = libarchive.tbd; path = usr/lib/libarchive.tbd; sourceTree = SDKROOT; };
+		B1000000000000000000009D /* ReverseIndexInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReverseIndexInventory.swift; sourceTree = "<group>"; };
+		B1000000000000000000009E /* DictionaryPanelFooterLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryPanelFooterLayout.swift; sourceTree = "<group>"; };
+		B1000000000000000000009F /* ManualEvidenceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualEvidenceRecorder.swift; sourceTree = "<group>"; };
+		B20000000000000000000001 /* HelpAndAboutWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HelpAndAboutWindowController.swift; sourceTree = "<group>"; };
+		B30000000000000000000001 /* OfficialOpenResourceDiscovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfficialOpenResourceDiscovery.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -200,6 +265,10 @@
 				A10000000000000000000016 /* libxml2.tbd in Frameworks */,
 				A10000000000000000000018 /* ApplicationServices.framework in Frameworks */,
 				A10000000000000000000025 /* Security.framework in Frameworks */,
+				A10000000000000000000090 /* Translation.framework in Frameworks */,
+				A10000000000000000000091 /* SwiftUI.framework in Frameworks */,
+				A10000000000000000000092 /* CryptoKit.framework in Frameworks */,
+				A1000000000000000000009C /* libarchive.tbd in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -241,6 +310,7 @@
 				B1000000000000000000002A /* AIExplanationService.swift */,
 				B1000000000000000000002B /* AIEntryFormatter.swift */,
 				B1000000000000000000002C /* AISettingsWindowController.swift */,
+				B20000000000000000000001 /* HelpAndAboutWindowController.swift */,
 				B1000000000000000000002E /* AIExplanationMarkdownFormatter.swift */,
 				B1000000000000000000002F /* QueryIntentClassifier.swift */,
 				B10000000000000000000030 /* AISentenceAnalysis.swift */,
@@ -267,6 +337,7 @@
 				B10000000000000000000046 /* GenericMDictEntryFormatter.mm */,
 				B10000000000000000000047 /* ManagedDictionaryQueryModels.swift */,
 				B10000000000000000000048 /* ManagedDictionaryQueryRuntime.swift */,
+				B10000000000000000000078 /* PublishedIndexIdentityAdapter.swift */,
 				B10000000000000000000049 /* GenericManagedDictionaryPresenter.swift */,
 				B1000000000000000000004A /* DictionaryCatalogOrdering.swift */,
 				B1000000000000000000004B /* ManagedDictionaryRemoval.swift */,
@@ -274,11 +345,25 @@
 				B1000000000000000000004D /* DictionaryAppearanceTextAdapter.h */,
 				B1000000000000000000004E /* DictionaryAppearanceTextAdapter.mm */,
 				B1000000000000000000004F /* AIRequestLifecycle.swift */,
+				B10000000000000000000093 /* OfflineTranslationModels.swift */,
+				B10000000000000000000094 /* SystemTranslationHost.swift */,
+				B10000000000000000000095 /* LongTextAnalysis.swift */,
+				B10000000000000000000096 /* ReverseLookup.swift */,
+				B10000000000000000000097 /* ReverseIndexCoordinator.swift */,
+				B10000000000000000000098 /* SelectionButtonPlacement.swift */,
+				B1000000000000000000009D /* ReverseIndexInventory.swift */,
+				B1000000000000000000009E /* DictionaryPanelFooterLayout.swift */,
+				B1000000000000000000009F /* ManualEvidenceRecorder.swift */,
+				B10000000000000000000099 /* BundledOpenResourceCatalog.swift */,
+				B1000000000000000000009A /* FreeDictStarDictResource.swift */,
+				B1000000000000000000009B /* AuditedOpenResourceInstaller.swift */,
+				B30000000000000000000001 /* OfficialOpenResourceDiscovery.swift */,
 				B10000000000000000000060 /* ResourceManifestModels.swift */,
 				B10000000000000000000061 /* StrictJSON.swift */,
 				B10000000000000000000062 /* StrictResourceManifestDecoder.swift */,
 				B10000000000000000000063 /* ResourceManifestValidator.swift */,
 				B10000000000000000000064 /* ResourceManifestSignature.swift */,
+				B10000000000000000000071 /* ResourceManifestKeyID.swift */,
 				B10000000000000000000065 /* ResourceManifestVerifier.swift */,
 				B10000000000000000000066 /* VerifiedManifestStateStore.swift */,
 				B10000000000000000000067 /* ResourceNetworkModels.swift */,
@@ -288,7 +373,17 @@
 				B1000000000000000000006B /* ResourcePayloadDownloadModels.swift */,
 				B1000000000000000000006C /* ResourcePayloadStagingStore.swift */,
 				B1000000000000000000006D /* ResourcePayloadFileDownloader.swift */,
+				B1000000000000000000006F /* OpenResourceInstallationModels.swift */,
+				B10000000000000000000070 /* OpenResourceInstallationCoordinator.swift */,
+				B10000000000000000000072 /* OwnedDictionaryLifecycle.swift */,
+				B10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift */,
 				B1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift */,
+				B10000000000000000000080 /* ResourceCenterProductionConfiguration.swift */,
+				B10000000000000000000081 /* ResourceCenterModels.swift */,
+				B10000000000000000000082 /* ResourceCenterController.swift */,
+				B10000000000000000000083 /* ResourceCenterViewController.swift */,
+				B10000000000000000000084 /* LocalDictionaryRelease.entitlements */,
+				B10000000000000000000085 /* ReleaseLegal */,
 				B10000000000000000000039 /* Assets.xcassets */,
 				B1000000000000000000001D /* AccessibilitySelection.swift */,
 				B1000000000000000000001F /* ClipboardSelectionFallback.swift */,
@@ -308,6 +403,10 @@
 				B10000000000000000000018 /* SQLiteDictionaryCore.h */,
 				B10000000000000000000050 /* RIPEMD128Adapter.c */,
 				B10000000000000000000051 /* RIPEMD128Adapter.h */,
+				B10000000000000000000074 /* ManagedMDictSource.cpp */,
+				B10000000000000000000075 /* ManagedMDictSource.h */,
+				B10000000000000000000076 /* FDBoundSQLiteReadOnlyVFS.cpp */,
+				B10000000000000000000077 /* FDBoundSQLiteReadOnlyVFS.h */,
 			);
 			name = MDictCore;
 			sourceTree = "<group>";
@@ -335,6 +434,10 @@
 				B1000000000000000000001C /* libxml2.tbd */,
 				B1000000000000000000001E /* ApplicationServices.framework */,
 				B1000000000000000000002D /* Security.framework */,
+				B10000000000000000000090 /* Translation.framework */,
+				B10000000000000000000091 /* SwiftUI.framework */,
+				B10000000000000000000092 /* CryptoKit.framework */,
+				B1000000000000000000009C /* libarchive.tbd */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -357,7 +460,7 @@
 				C10000000000000000000002 /* Sources */,
 				C10000000000000000000001 /* Frameworks */,
 				C10000000000000000000003 /* Resources */,
-				C10000000000000000000004 /* Audit Release App Bundle */,
+				C10000000000000000000004 /* Audit App Bundle */,
 			);
 			buildRules = (
 			);
@@ -407,13 +510,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000031 /* Assets.xcassets in Resources */,
+				A10000000000000000000084 /* ReleaseLegal in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		C10000000000000000000004 /* Audit Release App Bundle */ = {
+		C10000000000000000000004 /* Audit App Bundle */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
 			buildActionMask = 2147483647;
@@ -423,14 +527,14 @@
 			);
 			inputPaths = (
 			);
-			name = "Audit Release App Bundle";
+			name = "Audit App Bundle";
 			outputFileListPaths = (
 			);
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"$CONFIGURATION\" = \"Release\" ]; then\n  /bin/zsh \"$SRCROOT/../scripts/audit-app-bundle.sh\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nfi\n";
+			shellScript = "if [ \"$CONFIGURATION\" = \"Release\" ]; then\n  /bin/zsh \"$SRCROOT/../scripts/audit-app-bundle.sh\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nelse\n  /bin/zsh \"$SRCROOT/../scripts/audit-app-icon.sh\" \"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -471,6 +575,20 @@
 				A1000000000000000000002E /* AIProviderSettingsSession.swift in Sources */,
 				A1000000000000000000002F /* AIProviderCredentialSession.swift in Sources */,
 				A10000000000000000000030 /* InlineLookupModels.swift in Sources */,
+				A10000000000000000000093 /* OfflineTranslationModels.swift in Sources */,
+				A10000000000000000000094 /* SystemTranslationHost.swift in Sources */,
+				A10000000000000000000095 /* LongTextAnalysis.swift in Sources */,
+				A10000000000000000000096 /* ReverseLookup.swift in Sources */,
+				A10000000000000000000097 /* ReverseIndexCoordinator.swift in Sources */,
+				A10000000000000000000098 /* SelectionButtonPlacement.swift in Sources */,
+				A1000000000000000000009D /* ReverseIndexInventory.swift in Sources */,
+				A1000000000000000000009E /* DictionaryPanelFooterLayout.swift in Sources */,
+				A1000000000000000000009F /* ManualEvidenceRecorder.swift in Sources */,
+				A20000000000000000000001 /* HelpAndAboutWindowController.swift in Sources */,
+				A10000000000000000000099 /* BundledOpenResourceCatalog.swift in Sources */,
+				A1000000000000000000009A /* FreeDictStarDictResource.swift in Sources */,
+				A1000000000000000000009B /* AuditedOpenResourceInstaller.swift in Sources */,
+				A30000000000000000000001 /* OfficialOpenResourceDiscovery.swift in Sources */,
 				A10000000000000000000032 /* DictionaryCatalog.swift in Sources */,
 				A10000000000000000000033 /* DictionaryCatalogStore.swift in Sources */,
 				A10000000000000000000034 /* LegacyDictionaryConfigAdapter.swift in Sources */,
@@ -485,6 +603,7 @@
 				A1000000000000000000003D /* GenericMDictEntryFormatter.mm in Sources */,
 				A1000000000000000000003E /* ManagedDictionaryQueryModels.swift in Sources */,
 				A1000000000000000000003F /* ManagedDictionaryQueryRuntime.swift in Sources */,
+				A10000000000000000000077 /* PublishedIndexIdentityAdapter.swift in Sources */,
 				A10000000000000000000040 /* GenericManagedDictionaryPresenter.swift in Sources */,
 				A10000000000000000000041 /* DictionaryCatalogOrdering.swift in Sources */,
 				A10000000000000000000042 /* ManagedDictionaryRemoval.swift in Sources */,
@@ -496,6 +615,7 @@
 				A10000000000000000000062 /* StrictResourceManifestDecoder.swift in Sources */,
 				A10000000000000000000063 /* ResourceManifestValidator.swift in Sources */,
 				A10000000000000000000064 /* ResourceManifestSignature.swift in Sources */,
+				A10000000000000000000071 /* ResourceManifestKeyID.swift in Sources */,
 				A10000000000000000000065 /* ResourceManifestVerifier.swift in Sources */,
 				A10000000000000000000066 /* VerifiedManifestStateStore.swift in Sources */,
 				A10000000000000000000067 /* ResourceNetworkModels.swift in Sources */,
@@ -505,13 +625,23 @@
 				A1000000000000000000006B /* ResourcePayloadDownloadModels.swift in Sources */,
 				A1000000000000000000006C /* ResourcePayloadStagingStore.swift in Sources */,
 				A1000000000000000000006D /* ResourcePayloadFileDownloader.swift in Sources */,
+				A1000000000000000000006F /* OpenResourceInstallationModels.swift in Sources */,
+				A10000000000000000000070 /* OpenResourceInstallationCoordinator.swift in Sources */,
+				A10000000000000000000072 /* OwnedDictionaryLifecycle.swift in Sources */,
+				A10000000000000000000073 /* ManagedDictionaryLifecycleCoordinator.swift in Sources */,
 				A1000000000000000000006E /* ResourcePayloadDownloadCoordinator.swift in Sources */,
+				A10000000000000000000080 /* ResourceCenterProductionConfiguration.swift in Sources */,
+				A10000000000000000000081 /* ResourceCenterModels.swift in Sources */,
+				A10000000000000000000082 /* ResourceCenterController.swift in Sources */,
+				A10000000000000000000083 /* ResourceCenterViewController.swift in Sources */,
 				A10000000000000000000008 /* SQLiteDictionaryCore.cpp in Sources */,
 				A10000000000000000000009 /* mdict.cc in Sources */,
 				A1000000000000000000000A /* binutils.cc in Sources */,
 				A1000000000000000000000B /* adler32.cc in Sources */,
 				A1000000000000000000000C /* rmd128.c in Sources */,
 				A10000000000000000000046 /* RIPEMD128Adapter.c in Sources */,
+				A10000000000000000000074 /* ManagedMDictSource.cpp in Sources */,
+				A10000000000000000000076 /* FDBoundSQLiteReadOnlyVFS.cpp in Sources */,
 				A1000000000000000000000D /* miniz.c in Sources */,
 				A1000000000000000000000E /* miniz_tinfl.c in Sources */,
 				A1000000000000000000000F /* miniz_tdef.c in Sources */,
@@ -601,11 +731,12 @@
 				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_ENTITLEMENTS = LocalDictionaryRelease.entitlements;
 				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
 					"$(SRCROOT)/../MDictCore",

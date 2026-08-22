@@ -38,16 +38,13 @@ enum DictionaryManagerPresentation {
     static let minimumWindowHeight: CGFloat = 400
 
     static let columnWidths: [String: CGFloat] = [
-        "name": 230,
-        "source": 112,
-        "level": 78,
-        "position": 58,
-        "enabled": 60,
-        "state": 128,
-        "entries": 96,
-        "indexSize": 92,
-        "indexedAt": 160,
-        "action": 150
+        "name": 155,
+        "source": 76,
+        "level": 55,
+        "enabled": 44,
+        "forwardState": 90,
+        "reverseState": 150,
+        "action": 180
     ]
 
     static var totalColumnWidth: CGFloat {
@@ -65,9 +62,9 @@ enum DictionaryManagerPresentation {
 
     static func queryLevelText(_ level: DictionaryQueryLevel) -> String {
         switch level {
-        case .preferred: return "首选"
-        case .normal: return "普通"
-        case .fallback: return "后备"
+        case .preferred: return "默认词典"
+        case .normal: return "本地导入"
+        case .fallback: return "开放资源"
         }
     }
 
@@ -75,6 +72,7 @@ enum DictionaryManagerPresentation {
                            activity: Activity = .idle) -> String {
         if activity == .removing { return "正在移除" }
         if activity == .cancellingIndex { return "正在取消" }
+        if requiresReinstallation(dictionary) { return "需要重新安装" }
         if !dictionary.enabled { return "已停用" }
         switch dictionary.state {
         case .waitingForImport: return "等待导入"
@@ -92,6 +90,76 @@ enum DictionaryManagerPresentation {
         }
     }
 
+    #if !DICTIONARY_MANAGER_PRESENTATION_STATE_ONLY
+    static func reverseStatusText(_ state: ReverseIndexStoredState?,
+                                  progress: ReverseIndexDictionaryProgress?,
+                                  capability: ReverseIndexCapability = .unknownNeedsProbe) -> String {
+        if let progress {
+            if let percentage = progress.entryPercentage {
+                return "\(progress.stage.displayName) \(percentage)%"
+            }
+            return progress.stage.displayName
+        }
+        if capability != .supported {
+            return capability.displayName
+        }
+        return (state?.stage ?? .notBuilt).displayName
+    }
+
+    static func reverseStatusDetail(_ state: ReverseIndexStoredState?,
+                                    progress: ReverseIndexDictionaryProgress?,
+                                    capability: ReverseIndexCapability = .unknownNeedsProbe) -> String {
+        if let progress {
+            var values = ["当前阶段：\(progress.stage.displayName)"]
+            if (progress.stage == .readingEntries || progress.stage == .writingIndex),
+               let total = progress.totalEntries {
+                values.append("已处理：\(progress.processedEntries)/\(total) 条")
+                values.append("可信进度：\(progress.entryPercentage ?? 0)%")
+            } else if progress.stage == .readingEntries || progress.stage == .writingIndex {
+                values.append("已处理：\(progress.processedEntries) 条（总数未知）")
+            } else if progress.stage == .validating {
+                values.append("正在执行可取消的快速安全验证；此阶段不显示伪造百分比。")
+            }
+            if let reason = progress.failureReason { values.append("失败原因：\(reason)") }
+            let statistics = progress.extractionStatistics
+            if statistics.totalEntries > 0 {
+                values.append("抽取统计：总计 \(statistics.totalEntries)，可用 " +
+                    "\(statistics.usableEntries)，含中文 \(statistics.entriesWithChinese)，" +
+                    "跳过异常 \(statistics.skippedMalformed)，无中文 " +
+                    "\(statistics.skippedNoChinese)")
+            }
+            if progress.isThermallyThrottled { values.append("系统温度较高，已自动降速。") }
+            return values.joined(separator: "\n")
+        }
+        if capability != .supported {
+            var values = [capability.diagnosticDetail]
+            if let state {
+                if let count = state.entryCount {
+                    values.append("反向可查询词条：\(count)")
+                }
+                if let count = state.glossCount {
+                    values.append("可用中文词义：\(count)")
+                }
+                if let date = state.lastValidatedAt {
+                    values.append("最近验证：\(date.formatted(date: .numeric, time: .shortened))")
+                }
+            }
+            return values.joined(separator: "\n")
+        }
+        guard let state else { return "尚未建立中文反向索引。" }
+        var values = ["当前阶段：\(state.stage.displayName)"]
+        if let date = state.builtAt {
+            values.append("最近构建：\(date.formatted(date: .numeric, time: .shortened))")
+        }
+        if let size = state.fileSize {
+            let signedSize = size > UInt64(Int64.max) ? Int64.max : Int64(size)
+            values.append("sidecar 大小：\(ByteCountFormatter.string(fromByteCount: signedSize, countStyle: .file))")
+        }
+        if let reason = state.failureReason { values.append("失败原因：\(reason)") }
+        return values.joined(separator: "\n")
+    }
+    #endif
+
     static func statusDetail(for dictionary: DictionaryDescriptor,
                              activity: Activity = .idle) -> String {
         if activity == .removing {
@@ -99,6 +167,9 @@ enum DictionaryManagerPresentation {
         }
         if activity == .cancellingIndex {
             return "正在安全停止，当前步骤完成后取消。取消后不会发布半成品索引。"
+        }
+        if requiresReinstallation(dictionary) {
+            return "该开放资源的安装记录与可查询文件不再一致，已自动停止参与查询。可以在资源中心重新安装，或直接从列表移除。"
         }
         if !dictionary.enabled || dictionary.state == .disabled {
             return "该词典已停用，不参与本地查询；托管文件和已有索引仍会保留。"
@@ -129,9 +200,16 @@ enum DictionaryManagerPresentation {
         }
     }
 
+    static func requiresReinstallation(_ dictionary: DictionaryDescriptor) -> Bool {
+        dictionary.storageOwnership == .appManagedOpenResource &&
+            [.missingResources, .unavailable, .invalid, .corrupt, .staleIndex]
+                .contains(dictionary.state)
+    }
+
     static func indexAction(for dictionary: DictionaryDescriptor,
                             activity: Activity = .idle) -> IndexActionPresentation? {
-        guard dictionary.sourceKind == .managedLocal else { return nil }
+        guard dictionary.sourceKind == .managedLocal ||
+              dictionary.sourceKind == .openResource else { return nil }
         if activity == .removing {
             return IndexActionPresentation(
                 action: .none,

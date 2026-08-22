@@ -1,0 +1,59 @@
+/*
+ * Copyright (c) 2025-Present
+ * All rights reserved.
+ *
+ * This code is licensed under the BSD 3-Clause License.
+ * See the LICENSE file for details.
+ *
+ * Test-only resource observations for LocalDictionary's bounded MDict parser.
+ * The production App is compiled without MDICT_RESOURCE_TEST_OBSERVER, so this
+ * header contributes no declarations, calls, state, or exported symbols there.
+ */
+
+#pragma once
+
+#ifdef MDICT_RESOURCE_TEST_OBSERVER
+
+#include <cstdint>
+
+namespace mdict {
+
+struct ResourceTestObserverSnapshot {
+  uint64_t inputBufferAllocationCount;
+  uint64_t keyBlockInfoInputBufferAllocationCount;
+  uint64_t recordBlockInfoInputBufferAllocationCount;
+  uint64_t outputBufferAllocationCount;
+  uint64_t uncompressCallCount;
+  uint64_t keyItemLiveCount;
+  uint64_t recordRangeReserveCount;
+  uint64_t recordAppendCount;
+};
+
+enum class ResourceTestAllocationFailPoint : uint32_t {
+  none = 0,
+  recordMetadataItem = 1,
+  recordMetadataCommit = 2,
+  recordType0Output = 3,
+  recordTrimCopy = 4,
+};
+
+void resetResourceTestObserver() noexcept;
+ResourceTestObserverSnapshot resourceTestObserverSnapshot() noexcept;
+
+void observeInputBufferAllocation() noexcept;
+void observeKeyBlockInfoInputBufferAllocation() noexcept;
+void observeRecordBlockInfoInputBufferAllocation() noexcept;
+void observeOutputBufferAllocation() noexcept;
+void observeUncompressCall() noexcept;
+void observeKeyItemCreated() noexcept;
+void observeKeyItemDestroyed() noexcept;
+void observeRecordRangeReserve() noexcept;
+void observeRecordAppend() noexcept;
+void setResourceTestAllocationFailPoint(
+    ResourceTestAllocationFailPoint point) noexcept;
+bool consumeResourceTestAllocationFailPoint(
+    ResourceTestAllocationFailPoint point) noexcept;
+
+}  // namespace mdict
+
+#endif  // MDICT_RESOURCE_TEST_OBSERVER

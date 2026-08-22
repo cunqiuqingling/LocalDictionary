@@ -25,6 +25,7 @@ xcrun --sdk macosx swiftc \
   -strict-concurrency=complete \
   -warnings-as-errors \
   -module-cache-path "$WORK/module-cache" \
+  "$ROOT/App/QueryIntentClassifier.swift" \
   "$ROOT/App/ObsidianNoteStore.swift" \
   "$ROOT/Tests/PublicObsidianNoteStoreSmoke.swift" \
   -o "$WORK/PublicObsidianNoteStoreSmoke"

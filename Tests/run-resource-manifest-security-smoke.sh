@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/resource-manifest-security-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-resource-manifest-security.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then
@@ -25,6 +26,7 @@ xcrun --sdk macosx swiftc \
   "$ROOT/App/StrictJSON.swift" \
   "$ROOT/App/StrictResourceManifestDecoder.swift" \
   "$ROOT/App/ResourceManifestValidator.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/ResourceManifestSignature.swift" \
   "$ROOT/App/ResourceManifestVerifier.swift" \
   "$ROOT/App/VerifiedManifestStateStore.swift" \

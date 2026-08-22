@@ -1,0 +1,10 @@
+{
+  "expiresAt": "2030-01-01T00:00:00Z",
+  "issuedAt": "2029-01-01T00:00:00Z",
+  "keyID": "deployment-key-id",
+  "manifestVersion": 1,
+  "minimumAppVersion": "0.1",
+  "resources": [],
+  "revokedResources": [],
+  "schemaVersion": 1
+}

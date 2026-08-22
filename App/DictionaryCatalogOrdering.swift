@@ -7,7 +7,7 @@ enum DictionaryCatalogOrderingError: LocalizedError, Equatable, Sendable {
     var errorDescription: String? {
         switch self {
         case .dictionaryNotFound: return "找不到要调整的词典。"
-        case .crossLevelMove: return "只能在相同查询级别内调整顺序。"
+        case .crossLevelMove: return "当前词典顺序无法调整。"
         }
     }
 }
@@ -43,7 +43,7 @@ struct DictionaryCatalogOrdering: Sendable {
                        direction: DictionaryMoveDirection,
                        in catalog: DictionaryCatalog,
                        now: Date = Date()) throws -> DictionaryCatalog {
-        var group = groupContaining(dictionaryID, in: catalog)
+        var group = catalog.activeSortedDictionaries
         guard let index = group.firstIndex(where: { $0.dictionaryID == dictionaryID }) else {
             throw DictionaryCatalogOrderingError.dictionaryNotFound
         }
@@ -64,7 +64,7 @@ struct DictionaryCatalogOrdering: Sendable {
                        toDisplayedRow proposedRow: Int,
                        in catalog: DictionaryCatalog,
                        now: Date = Date()) throws -> DictionaryCatalog {
-        let displayed = catalog.sortedDictionaries
+        let displayed = catalog.activeSortedDictionaries
         guard let sourceIndex = displayed.firstIndex(where: {
             $0.dictionaryID == dictionaryID
         }) else {
@@ -76,45 +76,29 @@ struct DictionaryCatalogOrdering: Sendable {
         var insertion = min(max(proposedRow, 0), displayed.count)
         if insertion > sourceIndex { insertion -= 1 }
 
-        let matchingIndices = remaining.indices.filter {
-            remaining[$0].queryLevel == source.queryLevel
-        }
-        guard let first = matchingIndices.first, let last = matchingIndices.last else {
-            return catalog
-        }
-        guard insertion >= first, insertion <= last + 1 else {
-            throw DictionaryCatalogOrderingError.crossLevelMove
-        }
         remaining.insert(source, at: insertion)
-        let reorderedGroup = remaining.filter { $0.queryLevel == source.queryLevel }
-        return applying(group: reorderedGroup, to: catalog, now: now)
+        return applying(group: remaining, to: catalog, now: now)
     }
 
     static func restoringDefaults(in catalog: DictionaryCatalog,
                                   now: Date = Date()) -> DictionaryCatalog {
-        var updated = catalog
-        for level in DictionaryQueryLevel.allCases {
-            let group = catalog.dictionaries.filter { $0.queryLevel == level }.sorted {
-                defaultOrder($0, before: $1, level: level)
-            }
-            updated = applying(group: group, to: updated, now: now)
-        }
-        return updated
+        let ordered = catalog.dictionaries
+            .filter { !$0.isRetiredLegacyRegistration }
+            .sorted(by: defaultOrder)
+        return applying(group: ordered, to: catalog, now: now)
     }
 
     static func removingAndCompacting(_ dictionaryID: String,
                                       from catalog: DictionaryCatalog,
                                       now: Date = Date()) throws -> DictionaryCatalog {
-        guard let removed = catalog.dictionaries.first(where: {
+        guard catalog.dictionaries.contains(where: {
             $0.dictionaryID == dictionaryID
         }) else {
             throw DictionaryCatalogOrderingError.dictionaryNotFound
         }
         var updated = catalog
         updated.dictionaries.removeAll { $0.dictionaryID == dictionaryID }
-        let group = updated.sortedDictionaries.filter {
-            $0.queryLevel == removed.queryLevel
-        }
+        let group = updated.activeSortedDictionaries
         updated = applying(group: group, to: updated, now: now)
         if updated != catalog { updated.updatedAt = now }
         return updated
@@ -123,16 +107,26 @@ struct DictionaryCatalogOrdering: Sendable {
     private static func groupContaining(_ dictionaryID: String,
                                         in catalog: DictionaryCatalog)
         -> [DictionaryDescriptor] {
-        guard let level = catalog.dictionaries.first(where: {
+        guard catalog.dictionaries.contains(where: {
             $0.dictionaryID == dictionaryID
-        })?.queryLevel else { return [] }
-        return catalog.sortedDictionaries.filter { $0.queryLevel == level }
+        }) else { return [] }
+        return catalog.activeSortedDictionaries
     }
 
     private static func applying(group: [DictionaryDescriptor],
                                  to catalog: DictionaryCatalog,
                                  now: Date) -> DictionaryCatalog {
-        var positions = Dictionary(uniqueKeysWithValues: group.enumerated().map {
+        let retired = catalog.dictionaries
+            .filter(\.isRetiredLegacyRegistration)
+            .sorted {
+                if $0.retiredLegacyRegistrationAt != $1.retiredLegacyRegistrationAt {
+                    return ($0.retiredLegacyRegistrationAt ?? .distantPast) <
+                        ($1.retiredLegacyRegistrationAt ?? .distantPast)
+                }
+                return $0.dictionaryID < $1.dictionaryID
+            }
+        let all = group + retired
+        var positions = Dictionary(uniqueKeysWithValues: all.enumerated().map {
             ($0.element.dictionaryID, Int64($0.offset + 1))
         })
         var updated = catalog
@@ -150,20 +144,28 @@ struct DictionaryCatalogOrdering: Sendable {
     }
 
     private static func defaultOrder(_ lhs: DictionaryDescriptor,
-                                     before rhs: DictionaryDescriptor,
-                                     level: DictionaryQueryLevel) -> Bool {
-        if level == .preferred {
-            let lhsLegacy = legacyDefaultOrder.firstIndex(of: lhs.dictionaryID)
-            let rhsLegacy = legacyDefaultOrder.firstIndex(of: rhs.dictionaryID)
-            switch (lhsLegacy, rhsLegacy) {
-            case let (left?, right?): return left < right
-            case (_?, nil): return true
-            case (nil, _?): return false
-            case (nil, nil): break
-            }
+                                     before rhs: DictionaryDescriptor) -> Bool {
+        let lhsLegacy = legacyDefaultOrder.firstIndex(of: lhs.dictionaryID)
+        let rhsLegacy = legacyDefaultOrder.firstIndex(of: rhs.dictionaryID)
+        switch (lhsLegacy, rhsLegacy) {
+        case let (left?, right?): return left < right
+        case (_?, nil): return true
+        case (nil, _?): return false
+        case (nil, nil): break
         }
+        let lhsSource = defaultSourceRank(lhs.sourceKind)
+        let rhsSource = defaultSourceRank(rhs.sourceKind)
+        if lhsSource != rhsSource { return lhsSource < rhsSource }
         if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
         return lhs.dictionaryID < rhs.dictionaryID
+    }
+
+    private static func defaultSourceRank(_ source: DictionarySourceKind) -> Int {
+        switch source {
+        case .legacyReference: return 0
+        case .managedLocal, .externalReference: return 1
+        case .openResource: return 2
+        }
     }
 }
 
@@ -172,13 +174,15 @@ final class DictionaryCatalogOrderCoordinator {
     typealias SaveCatalog = (DictionaryCatalog) throws -> Void
 
     private(set) var catalog: DictionaryCatalog
-    private let saveCatalog: SaveCatalog
+    private let saveCatalog: SaveCatalog?
+    private let catalogStore: DictionaryCatalogStore?
 
     init(catalog: DictionaryCatalog,
          catalogStore: DictionaryCatalogStore,
          saveCatalog: SaveCatalog? = nil) {
         self.catalog = catalog
-        self.saveCatalog = saveCatalog ?? { try catalogStore.save($0) }
+        self.catalogStore = saveCatalog == nil ? catalogStore : nil
+        self.saveCatalog = saveCatalog
     }
 
     func synchronize(catalog: DictionaryCatalog) {
@@ -188,6 +192,28 @@ final class DictionaryCatalogOrderCoordinator {
     @discardableResult
     func save(_ proposed: DictionaryCatalog) throws -> DictionaryCatalog {
         guard proposed != catalog else { return catalog }
+        if let catalogStore {
+            let requestedPositions = Dictionary(uniqueKeysWithValues: proposed.dictionaries.map {
+                ($0.dictionaryID, $0.sortPosition)
+            })
+            guard Set(requestedPositions.keys) == Set(catalog.dictionaries.map(\.dictionaryID)) else {
+                throw DictionaryCatalogOrderingError.dictionaryNotFound
+            }
+            let mutation = try catalogStore.mutate { latest, _ in
+                guard Set(requestedPositions.keys) == Set(latest.dictionaries.map(\.dictionaryID)) else {
+                    throw DictionaryCatalogOrderingError.dictionaryNotFound
+                }
+                for index in latest.dictionaries.indices {
+                    guard let position = requestedPositions[latest.dictionaries[index].dictionaryID] else { continue }
+                    latest.dictionaries[index].sortPosition = position
+                    latest.dictionaries[index].updatedAt = proposed.updatedAt
+                }
+                latest.updatedAt = proposed.updatedAt
+            }
+            catalog = mutation.catalog
+            return mutation.catalog
+        }
+        guard let saveCatalog else { throw DictionaryCatalogOrderingError.dictionaryNotFound }
         try saveCatalog(proposed)
         catalog = proposed
         return proposed

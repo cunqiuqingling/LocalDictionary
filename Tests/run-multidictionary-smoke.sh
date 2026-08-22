@@ -41,6 +41,7 @@ done
     -I"$UPSTREAM/src" -I"$UPSTREAM/src/include" \
     -I"$ROOT/ThirdParty/vendor" \
     -I"$SDKROOT/usr/include/libxml2" \
+    "$ROOT/MDictCore/FDBoundSQLiteReadOnlyVFS.cpp" \
     "$ROOT/MDictCore/SQLiteDictionaryCore.cpp" \
     "$ROOT/App/DictionaryCoreBridge.mm" \
     "$ROOT/App/DictionarySemanticModel.mm" \

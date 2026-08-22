@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-BUILD="$ROOT/.build/dictionary-catalog-smoke"
+BUILD="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-catalog.XXXXXX")"
+trap '/bin/rm -rf "$BUILD"' EXIT
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   if [[ -x "/Applications/Xcode.app/Contents/Developer/usr/bin/swiftc" ]]; then
     export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
@@ -19,6 +20,7 @@ xcrun --sdk macosx swiftc \
   -module-cache-path "$BUILD/module-cache" \
   "$ROOT/App/AppConfig.swift" \
   "$ROOT/App/DictionaryCatalog.swift" \
+  "$ROOT/App/ResourceManifestKeyID.swift" \
   "$ROOT/App/DictionaryCatalogStore.swift" \
   "$ROOT/App/LegacyDictionaryConfigAdapter.swift" \
   "$ROOT/Tests/DictionaryCatalogSmoke.swift" \

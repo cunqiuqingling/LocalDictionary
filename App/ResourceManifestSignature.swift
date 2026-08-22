@@ -93,14 +93,7 @@ struct ResourceManifestSignatureEnvelope: Equatable, Sendable {
     }
 
     static func isValidKeyID(_ value: String) -> Bool {
-        let bytes = Array(value.utf8)
-        guard (1...maximumKeyIDLength).contains(bytes.count), bytes.count == value.count else {
-            return false
-        }
-        return bytes.allSatisfy {
-            ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) ||
-                ($0 >= 48 && $0 <= 57) || $0 == 46 || $0 == 95 || $0 == 45
-        }
+        ResourceManifestKeyID.isValid(value)
     }
 
     private static func readUInt16(_ bytes: [UInt8], at offset: Int) -> UInt16 {
@@ -126,8 +119,8 @@ struct TrustedManifestKey: Equatable, Sendable {
 }
 
 struct TrustedManifestKeyStore: Equatable, Sendable {
-    /// D1b-1 intentionally ships with no production trust root. A later reviewed
-    /// App version must inject production public keys explicitly.
+    /// Compatibility constant for security tests. Product composition uses the single
+    /// `ResourceCenterProductionConfiguration` injection point.
     static let productionDefault = TrustedManifestKeyStore(keysByID: [:])
 
     private let keysByID: [String: TrustedManifestKey]

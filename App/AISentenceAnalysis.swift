@@ -1,6 +1,47 @@
 import Foundation
 
-let aiSentencePromptVersion = 1
+let aiSentencePromptVersion = 6
+let aiTextTranslationPromptVersion = 5
+
+struct AITranslationCacheIdentity: Equatable, Hashable, Sendable {
+    static let currentSchemaVersion = 6
+
+    let nativeLanguage: LanguageIdentifier
+    let learningLanguage: LanguageIdentifier
+    let explanationLanguage: LanguageIdentifier
+    let queryRelation: QueryLanguageRelation
+    let dominantLanguage: LanguageIdentifier?
+    let translationTargetLanguage: LanguageIdentifier
+    let studyLanguage: LanguageIdentifier
+    let promptVersion: Int
+    let cacheSchemaVersion: Int
+
+    init(context: LanguageContext, targetLanguage: LanguageIdentifier) {
+        nativeLanguage = context.nativeLanguage
+        learningLanguage = context.learningLanguage
+        explanationLanguage = context.explanationLanguage
+        queryRelation = context.queryRelation
+        dominantLanguage = context.dominantLanguage
+        translationTargetLanguage = targetLanguage
+        studyLanguage = context.studyTextLanguage
+        promptVersion = aiTextTranslationPromptVersion
+        cacheSchemaVersion = Self.currentSchemaVersion
+    }
+
+    var cacheComponents: [String] {
+        [
+            nativeLanguage.rawValue,
+            learningLanguage.rawValue,
+            explanationLanguage.rawValue,
+            queryRelation.rawValue,
+            dominantLanguage?.rawValue ?? "undetermined",
+            translationTargetLanguage.rawValue,
+            studyLanguage.rawValue,
+            String(promptVersion),
+            String(cacheSchemaVersion)
+        ]
+    }
+}
 
 enum AIExplanationMode: String, Codable, Sendable {
     case word
@@ -78,6 +119,22 @@ struct AISentenceGrammarPoint: Codable, Equatable, Sendable {
         case grammarName = "grammar_name"
         case explanationZH = "explanation_zh"
     }
+
+    init(fragment: String = "", grammarName: String = "", explanationZH: String = "",
+         pattern: String = "") {
+        self.fragment = fragment
+        self.grammarName = grammarName
+        self.explanationZH = explanationZH
+        self.pattern = pattern
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        fragment = try values.decodeIfPresent(String.self, forKey: .fragment) ?? ""
+        grammarName = try values.decodeIfPresent(String.self, forKey: .grammarName) ?? ""
+        explanationZH = try values.decodeIfPresent(String.self, forKey: .explanationZH) ?? ""
+        pattern = try values.decodeIfPresent(String.self, forKey: .pattern) ?? ""
+    }
 }
 
 struct AISentenceCollocation: Codable, Equatable, Sendable {
@@ -93,6 +150,24 @@ struct AISentenceCollocation: Codable, Equatable, Sendable {
         case exampleEN = "example_en"
         case exampleZH = "example_zh"
     }
+
+    init(expression: String = "", meaningZH: String = "", pattern: String = "",
+         exampleEN: String = "", exampleZH: String = "") {
+        self.expression = expression
+        self.meaningZH = meaningZH
+        self.pattern = pattern
+        self.exampleEN = exampleEN
+        self.exampleZH = exampleZH
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        expression = try values.decodeIfPresent(String.self, forKey: .expression) ?? ""
+        meaningZH = try values.decodeIfPresent(String.self, forKey: .meaningZH) ?? ""
+        pattern = try values.decodeIfPresent(String.self, forKey: .pattern) ?? ""
+        exampleEN = try values.decodeIfPresent(String.self, forKey: .exampleEN) ?? ""
+        exampleZH = try values.decodeIfPresent(String.self, forKey: .exampleZH) ?? ""
+    }
 }
 
 struct AISentenceDifficultExpression: Codable, Equatable, Sendable {
@@ -104,6 +179,19 @@ struct AISentenceDifficultExpression: Codable, Equatable, Sendable {
         case expression
         case meaningZH = "meaning_zh"
         case usageZH = "usage_zh"
+    }
+
+    init(expression: String = "", meaningZH: String = "", usageZH: String = "") {
+        self.expression = expression
+        self.meaningZH = meaningZH
+        self.usageZH = usageZH
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        expression = try values.decodeIfPresent(String.self, forKey: .expression) ?? ""
+        meaningZH = try values.decodeIfPresent(String.self, forKey: .meaningZH) ?? ""
+        usageZH = try values.decodeIfPresent(String.self, forKey: .usageZH) ?? ""
     }
 }
 
@@ -119,6 +207,8 @@ struct AISentenceAnalysis: Codable, Equatable, Sendable {
     var difficultExpressions: [AISentenceDifficultExpression]
     var paraphraseEN: String
     var learningNoteZH: String
+    var rawFallbackText: String?
+    var responseParseMode: AIResponseParseMode
 
     enum CodingKeys: String, CodingKey {
         case mode, clauses, collocations
@@ -130,6 +220,8 @@ struct AISentenceAnalysis: Codable, Equatable, Sendable {
         case difficultExpressions = "difficult_expressions"
         case paraphraseEN = "paraphrase_en"
         case learningNoteZH = "learning_note_zh"
+        case rawFallbackText = "raw_fallback_text"
+        case responseParseMode = "response_parse_mode"
     }
 
     init(mode: String = "sentence_analysis", sourceText: String, translationZH: String,
@@ -137,7 +229,9 @@ struct AISentenceAnalysis: Codable, Equatable, Sendable {
          clauses: [AISentenceClause] = [], grammarPoints: [AISentenceGrammarPoint] = [],
          collocations: [AISentenceCollocation] = [],
          difficultExpressions: [AISentenceDifficultExpression] = [],
-         paraphraseEN: String = "", learningNoteZH: String = "") {
+         paraphraseEN: String = "", learningNoteZH: String = "",
+         rawFallbackText: String? = nil,
+         responseParseMode: AIResponseParseMode = .strictJSON) {
         self.mode = mode
         self.sourceText = sourceText
         self.translationZH = translationZH
@@ -149,6 +243,35 @@ struct AISentenceAnalysis: Codable, Equatable, Sendable {
         self.difficultExpressions = difficultExpressions
         self.paraphraseEN = paraphraseEN
         self.learningNoteZH = learningNoteZH
+        self.rawFallbackText = rawFallbackText
+        self.responseParseMode = responseParseMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try values.decodeIfPresent(String.self, forKey: .mode) ?? "sentence_analysis"
+        sourceText = try values.decodeIfPresent(String.self, forKey: .sourceText) ?? ""
+        translationZH = try values.decodeIfPresent(String.self, forKey: .translationZH) ?? ""
+        sentenceType = try values.decodeIfPresent(String.self, forKey: .sentenceType) ?? ""
+        coreStructure = try values.decodeIfPresent(
+            AISentenceCoreStructure.self, forKey: .coreStructure
+        ) ?? .init()
+        clauses = try values.decodeIfPresent([AISentenceClause].self, forKey: .clauses) ?? []
+        grammarPoints = try values.decodeIfPresent(
+            [AISentenceGrammarPoint].self, forKey: .grammarPoints
+        ) ?? []
+        collocations = try values.decodeIfPresent(
+            [AISentenceCollocation].self, forKey: .collocations
+        ) ?? []
+        difficultExpressions = try values.decodeIfPresent(
+            [AISentenceDifficultExpression].self, forKey: .difficultExpressions
+        ) ?? []
+        paraphraseEN = try values.decodeIfPresent(String.self, forKey: .paraphraseEN) ?? ""
+        learningNoteZH = try values.decodeIfPresent(String.self, forKey: .learningNoteZH) ?? ""
+        rawFallbackText = try values.decodeIfPresent(String.self, forKey: .rawFallbackText)
+        responseParseMode = try values.decodeIfPresent(
+            AIResponseParseMode.self, forKey: .responseParseMode
+        ) ?? .strictJSON
     }
 
     func validated(expectedSourceText: String) throws -> AISentenceAnalysis {
@@ -160,11 +283,15 @@ struct AISentenceAnalysis: Codable, Equatable, Sendable {
               expected.count <= SentenceTextNormalizer.maximumCharacters else {
             throw AIClientError.invalidRequest()
         }
-        guard SentenceTextNormalizer.normalize(sourceText) == expected else {
+        let returnedSource = SentenceTextNormalizer.normalize(sourceText)
+        guard returnedSource.isEmpty || returnedSource == expected else {
             throw AIClientError.schemaInvalid(field: "source_text")
         }
         let translation = sentenceClean(translationZH, limit: 1_200)
-        guard !translation.isEmpty else {
+        let fallbackCandidate = rawFallbackText.map(AIProviderResponseTextSanitizer.clean) ?? ""
+        let fallback = AIProviderResponseTextSanitizer.isReadable(fallbackCandidate)
+            ? fallbackCandidate : ""
+        guard !translation.isEmpty || !fallback.isEmpty else {
             throw AIClientError.schemaInvalid(field: "translation_zh")
         }
 
@@ -232,9 +359,93 @@ struct AISentenceAnalysis: Codable, Equatable, Sendable {
             collocations: cleanCollocations,
             difficultExpressions: cleanDifficult,
             paraphraseEN: sentenceClean(paraphraseEN, limit: 1_000),
-            learningNoteZH: sentenceClean(learningNoteZH, limit: 800)
+            learningNoteZH: sentenceClean(learningNoteZH, limit: 800),
+            rawFallbackText: fallback.isEmpty ? nil : fallback,
+            responseParseMode: responseParseMode
         )
     }
+}
+
+struct AITextTranslation: Codable, Equatable, Sendable {
+    var sourceText: String
+    var translation: String
+    var rawFallbackText: String?
+    var responseParseMode: AIResponseParseMode
+
+    enum CodingKeys: String, CodingKey {
+        case sourceText = "source_text"
+        case translation
+        case translationZH = "translation_zh"
+        case rawFallbackText = "raw_fallback_text"
+        case responseParseMode = "response_parse_mode"
+    }
+
+    init(sourceText: String, translation: String, rawFallbackText: String? = nil,
+         responseParseMode: AIResponseParseMode = .strictJSON) {
+        self.sourceText = sourceText
+        self.translation = translation
+        self.rawFallbackText = rawFallbackText
+        self.responseParseMode = responseParseMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        sourceText = try values.decodeIfPresent(String.self, forKey: .sourceText) ?? ""
+        let primary = try values.decodeIfPresent(String.self, forKey: .translation)
+        let chinese = try values.decodeIfPresent(String.self, forKey: .translationZH)
+        translation = primary ?? chinese ?? ""
+        rawFallbackText = try values.decodeIfPresent(String.self, forKey: .rawFallbackText)
+        responseParseMode = try values.decodeIfPresent(
+            AIResponseParseMode.self, forKey: .responseParseMode
+        ) ?? .strictJSON
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(sourceText, forKey: .sourceText)
+        try values.encode(translation, forKey: .translation)
+        try values.encodeIfPresent(rawFallbackText, forKey: .rawFallbackText)
+        try values.encode(responseParseMode, forKey: .responseParseMode)
+    }
+
+    func validated(expectedSourceText: String) throws -> AITextTranslation {
+        let expected = SentenceTextNormalizer.normalize(expectedSourceText)
+        guard !expected.isEmpty,
+              expected.count <= SentenceTextNormalizer.maximumCharacters else {
+            throw AIClientError.invalidRequest()
+        }
+        let returned = SentenceTextNormalizer.normalize(sourceText)
+        guard returned.isEmpty || returned == expected else {
+            throw AIClientError.schemaInvalid(field: "source_text")
+        }
+        let cleanTranslation = String(
+            SentenceTextNormalizer.normalize(translation).prefix(16_000)
+        )
+        let fallbackCandidate = rawFallbackText.map(AIProviderResponseTextSanitizer.clean) ?? ""
+        let fallback = AIProviderResponseTextSanitizer.isReadable(fallbackCandidate)
+            ? fallbackCandidate : ""
+        guard !cleanTranslation.isEmpty || !fallback.isEmpty else {
+            throw AIClientError.schemaInvalid(field: "translation")
+        }
+        return AITextTranslation(
+            sourceText: expected,
+            translation: cleanTranslation,
+            rawFallbackText: fallback.isEmpty ? nil : fallback,
+            responseParseMode: responseParseMode
+        )
+    }
+}
+
+struct AITextTranslationPresentation: Sendable {
+    let result: AITextTranslation
+    let providerDisplayName: String
+    let model: String
+    let fromCache: Bool
+    var providerID: UUID? = nil
+    var targetLanguage: LanguageIdentifier? = nil
+    var cacheIdentityHash: String? = nil
+    var promptVersion: Int = aiTextTranslationPromptVersion
+    var cacheSchemaVersion: Int = AITranslationCacheIdentity.currentSchemaVersion
 }
 
 struct AISentenceAnalysisPresentation: Sendable {

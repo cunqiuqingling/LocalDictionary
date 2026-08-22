@@ -27,6 +27,7 @@ xcrun --sdk macosx swiftc \
     -module-cache-path "$WORK/module-cache" \
     "$ROOT/App/AppConfig.swift" \
     "$ROOT/App/DictionaryCatalog.swift" \
+    "$ROOT/App/ResourceManifestKeyID.swift" \
     "$ROOT/App/LegacyDictionaryConfigAdapter.swift" \
     "$ROOT/Tests/LocalConfigurationIsolationSmoke.swift" \
     -lsqlite3 \

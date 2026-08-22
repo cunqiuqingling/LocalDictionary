@@ -8,11 +8,21 @@ Copyright (C) 2026 liuzhentie (刘震铁, aka "cunqiu")
 
 ## 当前公开状态
 
-首次公开阶段只提供源码，暂不提供官方签名或公证的 `.app`。请使用 Xcode 自行构建。正式二进制发布将在签名、公证、Hardened Runtime 和发布流程完善后另行考虑；不建议从非官方第三方来源下载声称属于本项目的预编译 App。
+首次公开发行支持零费用 `community-unsigned` 模式，同时保留未来可选的 Developer ID、
+Hardened Runtime、公证与 staple 流程。Community canonical asset 为
+`LocalDictionary-<version>-macOS-arm64-unsigned.zip`，没有 Developer ID 签名和 Apple
+公证，Gatekeeper 不保证直接打开。只应从项目官方 GitHub 仓库下载并核对 `SHA256SUMS`；
+首次打开若被阻止，仅使用“系统设置 → 隐私与安全性 → 仍要打开”，不得关闭 Gatekeeper。
+真实 GitHub Release 仍需版本冻结和用户明确授权，本源码状态本身不表示 Release 已创建。
 
 Debug 构建可能包含本机编译路径和开发调试信息，不应对外分发。需要自行分享构建产物时，应使用经过敏感内容审计的 Release 构建；但本项目当前仍不提供官方签名或公证的二进制 App。
 
 Debug builds may contain local build paths and development metadata and must not be redistributed.
+
+发行安全边界、外部输入、安装与验收清单见
+[docs/release-process.md](docs/release-process.md) 与
+[docs/release-checklist.md](docs/release-checklist.md)。当前项目版本仍为 `0.1`
+（build `1`），不会在未获产品确认时自行改成 `1.0`。
 
 ## 主要功能
 
@@ -20,9 +30,14 @@ Debug builds may contain local build paths and development metadata and must not
 - Option-Space 全局查询、手动输入和应用内划词。
 - 用户选择的本地 MDX 导入、独立 SQLite 索引与精确查询。
 - 可选的第三方 AI 单词解释和句子学习分析。
+- 中文词语/短语从本地双语释义反向查询英文 headword。
+- Apple 系统离线中英翻译；缺少语言包时只在用户点击后由系统准备。
+- 长文本先显示基础翻译，再显示最多 15 个重点词汇和逐句基础结构提示。
 - 词条收藏，以及写入用户明确选择的 Obsidian Markdown 笔记。
 
-项目不内置商业词典，不提供商业 MDX 下载，也不把 AI 描述为本地离线模型。
+项目不内置商业词典，不提供商业 MDX 下载，也不把 Apple Translation Framework 描述为
+AI API。当前不包含独立 NMT 模型。详见
+[docs/offline-translation.md](docs/offline-translation.md)。
 
 ## 系统要求
 
@@ -75,13 +90,30 @@ Xcode Scheme 的 Release 构建也会运行 Bundle 敏感内容审计。日常�
 
 仓库不包含五本开发者本地商业词典、商业 MDX/MDD、索引或词典正文。用户必须自行确认所导入词典的合法来源与使用权限。专用 formatter 只是解析和展示代码，不授予任何商业词典内容权利。
 
+开放资源中心位于“词典管理”。它会在打开、刷新以及母语/学习语言变化时读取当前语言组合，
+再从 FreeDict 官方实时目录匹配方向相符的双语资源；中英组合还会提供 CC-CEDICT 项目当前
+编辑版。Princeton WordNet 和 GNU GCIDE 只在 English 相关组合中作为英英补充。资源正文
+只有在用户点击安装后才下载，并由对应 typed converter 在本机生成独立内部 SQLite。
+FreeDict 校验官方目录给出的 SHA-512；没有上游摘要的当前导出只在下载后记录本机 SHA-256，
+用于确认已安装文件和重启凭据一致，不把版本、字节数或内容哈希写死在 App。旧固定资源定义
+仅用于兼容既有安装凭据，不参与新的实时推荐。该路径不生成或重新托管 MDX，也不影响手动
+导入或已有词典。使用说明和
+部署所需输入见 [docs/resource-center.md](docs/resource-center.md) 与
+[docs/resource-center-deployment.md](docs/resource-center-deployment.md)。
+
 `managedLocal` 导入会把用户明确选择的 MDX 复制到 `~/Library/Application Support/LocalDictionary/Dictionaries/` 下的 App 托管目录。五本开发者本地 `legacyReference` 只通过本机私有兼容配置使用；该 `local.json` 位于 `~/Library/Application Support/LocalDictionary/LegacyConfig/`，不是普通用户构建要求，也不会进入 App Bundle。项目不提供商业词典下载链接。
 
-LocalDictionary 的 GPL-3.0-only 不覆盖用户导入的词典数据。未来 D1 只考虑经过许可证审核的开放资源；准入规则见 [docs/d1-resource-policy.md](docs/d1-resource-policy.md)。
+LocalDictionary 的 GPL-3.0-only 不覆盖用户导入或主动下载的词典数据。Resource Center
+只允许经过许可证审核且满足精确官方 host、有界下载、typed conversion 与 receipt 边界的
+开放资源。资源许可证与归属会在安装前显示；旧隐藏资源的通知仍保留。资源由用户从各项目
+官方来源主动下载，App 只生成本机内部查询索引。准入规则见
+[docs/d1-resource-policy.md](docs/d1-resource-policy.md)。
 
 ## AI 功能
 
-AI 是可选功能。本地词典查询不需要 AI。用户需要自行配置第三方 Provider；用户主动触发 AI 查询时，当前单词、短语或句子会发送给所选 Provider。
+AI 是可选功能。本地词典、中文反向查询、系统离线翻译和基础结构识别都不需要 AI。用户需要
+自行配置第三方 Provider；只有用户主动点击 AI 查询或逐句深度分析时，相应单词、短语或句子
+才会发送给所选 Provider。
 
 API Key 保存在 macOS Keychain。Provider 名称、URL、模型和开关等非敏感配置保存在本机设置中。项目不内置或分发 API Key，也不保证第三方 Provider 的可用性、价格、政策或隐私行为。详细数据边界见 [docs/privacy.md](docs/privacy.md)。
 

@@ -8,6 +8,9 @@ struct SelectedTextCleanerSmoke {
             ("  conscientious\n\tworker  ", .value("conscientious worker")),
             ("mother-in-law's", .value("mother-in-law's")),
             ("incredulous?!", .value("incredulous")),
+            ("_confounding_", .value("confounding")),
+            ("`framework`", .value("framework")),
+            ("**joyful**", .value("joyful")),
             (String(repeating: "a", count: 101), .tooLong(101)),
             (" \n\t ", .empty)
         ]
@@ -15,6 +18,6 @@ struct SelectedTextCleanerSmoke {
         guard cases.allSatisfy({ SelectedTextCleaner.clean($0.0) == $0.1 }) else {
             exit(1)
         }
-        print("SelectedTextCleaner: 6/6 passed")
+        print("SelectedTextCleaner: \(cases.count)/\(cases.count) passed")
     }
 }

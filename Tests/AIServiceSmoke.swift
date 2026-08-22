@@ -54,7 +54,7 @@ private final class MockURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-private final class StubKeychain: AIKeychainStoring {
+private final class StubKeychain: AIKeychainStoring, @unchecked Sendable {
     var values: [String: String] = [:]
     var failWrites = false
     var failReads = false
@@ -76,7 +76,7 @@ private final class StubKeychain: AIKeychainStoring {
     func listAccounts() async throws -> [String] { Array(values.keys).sorted() }
 }
 
-private final class MemoryDefaults: AIConfigurationPersisting {
+private final class MemoryDefaults: AIConfigurationPersisting, LanguagePreferencesPersisting {
     var values: [String: Any] = [:]
     var rejectWrites = false
 
@@ -97,8 +97,10 @@ private final class MemoryDefaults: AIConfigurationPersisting {
 private final class StubClient: AIProviderClient {
     var calls = 0
     var sentenceCalls = 0
+    var translationCalls = 0
     var result: Result<AIExplanation, Error>
     var sentenceResult: Result<AISentenceAnalysis, Error> = .failure(AIClientError.offline)
+    var translationResult: Result<AITextTranslation, Error> = .failure(AIClientError.offline)
     var resultsByProvider: [UUID: Result<AIExplanation, Error>] = [:]
     var sentenceResultsByProvider: [UUID: Result<AISentenceAnalysis, Error>] = [:]
     var requestedProviderIDs: [UUID] = []
@@ -130,6 +132,13 @@ private final class StubClient: AIProviderClient {
         sentenceInputs.append(sentence)
         sentenceConfigurations.append(configuration)
         return try (sentenceResultsByProvider[configuration.providerID] ?? sentenceResult).get()
+    }
+    func translateText(_ text: String,
+                       configuration: AIProviderConfiguration,
+                       apiKey: String) async throws -> AITextTranslation {
+        translationCalls += 1
+        requestedProviderIDs.append(configuration.providerID)
+        return try translationResult.get()
     }
     func testConnection(configuration: AIProviderConfiguration, apiKey: String) async throws {
         testedProviderIDs.append(configuration.providerID)
@@ -241,6 +250,11 @@ private let sampleSentenceAnalysis = AISentenceAnalysis(
     learningNoteZH: "注意区分统计学显著性与临床意义。"
 )
 
+private let sampleTextTranslation = AITextTranslation(
+    sourceText: sampleSentenceText,
+    translation: "尽管结果具有统计学显著性，但这并不必然代表有临床意义的获益。"
+)
+
 private func envelope(_ explanation: AIExplanation) throws -> Data {
     let content = String(data: try JSONEncoder().encode(explanation), encoding: .utf8)!
     return try JSONSerialization.data(withJSONObject: [
@@ -276,6 +290,10 @@ private struct AIServiceSmoke {
             try await testKeychain()
         }
         try await testClientAndErrors()
+        try testCanonicalResponseFixtures()
+        try await testProviderEnvelopeCompatibility()
+        try await testProviderProductionCompatibilityFixtures()
+        try await testVisibleContentNormalizerAndBoundedRetry()
         try await testConnectionAndProductionRequestShareTransportConfiguration()
         try await testInlineLookupRequestsAndCache()
         try await testInlineLocalLookupAndFormatting()
@@ -285,7 +303,11 @@ private struct AIServiceSmoke {
         try await testProviderSwitchRetryAndScopedCacheClear()
         try await testSingleProviderConnectionSequence()
         try testTolerantWordExplanationSchema()
+        try testEnglishWordChineseDefinitionPriority()
+        try testChineseRecommendedEnglishSchemaAndRendering()
         try testFormatter()
+        try testSafeCompatibilityMarkdownRendering()
+        try await Task { @MainActor in try testLanguageSettingsWindow() }.value
         try testSentenceFormatterAndGenerationGate()
         try testRequestLifecycleAndUserMessages()
         try await testLocalSentenceGlossary()
@@ -300,6 +322,11 @@ private struct AIServiceSmoke {
                    "single word intent")
         try expect(QueryIntentClassifier.classify("machine learning").intent == .phrase,
                    "short phrase intent")
+        try expect(QueryIntentClassifier.classify("Industrial and Physical Pharmacy").intent == .phrase,
+                   "terminology phrase remains a phrase")
+        try expect(QueryIntentClassifier.classify("time, is, she").intent == .sentence &&
+                   QueryIntentClassifier.classify("你说，书，没时间").intent == .sentence,
+                   "punctuation-separated prose reaches the sentence route")
         let sentences = [
             sampleSentenceText,
             "The drug, which was initially developed to treat diabetes, was later found to reduce cardiovascular risk.",
@@ -316,14 +343,44 @@ private struct AIServiceSmoke {
         let normalized = SentenceTextNormalizer.normalize(punctuation)
         try expect(normalized == "“If it doesn't work,” she said, “we'll try again.”",
                    "sentence punctuation and apostrophes preserved")
-        try expect(QueryIntentClassifier.classify(String(repeating: "a", count: 801)).intent == .textTooLong,
-                   "character safety limit")
-        try expect(QueryIntentClassifier.classify("First sentence. Second sentence. Third sentence. Fourth sentence.").intent == .textTooLong,
-                   "sentence count safety limit")
-        try expect(QueryIntentClassifier.classify("First sentence.\n\nSecond paragraph.").intent == .textTooLong,
-                   "multiple paragraphs safety limit")
-        try expect(QueryIntentClassifier.classify("这是一个主要为中文的句子。英文很少").intent == .textTooLong,
-                   "mostly non-English safety limit")
+        try expect(QueryIntentClassifier.classify(
+            String(repeating: "a", count: SentenceTextNormalizer.maximumCharacters + 1)
+        ).intent == .textTooLong, "character safety limit")
+        try expect(QueryIntentClassifier.classify(
+            "First sentence. Second sentence. Third sentence. Fourth sentence."
+        ).intent == .sentence, "multi-sentence local analysis route")
+        try expect(QueryIntentClassifier.classify(
+            "First sentence.\n\nSecond paragraph."
+        ).intent == .sentence, "multiple paragraphs local analysis route")
+        try expect(QueryIntentClassifier.classify(
+            "这是一个主要为中文的句子。英文很少"
+        ).intent == .sentence, "Chinese local analysis route")
+        let pollutedPhrase = QueryIntentClassifier.classify(
+            "multiple__organisms__indirectly_"
+        )
+        try expect(pollutedPhrase.intent == .phrase &&
+                   pollutedPhrase.language == .english &&
+                   pollutedPhrase.normalizedText == "multiple organisms indirectly",
+                   "repeated Markdown/OCR underscores did not become a translatable phrase")
+        let pollutedSentence = QuerySurfaceNormalizer.translationReadyText(
+            "The bees may switch as a way of _coping with_ " +
+                "_the build-up of__minuscule__construction_ errors."
+        )
+        try expect(!pollutedSentence.contains("__") &&
+                   QueryIntentClassifier.classify(pollutedSentence).intent == .sentence,
+                   "polluted sentence was not conservatively repaired")
+        try expect(QuerySurfaceNormalizer.translationReadyText("snake_case") == "snake_case",
+                   "ordinary single-underscore identifier was rewritten")
+
+        var gesture = TripleReturnAITrigger(maximumInterval: 1.5)
+        try expect(gesture.register(query: "framework", at: 1.0) == .firstReturn &&
+                   gesture.register(query: "framework", at: 1.4) == .secondReturn &&
+                   gesture.register(query: "framework", at: 1.8) == .triggerAI,
+                   "three Returns trigger the explicit AI action once")
+        try expect(gesture.register(query: "framework", at: 3.0) == .firstReturn &&
+                   gesture.register(query: "changed", at: 3.2) == .firstReturn &&
+                   gesture.register(query: "changed", at: 5.0) == .firstReturn,
+                   "query edits and a slow Return reset the AI gesture")
     }
 
     private static func testConfigurationAndUserDefaults() throws {
@@ -397,8 +454,8 @@ private struct AIServiceSmoke {
         let manager = AIProviderProfileManager(store: store, keychain: keychain)
         let catalog = try await manager.catalog()
         try expect(catalog.profiles.count == 2 &&
-                   catalog.automaticSentenceAnalysisEnabled,
-                   "legacy configuration migrated into provider catalog")
+                   !catalog.automaticSentenceAnalysisEnabled,
+                   "legacy automatic analysis is migrated to explicit-click only")
         let google = catalog.profiles.first { $0.providerType == .googleGemini }!
         let zhipu = catalog.profiles.first { $0.providerType == .zhipu }!
         try expect(google.providerID == AIProviderConfiguration.googleProviderID &&
@@ -748,6 +805,58 @@ private struct AIServiceSmoke {
         MockURLProtocol.handler = { request in
             let requestData = try requestBody(request)
             let requestText = String(data: requestData, encoding: .utf8) ?? ""
+            try expect(requestText.contains("Input language: Simplified Chinese") &&
+                       requestText.contains("recommended_english_expressions"),
+                       "Chinese production prompt omitted language/schema contract")
+            let chinese = AIExplanation(
+                headword: "下载", recommendedEnglishExpressions: ["download"],
+                partsOfSpeech: [AIExplanationPartOfSpeech(
+                    partOfSpeech: "verb",
+                    senses: [AIExplanationSense(
+                        definitionEN: "To transfer data to a local device.",
+                        definitionZH: "把数据传输到本地设备。"
+                    )]
+                )]
+            )
+            return (200, try envelope(chinese))
+        }
+        let chineseProduction = try await client.explain(
+            query: "下载", domain: "technology",
+            configuration: configuration, apiKey: "dummy-key"
+        )
+        try expect(chineseProduction.recommendedEnglishExpressions == ["download"],
+                   "Chinese production response parser lost top English expression")
+
+        MockURLProtocol.handler = { request in
+            let requestData = try requestBody(request)
+            let requestText = String(data: requestData, encoding: .utf8) ?? ""
+            try expect(requestText.contains("Input language: English") &&
+                       requestText.contains("natural definition_zh") &&
+                       requestText.contains("faithful compositional Chinese meaning"),
+                       "English bilingual prompt did not require a model-selected native meaning")
+            let english = AIExplanation(
+                headword: "This is a more",
+                partsOfSpeech: [AIExplanationPartOfSpeech(
+                    partOfSpeech: "phrase fragment",
+                    senses: [AIExplanationSense(
+                        definitionEN: "An incomplete comparative phrase.",
+                        definitionZH: "这是一个未完成的比较结构，意思取决于后续比较对象。"
+                    )]
+                )]
+            )
+            return (200, try envelope(english))
+        }
+        let englishProduction = try await client.explain(
+            query: "This is a more", domain: "general",
+            configuration: configuration, apiKey: "dummy-key"
+        )
+        try expect(englishProduction.partsOfSpeech.first?.senses.first?.definitionZH
+            .contains("未完成的比较结构") == true,
+                   "English production response lost the native-language counterpart")
+
+        MockURLProtocol.handler = { request in
+            let requestData = try requestBody(request)
+            let requestText = String(data: requestData, encoding: .utf8) ?? ""
             try expect(requestText.contains(sampleSentenceText), "sentence source sent")
             try expect(!requestText.contains("Obsidian") &&
                        !requestText.contains("/Users/") &&
@@ -755,6 +864,13 @@ private struct AIServiceSmoke {
             let body = try JSONSerialization.jsonObject(with: requestData) as! [String: Any]
             try expect(body["max_tokens"] as? Int == 2_600,
                        "sentence response budget")
+            try expect(body["response_format"] == nil &&
+                       body.description.contains(
+                        "Target translation language: Simplified Chinese"
+                       ) && body.description.contains("Learning language: English") &&
+                       body.description.contains("Analysis object: the English source text") &&
+                       body.description.contains("explanations mainly in Simplified Chinese"),
+                       "English sentence analysis direction is explicit without JSON mode")
             return (200, try sentenceEnvelope(sampleSentenceAnalysis))
         }
         let sentenceResult = try await client.analyzeSentence(sampleSentenceText,
@@ -773,8 +889,10 @@ private struct AIServiceSmoke {
         let fencedResult = try await client.analyzeSentence(sampleSentenceText,
                                                             configuration: configuration,
                                                             apiKey: "dummy-key")
-        try expect(fencedResult == sampleSentenceAnalysis,
-                   "outer JSON code fence is safely removed")
+        try expect(fencedResult.sourceText == sampleSentenceAnalysis.sourceText &&
+                   fencedResult.translationZH == sampleSentenceAnalysis.translationZH &&
+                   fencedResult.responseParseMode == .compatibleJSON,
+                   "outer JSON code fence is safely removed and reported as compatible")
 
         MockURLProtocol.handler = { _ in
             let invalid = try JSONSerialization.data(withJSONObject: [
@@ -788,7 +906,8 @@ private struct AIServiceSmoke {
                                                  apiKey: "dummy-key")
             throw SmokeFailure.failed("sentence code fence accepted")
         } catch let error as AIClientError {
-            try expect(error == .schemaInvalid(field: "mode"), "sentence fenced JSON validated")
+            try expect(error == .schemaInvalid(field: "translation_zh"),
+                       "empty sentence object is not treated as readable fallback")
         }
 
         MockURLProtocol.handler = { _ in
@@ -855,18 +974,17 @@ private struct AIServiceSmoke {
                        "Zhipu quota business error classification")
         }
         MockURLProtocol.handler = { _ in
-            let invalid = try JSONSerialization.data(withJSONObject: [
-                "choices": [["message": ["content": "not json"]]]
+            let readable = try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "A prompt is a concise instruction."]]]
             ])
-            return (200, invalid)
+            return (200, readable)
         }
-        do {
-            _ = try await client.explain(query: "prompt", domain: "general",
-                                         configuration: custom, apiKey: "dummy-key")
-            throw SmokeFailure.failed("invalid JSON accepted")
-        } catch let error as AIClientError {
-            try expect(error == .invalidJSON, "invalid JSON mapping")
-        }
+        let readableFallback = try await client.explain(
+            query: "prompt", domain: "general", configuration: custom, apiKey: "dummy-key"
+        )
+        try expect(readableFallback.responseParseMode == .plainTextFallback &&
+                   readableFallback.rawFallbackText?.contains("concise instruction") == true,
+                   "readable non-JSON response is preserved")
         MockURLProtocol.handler = { _ in throw URLError(.timedOut) }
         do {
             _ = try await client.explain(query: "prompt", domain: "general",
@@ -884,6 +1002,438 @@ private struct AIServiceSmoke {
             throw SmokeFailure.failed("oversize response accepted")
         } catch let error as AIClientError {
             try expect(error == .responseTooLarge, "response size limit")
+        }
+    }
+
+    private static func testVisibleContentNormalizerAndBoundedRetry() async throws {
+        func normalized(_ object: Any) throws -> ProviderVisibleContentNormalization {
+            ProviderVisibleContentNormalizer.normalize(
+                try JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed])
+            )
+        }
+        let plain = try normalized("Plain visible text")
+        try expect(plain.content == "Plain visible text" && plain.failureReason == nil,
+                   "plain string normalization")
+        let markdown = try normalized([
+            "choices": [["message": ["content": "**结构分析**\n- visible"]]]
+        ])
+        try expect(markdown.content?.contains("**结构分析**") == true,
+                   "Markdown visible content normalization")
+        let array = try normalized([
+            "choices": [["message": ["content": [
+                ["type": "text", "text": "First visible part"],
+                ["type": "output_text", "text": "Second visible part"]
+            ]]]]
+        ])
+        try expect(array.content?.contains("First visible part") == true &&
+                   array.content?.contains("Second visible part") == true &&
+                   array.metadata.contentArrayItemCount == 2,
+                   "content-array normalization preserves every visible text part")
+        let partial = try normalized(["translation": "自然翻译", "note": "学习提示"])
+        try expect(partial.content?.contains("translation") == true &&
+                   partial.metadata.responseEnvelopeKind == "direct_object",
+                   "partial structured normalization")
+        let compatibleTopLevel = try normalized(["content": "Top-level visible result"])
+        try expect(compatibleTopLevel.content == "Top-level visible result" &&
+                   compatibleTopLevel.metadata.contentType == "top_level_content",
+                   "compatible top-level content envelope")
+        let empty = try normalized([
+            "choices": [["message": ["content": NSNull()], "finish_reason": "stop"]]
+        ])
+        try expect(empty.failureReason == .providerEmptyResponse,
+                   "null content is provider empty")
+        let reasoningOnly = try normalized([
+            "choices": [["message": ["content": "", "reasoning_content": "hidden"],
+                         "finish_reason": "stop"]]
+        ])
+        try expect(reasoningOnly.failureReason == .providerReasoningOnly &&
+                   reasoningOnly.metadata.reasoningFieldPresent &&
+                   reasoningOnly.content == nil,
+                   "reasoning-only is typed and never exposed")
+        let dropped = try normalized([
+            "choices": [["message": ["content": [["type": "image", "image": "x"]]]]]
+        ])
+        try expect(dropped.failureReason == .normalizationDroppedVisibleContent,
+                   "unsupported potential visible content is typed as dropped")
+        let malformed = try normalized(["id": "only-metadata", "model": "mock"])
+        try expect(malformed.failureReason == .malformedProviderEnvelope,
+                   "unknown envelope is typed malformed")
+
+        let client = OpenAICompatibleClient(session: session())
+        let configuration = AIProviderConfiguration(
+            enabled: true, providerType: .openAICompatible,
+            providerDisplayName: "Mock Plain", baseURL: "https://mock.invalid/v1",
+            model: "mock-model", options: AIProviderOptions(usesJSONResponseFormat: false),
+            thinkingEnabled: false
+        )
+        var attempts = 0
+        MockURLProtocol.handler = { request in
+            attempts += 1
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            try expect(body["response_format"] == nil && body["thinking"] == nil,
+                       "bounded retry remains plain-text compatible")
+            if attempts == 1 {
+                return (200, try JSONSerialization.data(withJSONObject: [
+                    "choices": [["message": [
+                        "content": "", "reasoning_content": "hidden reasoning"
+                    ], "finish_reason": "stop"]]
+                ]))
+            }
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": [
+                    "content": "自然翻译：尽管如此，团队仍确认了主句。\n**结构分析**\n- the team established"
+                ], "finish_reason": "stop"]]
+            ]))
+        }
+        let context = AIProviderDiagnosticContext(
+            action: "sentenceAnalysis", queryGeneration: 7,
+            aiStudyTextIdentityHash: "synthetic-study", sentenceID: "sentence-0001"
+        )
+        let recovered = try await AIProviderDiagnosticScope.$current.withValue(context) {
+            try await client.analyzeSentence(
+                sampleSentenceText, configuration: configuration, apiKey: "dummy-key"
+            )
+        }
+        try expect(attempts == 2 && recovered.rawFallbackText?.contains("结构分析") == true,
+                   "reasoning-only performs exactly one fresh visible-content retry")
+
+        let deepSeekFlash = AIProviderConfiguration(
+            enabled: true, providerType: .openAICompatible,
+            providerDisplayName: "DeepSeek", baseURL: "https://api.deepseek.com",
+            model: "deepseek-v4-flash",
+            options: AIProviderOptions(usesJSONResponseFormat: false)
+        )
+        var deepSeekAttempts = 0
+        MockURLProtocol.handler = { request in
+            deepSeekAttempts += 1
+            let body = try JSONSerialization.jsonObject(
+                with: requestBody(request)
+            ) as! [String: Any]
+            let thinking = body["thinking"] as? [String: String]
+            try expect(
+                body["response_format"] == nil && body["temperature"] == nil &&
+                thinking?["type"] == "disabled" && body["enable_thinking"] == nil,
+                "DeepSeek V4 retry dropped the explicit non-thinking plain-text policy"
+            )
+            if deepSeekAttempts == 1 {
+                return (200, try JSONSerialization.data(withJSONObject: [
+                    "choices": [["message": [
+                        "content": "", "reasoning_content": "hidden reasoning"
+                    ], "finish_reason": "stop"]]
+                ]))
+            }
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": [
+                    "content": "Natural translation: The team established the result.\n" +
+                        "### Structure\n- the team established"
+                ], "finish_reason": "stop"]]
+            ]))
+        }
+        let deepSeekRecovered = try await AIProviderDiagnosticScope.$current.withValue(context) {
+            try await client.analyzeSentence(
+                sampleSentenceText, configuration: deepSeekFlash, apiKey: "dummy-key"
+            )
+        }
+        try expect(
+            deepSeekAttempts == 2 &&
+            deepSeekRecovered.rawFallbackText?.contains("### Structure") == true,
+            "DeepSeek V4 plain-text retry did not recover exactly once"
+        )
+
+        attempts = 0
+        MockURLProtocol.handler = { _ in
+            attempts += 1
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": [
+                    "content": "", "reasoning_content": "hidden reasoning"
+                ], "finish_reason": "stop"]]
+            ]))
+        }
+        do {
+            _ = try await AIProviderDiagnosticScope.$current.withValue(context) {
+                try await client.analyzeSentence(
+                    sampleSentenceText, configuration: configuration, apiKey: "dummy-key"
+                )
+            }
+            throw SmokeFailure.failed("second reasoning-only response accepted")
+        } catch let error as AIClientError {
+            try expect(error == .providerReasoningOnly && attempts == 2,
+                       "empty-content recovery is bounded to one retry")
+        }
+    }
+
+    private static func testCanonicalResponseFixtures() throws {
+        let wordData = try JSONEncoder().encode(sample)
+        let wordJSON = String(data: wordData, encoding: .utf8)!
+
+        let strict = try AIProviderCanonicalParser.word(content: wordJSON, query: "prompt")
+        try expect(strict.responseParseMode == .strictJSON && strict.partsOfSpeech.count == 1,
+                   "fixture A strict JSON")
+
+        let fenced = try AIProviderCanonicalParser.word(
+            content: "```json\n\(wordJSON)\n```", query: "prompt"
+        )
+        try expect(fenced.responseParseMode == .compatibleJSON,
+                   "fixture B Markdown fenced JSON")
+
+        let prefixed = try AIProviderCanonicalParser.word(
+            content: "Result follows:\n\(wordJSON)\nDone.", query: "prompt"
+        )
+        try expect(prefixed.responseParseMode == .compatibleJSON,
+                   "fixture C prefixed unique JSON object")
+
+        let plain = try AIProviderCanonicalParser.word(
+            content: "推荐英文：download\n含义：把远端数据保存到本地设备。", query: "下载"
+        )
+        try expect(plain.responseParseMode == .plainTextFallback &&
+                   plain.recommendedEnglishExpressions.first == "download" &&
+                   plain.rawFallbackText?.contains("含义") == true,
+                   "fixture D readable plain text and safe recommendation recovery")
+
+        let malformedReadable = try AIProviderCanonicalParser.word(
+            content: "部分一 {\"answer\":1} 部分二 {\"answer\":2}", query: "prompt"
+        )
+        try expect(malformedReadable.responseParseMode == .plainTextFallback &&
+                   malformedReadable.rawFallbackText?.contains("部分二") == true,
+                   "fixture E malformed but readable content")
+
+        let sanitized = try AIProviderCanonicalParser.word(
+            content: "<script>steal()</script><b>A safe readable explanation.</b>", query: "prompt"
+        )
+        try expect(sanitized.rawFallbackText == "A safe readable explanation." &&
+                   !sanitized.rawFallbackText!.contains("script"),
+                   "fixture F HTML/script sanitization")
+
+        do {
+            _ = try AIProviderCanonicalParser.word(content: " \n\t ", query: "prompt")
+            throw SmokeFailure.failed("fixture G empty content accepted")
+        } catch let error as AIClientError {
+            try expect(error == .emptyResponse, "fixture G empty response classification")
+        }
+
+        let translated = try AIProviderCanonicalParser.textTranslation(
+            content: "这是可直接显示的完整译文。", sourceText: sampleSentenceText
+        )
+        try expect(translated.responseParseMode == .plainTextFallback &&
+                   translated.translation.contains("完整译文"),
+                   "fixture H plain-text long translation")
+    }
+
+    private static func testProviderEnvelopeCompatibility() async throws {
+        let client = OpenAICompatibleClient(session: session())
+        let configuration = AIProviderConfiguration(
+            enabled: true, providerType: .openAICompatible,
+            providerDisplayName: "Compatible Fixture",
+            baseURL: "https://fixture.invalid/v1", model: "fixture-model"
+        )
+        MockURLProtocol.handler = { _ in
+            (200, try JSONSerialization.data(withJSONObject: ["choices": []]))
+        }
+        do {
+            _ = try await client.explain(query: "prompt", domain: "general",
+                                         configuration: configuration, apiKey: "dummy")
+            throw SmokeFailure.failed("choices-missing response accepted")
+        } catch let error as AIClientError {
+            try expect(error == .malformedProviderEnvelope,
+                       "choices missing is a malformed provider envelope")
+        }
+
+        MockURLProtocol.handler = { _ in
+            (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": [
+                    "content": "", "refusal": "<b>Policy refused this input.</b>"
+                ]]]
+            ]))
+        }
+        do {
+            _ = try await client.explain(query: "prompt", domain: "general",
+                                         configuration: configuration, apiKey: "dummy")
+            throw SmokeFailure.failed("refusal response accepted")
+        } catch let error as AIClientError {
+            try expect(error == .refused(reason: "Policy refused this input."),
+                       "refusal is distinct and sanitized")
+        }
+
+        MockURLProtocol.handler = { _ in (200, try JSONEncoder().encode(sample)) }
+        let direct = try await client.explain(query: "prompt", domain: "general",
+                                              configuration: configuration, apiKey: "dummy")
+        try expect(direct.responseParseMode == .strictJSON,
+                   "direct canonical object without choices")
+
+        let content = String(data: try JSONEncoder().encode(sample), encoding: .utf8)!
+        MockURLProtocol.handler = { _ in
+            (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [[
+                    "message": ["content": [["type": "text", "text": content]]],
+                    "finish_reason": "length"
+                ]]
+            ]))
+        }
+        let parts = try await client.explain(query: "prompt", domain: "general",
+                                             configuration: configuration, apiKey: "dummy")
+        try expect(parts.partsOfSpeech.count == 1,
+                   "content parts and non-stop finish reason retain readable output")
+
+        MockURLProtocol.handler = { _ in
+            (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": [
+                    ["type": "reasoning", "text": "HIDDEN_CHAIN_OF_THOUGHT"],
+                    ["type": "text", "text": "Visible final answer."]
+                ]]]]
+            ]))
+        }
+        let visibleOnly = try await client.explain(
+            query: "prompt", domain: "general", configuration: configuration, apiKey: "dummy"
+        )
+        try expect(visibleOnly.rawFallbackText == "Visible final answer." &&
+                   visibleOnly.rawFallbackText?.contains("HIDDEN_CHAIN_OF_THOUGHT") == false,
+                   "content-array reasoning leaked into visible provider text")
+    }
+
+    private static func testProviderProductionCompatibilityFixtures() async throws {
+        let client = OpenAICompatibleClient(session: session())
+        let gemini = AIProviderConfiguration(
+            enabled: true, providerType: .googleGemini,
+            providerDisplayName: "Google Gemini",
+            baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/",
+            model: "gemini-fixture"
+        )
+        let deepSeek = AIProviderConfiguration(
+            enabled: true, providerType: .openAICompatible,
+            providerDisplayName: "DeepSeek",
+            baseURL: "https://api.deepseek.com/v1/chat/completions",
+            model: "deepseek-chat"
+        )
+        let wordJSON = String(data: try JSONEncoder().encode(sample), encoding: .utf8)!
+        func geminiEnvelope(_ text: String) throws -> Data {
+            try JSONSerialization.data(withJSONObject: [
+                "candidates": [[
+                    "content": ["parts": [["text": text]]],
+                    "finishReason": "STOP"
+                ]]
+            ])
+        }
+
+        MockURLProtocol.handler = { _ in (200, try geminiEnvelope(wordJSON)) }
+        let geminiWord = try await client.explain(
+            query: "prompt", domain: "general", configuration: gemini, apiKey: "dummy"
+        )
+        try expect(geminiWord.partsOfSpeech.count == 1,
+                   "Gemini native word envelope normalization")
+
+        let chineseLong = """
+        写入完成后验证是否真正秒级/短时间结束；不能再‘验证100%’挂五分钟；
+        建立过程中普通英文查询还能用；取消、退出都正常。
+        """
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            try expect(body["response_format"] == nil,
+                       "Gemini long translation must not require JSON mode")
+            try expect(body.description.contains("Simplified Chinese") &&
+                       body.description.contains("English"),
+                       "Chinese long translation direction is explicit")
+            return (200, try geminiEnvelope(
+                "After writing, verify that it finishes within seconds or a short time."
+            ))
+        }
+        let geminiTranslation = try await client.translateText(
+            chineseLong, configuration: gemini, apiKey: "dummy"
+        )
+        try expect(geminiTranslation.translation.hasPrefix("After writing"),
+                   "Gemini plain-text translation display path")
+
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            try expect(body["response_format"] == nil,
+                       "Gemini sentence analysis must not require JSON mode")
+            try expect(body.description.contains("Target translation language: English") &&
+                       body.description.contains("Learning language: English") &&
+                       body.description.contains(
+                        "Analysis object: the natural English translation produced from the source text"
+                       ) && body.description.contains(
+                        "Chinese source may be quoted only as reference"
+                       ),
+                       "Chinese sentence must translate to and analyze the English learning object")
+            return (200, try geminiEnvelope(
+                "### Analysis\n自然翻译：After writing, verify that it finishes quickly.\n" +
+                "- The sentence asks for a bounded verification step."
+            ))
+        }
+        let geminiSentence = try await client.analyzeSentence(
+            chineseLong, configuration: gemini, apiKey: "dummy"
+        )
+        try expect(geminiSentence.translationZH.hasPrefix("After writing") &&
+                   geminiSentence.responseParseMode == .plainTextFallback,
+                   "Gemini sentence Markdown remains readable in the requested direction")
+
+        MockURLProtocol.handler = { _ in
+            (200, try geminiEnvelope(
+                "Readable explanation before malformed JSON {\"definition\": "
+            ))
+        }
+        let geminiMalformed = try await client.explain(
+            query: "prompt", domain: "general", configuration: gemini, apiKey: "dummy"
+        )
+        try expect(geminiMalformed.rawFallbackText?.contains("Readable explanation") == true,
+                   "Gemini malformed JSON with safe text has a display path")
+
+        let deepSeekFixtures: [(String, Data)] = [
+            ("string-json", try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": wordJSON]]]
+            ])),
+            ("content-array", try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": [["type": "text", "text": wordJSON]]]]]
+            ])),
+            ("plain-text", try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "A prompt is a concise instruction."]]]
+            ])),
+            ("markdown", try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "```json\n\(wordJSON)\n```"]]]
+            ])),
+            ("malformed-readable", try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content":
+                    "Readable final answer despite malformed JSON {\"answer\":"
+                ]]]
+            ]))
+        ]
+        for (name, envelope) in deepSeekFixtures {
+            MockURLProtocol.handler = { _ in (200, envelope) }
+            let value = try await client.explain(
+                query: "prompt", domain: "general", configuration: deepSeek, apiKey: "dummy"
+            )
+            try expect(!value.partsOfSpeech.isEmpty ||
+                       value.rawFallbackText.map(AIProviderResponseTextSanitizer.isReadable) == true,
+                       "DeepSeek \(name) fixture has no display path")
+        }
+        MockURLProtocol.handler = { _ in
+            (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": ""]]]
+            ]))
+        }
+        do {
+            _ = try await client.explain(
+                query: "prompt", domain: "general", configuration: deepSeek, apiKey: "dummy"
+            )
+            throw SmokeFailure.failed("DeepSeek empty content accepted")
+        } catch let error as AIClientError {
+            try expect(error == .providerEmptyResponse,
+                       "DeepSeek empty content classification")
+        }
+        for (status, expected) in [
+            (429, AIClientError.rateLimited(retryAfter: nil)),
+            (500, AIClientError.serverError)
+        ] {
+            MockURLProtocol.responseHeaders = [:]
+            MockURLProtocol.handler = { _ in (status, Data("{}".utf8)) }
+            do {
+                _ = try await client.explain(
+                    query: "prompt", domain: "general", configuration: deepSeek,
+                    apiKey: "dummy"
+                )
+                throw SmokeFailure.failed("DeepSeek HTTP \(status) accepted")
+            } catch let error as AIClientError {
+                try expect(error == expected, "DeepSeek HTTP \(status) classification")
+            }
         }
     }
 
@@ -936,8 +1486,44 @@ private struct AIServiceSmoke {
         try expect((connectionBody["response_format"] as? [String: String])?["type"] ==
                     "json_object" &&
                    (productionBody["response_format"] as? [String: String])?["type"] ==
-                    "json_object",
+                   "json_object",
                    "both request paths share strict JSON response policy")
+
+        var flashProfile = profile
+        flashProfile.model = "deepseek-v4-flash"
+        try expect(flashProfile.responseCapability == .plainTextOnly,
+                   "DeepSeek v4 flash uses tolerant plain-text capability")
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            let thinking = body["thinking"] as? [String: String]
+            try expect(body["response_format"] == nil && body["temperature"] == nil &&
+                       thinking?["type"] == "disabled" && body["enable_thinking"] == nil &&
+                       body["tools"] == nil && body["functions"] == nil &&
+                       body["stream"] == nil,
+                       "DeepSeek v4 flash plain-text request did not disable default thinking")
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": [
+                    "content": "A fallback is an alternative used when the first option fails."
+                ]]]
+            ]))
+        }
+        let flash = try await client.explain(query: "fallback", domain: "general",
+                                             configuration: flashProfile, apiKey: testKey)
+        try expect(flash.responseParseMode == .plainTextFallback &&
+                   flash.rawFallbackText?.contains("alternative") == true,
+                   "DeepSeek v4 flash readable response survives parsing")
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            let thinking = body["thinking"] as? [String: String]
+            try expect(body["response_format"] == nil && body["temperature"] == nil &&
+                       thinking?["type"] == "disabled" && body["enable_thinking"] == nil &&
+                       body["tools"] == nil && body["stream"] == nil,
+                       "sentence analysis did not use non-thinking plain-text protocol")
+            return (200, try sentenceEnvelope(sampleSentenceAnalysis))
+        }
+        _ = try await client.analyzeSentence(
+            sampleSentenceText, configuration: flashProfile, apiKey: testKey
+        )
     }
 
     private static func testInlineLookupRequestsAndCache() async throws {
@@ -951,15 +1537,28 @@ private struct AIServiceSmoke {
             let thinking = body["thinking"] as? [String: String]
             try expect(thinking?["type"] == "disabled", "DeepSeek quick thinking disabled")
             try expect(body["enable_thinking"] == nil, "DeepSeek excludes SiliconFlow flag")
-            try expect(body["max_tokens"] as? Int == 256, "inline word quick token budget")
+            try expect(body["max_tokens"] as? Int == 512, "inline word quick token budget")
+            let messages = body["messages"] as? [[String: String]] ?? []
+            try expect(messages.description.contains("Native language") &&
+                       messages.description.contains("Learning language"),
+                       "inline word request carries language roles")
             return (200, try inlineEnvelope(InlineWordQuickAIResult(
-                partOfSpeech: "noun", definitionsZH: ["提示；提示语"]
+                partOfSpeech: "noun", definitionsZH: ["提示；提示语"],
+                learningEquivalent: "prompt",
+                learningDefinition: "A cue that elicits a response.",
+                nativeExplanation: "常指促使用户或系统作出反应的提示。",
+                exampleLearning: "The app displays a prompt.",
+                exampleNative: "应用会显示一条提示。"
             )))
         }
         let deepSeekQuick = try await client.inlineWordQuick(
             "prompt", configuration: deepSeek, apiKey: "dummy-key"
         )
-        try expect(deepSeekQuick.definitionsZH == ["提示；提示语"],
+        try expect(deepSeekQuick.definitionsZH == ["提示；提示语"] &&
+                   deepSeekQuick.learningEquivalent == "prompt" &&
+                   deepSeekQuick.learningDefinition?.contains("elicits") == true &&
+                   deepSeekQuick.nativeExplanation?.contains("反应") == true &&
+                   deepSeekQuick.exampleNative?.contains("提示") == true,
                    "inline word quick strict JSON")
 
         var requestCount = 0
@@ -1059,6 +1658,7 @@ private struct AIServiceSmoke {
                    "word and sentence inline requests reuse one process credential")
     }
 
+    @MainActor
     private static func testInlineLocalLookupAndFormatting() async throws {
         var localQueryCount = 0
         let service = InlineLocalLookupService(sources: [
@@ -1165,6 +1765,146 @@ private struct AIServiceSmoke {
                    block?.contentWidth == inlineLayout.blockContentWidth &&
                    (block?.contentWidth ?? 0) >= InlineLayoutMetrics.minimumAvailableWidth,
                    "inline paragraphs reset inherited layout and block width exceeds minimum")
+
+        let phraseSnapshot = syntheticInlineSnapshot(
+            "a structure supporting or containing something", kind: .phrase,
+            pageID: pageID
+        )
+        var actionCard = InlineLookupSupplement(
+            supplementID: UUID(), parentEntryID: pageID,
+            selectionSnapshot: phraseSnapshot, quickResult: nil,
+            expandedResult: nil, preparedLocalExpansion: nil, localSource: nil,
+            aiProvider: nil, aiModel: nil,
+            state: .aiActionAvailable(localMiss: false), generation: 1
+        )
+        let actionText = formatter.format(actionCard, layout: inlineLayout).string
+        try expect(actionText.contains("未点击不会联网") &&
+                   !actionText.contains("AI 服务返回了空内容"),
+                   "phrase selection presents an opt-in action without a failed AI result")
+        let nativePhraseSnapshot = syntheticInlineSnapshot(
+            "搞怪的墨镜", kind: .phrase, pageID: pageID
+        )
+        let nativePair = OfflineTranslationPair(
+            source: .simplifiedChinese, target: .english
+        )
+        let nativeInlineOperation = InlineOfflineTranslationPlanner.operation(
+            for: "搞怪的墨镜",
+            preferences: .productionDefault
+        )
+        let swappedPreferences = LanguagePreferences(
+            nativeLanguage: .english,
+            learningLanguage: .simplifiedChinese,
+            uiLanguage: .followNative
+        )
+        let swappedInlineOperation = InlineOfflineTranslationPlanner.operation(
+            for: "quirky sunglasses",
+            preferences: swappedPreferences
+        )
+        try expect(
+            nativeInlineOperation == PlannedOfflineTranslation(
+                outputRole: .learningVersion,
+                pair: nativePair
+            ) &&
+                swappedInlineOperation == PlannedOfflineTranslation(
+                    outputRole: .learningVersion,
+                    pair: OfflineTranslationPair(
+                        source: .english, target: .simplifiedChinese
+                    )
+                ) &&
+                InlineOfflineTranslationPlanner.operation(
+                    for: "quirky sunglasses",
+                    preferences: .productionDefault
+                ) == PlannedOfflineTranslation(
+                    outputRole: .nativeVersion,
+                    pair: OfflineTranslationPair(
+                        source: .english, target: .simplifiedChinese
+                    )
+                ) &&
+                InlineOfflineTranslationPlanner.automaticallyTranslates(
+                    availability: .installed
+                ) &&
+                !InlineOfflineTranslationPlanner.automaticallyTranslates(
+                    availability: .supportedNeedsDownload
+                ),
+            "inline Apple planner must follow Native/Learning roles and auto-run installed packs only"
+        )
+        let nativeAppleCard = InlineLookupSupplement(
+            supplementID: UUID(), parentEntryID: pageID,
+            selectionSnapshot: nativePhraseSnapshot, quickResult: nil,
+            expandedResult: nil, preparedLocalExpansion: nil, localSource: nil,
+            aiProvider: nil, aiModel: nil,
+            offlineTranslationState: .translated(
+                text: "quirky sunglasses", pair: nativePair
+            ),
+            state: .aiActionAvailable(localMiss: false), generation: 1
+        )
+        let nativeAppleText = formatter.format(
+            nativeAppleCard, layout: inlineLayout
+        ).string
+        let appleRange = (nativeAppleText as NSString).range(
+            of: "Apple 系统离线翻译（简体中文 → English）"
+        )
+        let translationRange = (nativeAppleText as NSString).range(
+            of: "quirky sunglasses"
+        )
+        let aiOptInRange = (nativeAppleText as NSString).range(
+            of: "可按需使用 AI 双语解释"
+        )
+        try expect(
+            appleRange.location != NSNotFound &&
+                translationRange.location > appleRange.location &&
+                aiOptInRange.location > translationRange.location &&
+                nativeAppleText.contains("来源：Apple 系统离线翻译"),
+            "native inline card does not show installed Apple translation before AI opt-in"
+        )
+        var nativeNeedsPackCard = nativeAppleCard
+        nativeNeedsPackCard.offlineTranslationState = .languagePackRequired(nativePair)
+        let nativeNeedsPackText = formatter.format(
+            nativeNeedsPackCard, layout: inlineLayout
+        ).string
+        try expect(
+            nativeNeedsPackText.contains("语言包尚未准备") &&
+                nativeNeedsPackText.contains("主动准备") &&
+                nativeNeedsPackText.contains("未点击不会联网"),
+            "inline language-pack state must remain explicit and keep AI opt-in"
+        )
+        var oneCard = [actionCard]
+        oneCard[0].generation = 2
+        oneCard[0].state = .loadingAI
+        oneCard[0].state = .compactFailure("AI 本次未返回可显示内容")
+        let failureText = formatter.format(oneCard[0], layout: inlineLayout).string
+        try expect(oneCard.count == 1 &&
+                   oneCard[0].supplementID == actionCard.supplementID &&
+                   failureText.contains("AI 本次未返回可显示内容") &&
+                   failureText.components(separatedBy: "\n").count <= 6 &&
+                   !failureText.contains("AI 服务返回了空内容"),
+                   "inline failure reuses one compact card")
+        oneCard[0].generation = 3
+        oneCard[0].state = .loadingAI
+        oneCard[0].quickResult = .word(InlineWordQuickResult(
+            partOfSpeech: "", definitions: ["支撑或容纳某物的结构"],
+            source: "AI", providerDisplayName: "Mock AI", model: "mock",
+            fromCache: false,
+            learningEquivalent: "supporting structure",
+            learningDefinition: "A structure that supports or contains something.",
+            nativeExplanation: "强调其支撑或容纳功能。",
+            exampleLearning: "The framework is a supporting structure.",
+            exampleNative: "这个框架是一种支撑结构。"
+        ))
+        oneCard[0].state = .success
+        let detailedAIText = formatter.format(oneCard[0], layout: inlineLayout).string
+        try expect(oneCard.count == 1 &&
+                   detailedAIText.contains("学习语言表达") &&
+                   detailedAIText.contains("supporting structure") &&
+                   detailedAIText.contains("母语核心释义") &&
+                   detailedAIText.contains("学习语言释义") &&
+                   detailedAIText.contains("用法说明") &&
+                   detailedAIText.contains("这个框架是一种支撑结构"),
+                   "failure-retry-success did not append a duplicate inline card")
+        actionCard.generation = 4
+        try expect(oneCard[0].generation != actionCard.generation,
+                   "selection generation gate fixture did not reject a stale callback")
+
         let harbourSnapshot = syntheticInlineSnapshot("harbour", kind: .word, pageID: pageID)
         let harbour = InlineLookupSupplement(
             supplementID: UUID(), parentEntryID: pageID, selectionSnapshot: harbourSnapshot,
@@ -1286,6 +2026,7 @@ private struct AIServiceSmoke {
                    }, "crowded text uses an independent safe action row")
     }
 
+    @MainActor
     private static func testInlineSelectionSnapshotsAndAnchors() async throws {
         let base = NSMutableAttributedString()
         func append(_ text: String, font: NSFont = .systemFont(ofSize: 13)) {
@@ -1462,9 +2203,9 @@ private struct AIServiceSmoke {
                                                       cache: cache,
                                                       clientFactory: { client })
         let unavailable = await unavailableService.availability()
-        try expect(unavailable.automaticSentenceAnalysisEnabled && !unavailable.isConfigured &&
+        try expect(!unavailable.automaticSentenceAnalysisEnabled && !unavailable.isConfigured &&
                    client.sentenceCalls == 0,
-                   "automatic sentence analysis with no key performs no request")
+                   "automatic sentence analysis remains disabled and performs no request")
         let first = try await service.explain(query: "Prompt", domain: "technology")
         try expect(!first.fromCache && client.calls == 1, "network result")
         client.result = .failure(AIClientError.offline)
@@ -1475,15 +2216,98 @@ private struct AIServiceSmoke {
         let firstSentence = try await service.analyzeSentence(sampleSentenceText)
         try expect(!firstSentence.fromCache && client.sentenceCalls == 1,
                    "sentence network result")
+        let learningContext = LanguageContext.make(query: sampleSentenceText)
+        let studyText = StudyText(text: sampleSentenceText, language: .english,
+                                  origin: .originalQuery)!
+        let gatedResult = try await service.analyzeStudyText(
+            studyText, languageContext: learningContext
+        )
+        try expect(gatedResult.fromCache && client.sentenceCalls == 1,
+                   "learning-language study text passed the hard gate and reused its cache")
+        let nativeContext = LanguageContext.make(query: "写入完成后验证是否真正秒级结束。")
+        let invalidStudyText = StudyText(
+            text: "写入完成后验证是否真正秒级结束。",
+            language: .simplifiedChinese,
+            origin: .originalQuery
+        )!
+        do {
+            _ = try await service.analyzeStudyText(
+                invalidStudyText, languageContext: nativeContext, bypassCache: true
+            )
+            throw SmokeFailure.failed("native-language text crossed the AI study-language gate")
+        } catch let error as AIClientError {
+            try expect(error == .studyTextUnavailable(expected: .english) &&
+                       client.sentenceCalls == 1,
+                       "study-language mismatch reached the provider client")
+        }
         client.sentenceResult = .failure(AIClientError.offline)
         let cachedSentence = try await service.analyzeSentence(sampleSentenceText)
         try expect(cachedSentence.fromCache && client.sentenceCalls == 1,
                    "sentence cache hit without network")
+        client.translationResult = .success(sampleTextTranslation)
+        let firstTranslation = try await service.translateText(sampleSentenceText)
+        try expect(!firstTranslation.fromCache && client.translationCalls == 1,
+                   "long-text translation network result")
+        client.translationResult = .failure(AIClientError.offline)
+        let cachedTranslation = try await service.translateText(sampleSentenceText)
+        try expect(cachedTranslation.fromCache && client.translationCalls == 1 &&
+                   cachedTranslation.result.translation == sampleTextTranslation.translation,
+                   "long-text translation has an independent cache hit")
+        let mixedSource = "所以如果 Evidence Candidate 的 Resource Center 里仍显示 " +
+            "FreeDict，那才是 bug。"
+        let mixedContext = LanguageContext.make(query: mixedSource)
+        let nativeIdentity = AITranslationCacheIdentity(
+            context: mixedContext, targetLanguage: .simplifiedChinese
+        )
+        let learningIdentity = AITranslationCacheIdentity(
+            context: mixedContext, targetLanguage: .english
+        )
+        try expect(AIExplanationCache.textTranslationCacheKey(
+            text: mixedSource, configuration: configuration, identity: nativeIdentity
+        ) != AIExplanationCache.textTranslationCacheKey(
+            text: mixedSource, configuration: configuration, identity: learningIdentity
+        ), "AI translation cache identity omitted the explicit target language")
+        try await cache.storeTextTranslation(
+            AITextTranslation(sourceText: mixedSource,
+                              translation: "这是旧方向的中文缓存。"),
+            text: mixedSource, configuration: configuration, identity: nativeIdentity
+        )
+        client.translationResult = .success(AITextTranslation(
+            sourceText: mixedSource,
+            translation: "So if FreeDict is still shown in the Resource Center, that is a bug."
+        ))
+        let learningTranslation = try await service.translateText(
+            mixedSource, targetLanguage: .english, languageContext: mixedContext
+        )
+        try expect(!learningTranslation.fromCache &&
+                   learningTranslation.targetLanguage == .english,
+                   "old native-target cache hit the new learning-target request")
+        client.translationResult = .success(AITextTranslation(
+            sourceText: mixedSource,
+            translation: "所以，如果资源中心仍显示 FreeDict，那就是错误。"
+        ))
+        do {
+            _ = try await service.translateText(
+                mixedSource, targetLanguage: .english,
+                languageContext: mixedContext, bypassCache: true
+            )
+            throw SmokeFailure.failed("wrong-target AI result entered the UI success path")
+        } catch let failure as AIProviderRequestFailure {
+            guard case .wrongTargetLanguage(expected: .english, actual: .simplifiedChinese) =
+                    failure.underlying as? AIClientError else {
+                throw SmokeFailure.failed("wrong-target AI result lost its typed rejection")
+            }
+        }
         try expect(AIExplanationCache.cacheKey(query: sampleSentenceText,
                                                configuration: configuration) !=
                    AIExplanationCache.sentenceCacheKey(sentence: sampleSentenceText,
                                                        configuration: configuration),
                    "word and sentence cache isolation")
+        try expect(AIExplanationCache.textTranslationCacheKey(
+                        text: sampleSentenceText, configuration: configuration
+                   ) != AIExplanationCache.sentenceCacheKey(
+                        sentence: sampleSentenceText, configuration: configuration
+                   ), "translation and sentence-analysis cache isolation")
 
         configuration.model = "model-b"
         store.save(configuration)
@@ -1504,6 +2328,10 @@ private struct AIServiceSmoke {
         let clearedSentence = try await cache.sentenceValue(for: sampleSentenceText,
                                                             configuration: configuration)
         try expect(clearedSentence == nil, "sentence cache clear")
+        let clearedTranslation = try await cache.textTranslationValue(
+            for: sampleSentenceText, configuration: configuration
+        )
+        try expect(clearedTranslation == nil, "text translation cache clear")
     }
 
     private static func testProviderFallback() async throws {
@@ -1625,6 +2453,22 @@ private struct AIServiceSmoke {
                                          replacementKey: "window-google-key")
         try await service.testSentenceFunction(configuration: googleDraft,
                                                replacementKey: "window-google-key")
+        client.result = .success(AIExplanation(
+            headword: "下载", recommendedEnglishExpressions: ["download"],
+            partsOfSpeech: [AIExplanationPartOfSpeech(
+                partOfSpeech: "verb",
+                senses: [AIExplanationSense(definitionEN: "Transfer data.",
+                                             definitionZH: "传输数据。")]
+            )]
+        ))
+        let report = try await service.testCompatibility(
+            configuration: googleDraft, replacementKey: "window-google-key"
+        )
+        try expect(report.hasRecommendedEnglish &&
+                   report.sentenceParseMode == .strictJSON &&
+                   report.summary.contains("传输/模型") &&
+                   report.summary.contains("句子解析"),
+                   "compatibility report covers transport, recommendation, and sentence parsing")
         try expect(client.testedConfigurations.last?.providerID == google.providerID &&
                    client.testedConfigurations.last?.baseURL == googleDraft.normalizedBaseURL &&
                    client.testedConfigurations.last?.model == "gemini-draft-model" &&
@@ -1722,11 +2566,135 @@ private struct AIServiceSmoke {
                                                      providerDisplayName: "智谱 AI",
                                                      model: "glm-4.7-flash",
                                                      fromCache: false)
-        let rendered = AIEntryFormatter().format(presentation).string
+        let attributed = AIEntryFormatter().format(presentation)
+        let rendered = attributed.string
         try expect(rendered.contains("AI 双语解释"), "AI title")
         try expect(rendered.contains("由 智谱 AI · glm-4.7-flash 生成"), "AI attribution")
         try expect(rendered.contains("促使行动的提示"), "Chinese definition")
         try expect(!rendered.contains("<") && !rendered.contains("Oxford"), "unsafe attribution")
+        for substantiveText in ["A cue for action.", "常用于技术语境。",
+                                "Enter a prompt.", "输入一条提示。", "system prompt"] {
+            let range = (rendered as NSString).range(of: substantiveText)
+            guard range.location != NSNotFound,
+                  let color = attributed.attribute(
+                    .foregroundColor, at: range.location, effectiveRange: nil
+                  ) as? NSColor else {
+                throw SmokeFailure.failed("missing attributed body text: \(substantiveText)")
+            }
+            try expect(color == .labelColor,
+                       "substantive AI body text is not readable in DarkAqua: \(substantiveText)")
+        }
+    }
+
+    @MainActor
+    private static func testSafeCompatibilityMarkdownRendering() throws {
+        let markdown = """
+        ### 结构分析
+        ### 关键表达 (Key Expressions) ###
+        **结构分析**
+        `五本` 与 *preferred*
+        ---
+        - 第一项
+        1. 第二项
+        <script>window.evil = true</script>
+        ![remote](https://example.invalid/pixel.png)
+
+        关键表达
+        | 英语表达 | 中文含义 | 用法说明 |
+        |:---|:---:|---:|
+        | `do the hotspot test` | 做热点测试 | **hotspot test** 为固定搭配 |
+        | first | 首先 | 祈使句中常放在句末；保留 escaped \\| pipe |
+        """
+        var analysis = sampleSentenceAnalysis
+        analysis.responseParseMode = .compatibleJSON
+        analysis.rawFallbackText = markdown
+        let attributed = AISentenceEntryFormatter().format(
+            AISentenceAnalysisPresentation(
+                analysis: analysis, providerDisplayName: "DeepSeek",
+                model: "compatible", fromCache: false
+            )
+        )
+        let rendered = attributed.string
+        try expect(!rendered.contains("兼容模式：") &&
+                   !rendered.contains("服务返回内容不兼容") &&
+                   rendered.contains("结构分析") &&
+                   rendered.contains("关键表达 (Key Expressions)") &&
+                   rendered.contains("五本") &&
+                   rendered.contains("• 第一项") && rendered.contains("1. 第二项") &&
+                   rendered.contains("────────────────") && rendered.contains("remote") &&
+                   rendered.contains("英语表达：do the hotspot test") &&
+                   rendered.contains("中文含义：做热点测试") &&
+                   rendered.contains("用法说明：hotspot test 为固定搭配") &&
+                   rendered.contains("用法说明：祈使句中常放在句末；保留 escaped | pipe"),
+                   "readable compatibility Markdown was not rendered as a normal success")
+        try expect(!rendered.contains("**") && !rendered.contains("`") &&
+                   !rendered.contains("###") &&
+                   !rendered.contains("|:---|") &&
+                   !rendered.contains("<script") && !rendered.contains("window.evil") &&
+                   !rendered.contains("https://"),
+                   "compatible Markdown leaked source markers, HTML, or remote URL")
+        for name in [NSAppearance.Name.aqua, .darkAqua] {
+            guard let appearance = NSAppearance(named: name) else {
+                throw SmokeFailure.failed("missing appearance \(name.rawValue)")
+            }
+            appearance.performAsCurrentDrawingAppearance {
+                let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 480, height: 520))
+                view.appearance = appearance
+                view.drawsBackground = true
+                view.backgroundColor = .textBackgroundColor
+                view.textStorage?.setAttributedString(attributed)
+                view.layoutManager?.ensureLayout(for: view.textContainer!)
+                if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private static func testLanguageSettingsWindow() throws {
+        _ = NSApplication.shared
+        let defaults = MemoryDefaults()
+        let store = LanguagePreferencesStore(defaults: defaults)
+        var english = LanguagePreferences.productionDefault
+        english.uiLanguage = .english
+        AppLocalization.configureAtLaunch(english)
+        let englishController = LanguageSettingsWindowController(store: store)
+        guard let content = englishController.window?.contentView,
+              let native = findView("language-settings-native", in: content) as? NSPopUpButton,
+              let learning = findView("language-settings-learning", in: content) as? NSPopUpButton,
+              let ui = findView("language-settings-ui", in: content) as? NSPopUpButton,
+              let save = findView("language-settings-save", in: content) as? NSButton else {
+            throw SmokeFailure.failed("language settings did not expose all three AppKit controls")
+        }
+        try expect(englishController.window?.title == "Language Settings" &&
+                   native.itemTitles == ["Simplified Chinese", "English"] &&
+                   learning.itemTitles == ["Simplified Chinese", "English"] &&
+                   ui.itemTitles == ["Follow Native Language", "Simplified Chinese", "English"],
+                   "English UI language settings window")
+        native.selectItem(at: 1)
+        learning.selectItem(at: 0)
+        ui.selectItem(at: 2)
+        save.performClick(nil)
+        let swapped = store.load()
+        try expect(swapped.nativeLanguage == .english &&
+                   swapped.learningLanguage == .simplifiedChinese &&
+                   swapped.uiLanguage == .english,
+                   "two-language role swap was not persisted by the real settings controller")
+
+        AppLocalization.configureAtLaunch(.productionDefault)
+        let chineseController = LanguageSettingsWindowController(store: store)
+        try expect(chineseController.window?.title == "语言设置",
+                   "Simplified Chinese settings window did not localize after relaunch")
+    }
+
+    @MainActor
+    private static func findView(_ accessibilityID: String, in root: NSView) -> NSView? {
+        if root.accessibilityIdentifier() == accessibilityID { return root }
+        for subview in root.subviews {
+            if let found = findView(accessibilityID, in: subview) { return found }
+        }
+        return nil
     }
 
     private static func testTolerantWordExplanationSchema() throws {
@@ -1780,6 +2748,134 @@ private struct AIServiceSmoke {
         }
     }
 
+    @MainActor
+    private static func testEnglishWordChineseDefinitionPriority() throws {
+        for query in ["download", "culture", "validation", "pharmacokinetics"] {
+            let explanation = try AIExplanation(
+                headword: query,
+                pronunciations: ["/fixture/"],
+                partsOfSpeech: [AIExplanationPartOfSpeech(
+                    partOfSpeech: "noun / verb",
+                    senses: [AIExplanationSense(
+                        definitionEN: "English definition for \(query).",
+                        definitionZH: "\(query) 的中文核心释义。",
+                        usageNoteZH: "用于合成方向与字段顺序回归。",
+                        examples: [AIExplanationExample(
+                            en: "A synthetic English example.",
+                            zh: "一条合成中文例句。"
+                        )]
+                    )]
+                )]
+            ).validated(fallbackHeadword: query)
+            let rendered = AIEntryFormatter().format(AIExplanationPresentation(
+                explanation: explanation, providerDisplayName: "Synthetic",
+                model: "fixture", fromCache: false
+            )).string as NSString
+            let headword = rendered.range(of: query)
+            let pronunciation = rendered.range(of: "/fixture/")
+            let partOfSpeech = rendered.range(of: "noun / verb")
+            let chinese = rendered.range(of: "中文核心释义")
+            let english = rendered.range(of: "English definition")
+            let nativeLabel = rendered.range(of: "母语核心意思")
+            let learningLabel = rendered.range(of: "学习语言释义")
+            try expect(headword.location != NSNotFound &&
+                       pronunciation.location > headword.location &&
+                       partOfSpeech.location > pronunciation.location &&
+                       nativeLabel.location > partOfSpeech.location &&
+                       chinese.location > partOfSpeech.location &&
+                       learningLabel.location > chinese.location &&
+                       english.location > chinese.location,
+                       "\(query) did not render headword/pronunciation/POS/Chinese/English in order")
+        }
+    }
+
+    @MainActor
+    private static func testChineseRecommendedEnglishSchemaAndRendering() throws {
+        let fixtures: [(query: String, primary: String, alternatives: [String])] = [
+            ("下载", "download", []),
+            ("文化", "culture", []),
+            ("提交", "submit", ["submission"]),
+            ("验证", "verify", ["validation"]),
+            ("药代动力学", "pharmacokinetics", [])
+        ]
+        for fixture in fixtures {
+            let object: [String: Any] = [
+                "headword": fixture.query,
+                "recommended_english_expressions": [fixture.primary] + fixture.alternatives,
+                "parts_of_speech": [[
+                    "part_of_speech": fixture.alternatives.isEmpty ? "verb" : "verb / noun",
+                    "senses": [[
+                        "definition_en": "A concise English definition.",
+                        "definition_zh": "简明中文解释。",
+                        "usage_note_zh": "按实际词性选择表达。",
+                        "examples": [["en": "Synthetic example.", "zh": "合成例句。"]]
+                    ]]
+                ]]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: object)
+            let explanation = try JSONDecoder().decode(AIExplanation.self, from: data)
+                .validated(fallbackHeadword: fixture.query)
+            try expect(explanation.recommendedEnglishExpressions.first == fixture.primary,
+                       "\(fixture.query) primary English expression")
+            let attributed = AIEntryFormatter().format(AIExplanationPresentation(
+                explanation: explanation, providerDisplayName: "Synthetic",
+                model: "fixture", fromCache: false
+            ))
+            let rendered = attributed.string
+            let primaryRange = (rendered as NSString).range(of: fixture.primary)
+            let posRange = (rendered as NSString).range(of: "verb")
+            let definitionRange = (rendered as NSString).range(of: "A concise")
+            try expect(primaryRange.location != NSNotFound &&
+                       primaryRange.location < posRange.location &&
+                       primaryRange.location < definitionRange.location,
+                       "\(fixture.query) English expression is not at the top")
+            for name in [NSAppearance.Name.aqua, .darkAqua] {
+                guard let appearance = NSAppearance(named: name) else {
+                    throw SmokeFailure.failed("missing appearance \(name.rawValue)")
+                }
+                appearance.performAsCurrentDrawingAppearance {
+                    let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 480, height: 520))
+                    view.appearance = appearance
+                    view.drawsBackground = true
+                    view.backgroundColor = .textBackgroundColor
+                    view.textStorage?.setAttributedString(attributed)
+                    view.layoutManager?.ensureLayout(for: view.textContainer!)
+                    if let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                        view.cacheDisplay(in: view.bounds, to: bitmap)
+                    }
+                }
+                var missingDynamicColor = false
+                attributed.enumerateAttribute(
+                    .foregroundColor, in: NSRange(location: 0, length: attributed.length)
+                ) { value, _, stop in
+                    guard let color = value as? NSColor,
+                          color.type == .catalog || color.alphaComponent == 0 else {
+                        missingDynamicColor = true
+                        stop.pointee = true
+                        return
+                    }
+                }
+                try expect(!missingDynamicColor,
+                           "Chinese AI result contains a fixed/missing foreground color")
+            }
+        }
+
+        let missing = Data(#"""
+        {
+          "headword":"下载",
+          "parts_of_speech":[{"part_of_speech":"verb","senses":[{"definition_zh":"获取文件"}]}]
+        }
+        """#.utf8)
+        do {
+            _ = try JSONDecoder().decode(AIExplanation.self, from: missing)
+                .validated(fallbackHeadword: "下载")
+            throw SmokeFailure.failed("Chinese response without recommended English accepted")
+        } catch let error as AIClientError {
+            try expect(error == .schemaInvalid(field: "recommended_english_expressions"),
+                       "Chinese response missing English has wrong schema error")
+        }
+    }
+
     private static func testSentenceFormatterAndGenerationGate() throws {
         let presentation = AISentenceAnalysisPresentation(
             analysis: sampleSentenceAnalysis,
@@ -1788,7 +2884,8 @@ private struct AIServiceSmoke {
             fromCache: false
         )
         let rendered = AISentenceEntryFormatter().format(presentation).string
-        for heading in ["AI 句子解析", "原句", "自然翻译", "句子主干",
+        for heading in ["AI 句子解析", "学习对象：English · 解释语言：简体中文",
+                        "原句", "自然翻译", "句子主干",
                         "分句与修饰关系", "重点语法", "搭配与句型",
                         "难点表达", "简化改写", "学习提示"] {
             try expect(rendered.contains(heading), "sentence formatter section \(heading)")
@@ -1806,6 +2903,41 @@ private struct AIServiceSmoke {
                    "old sentence response cannot overwrite new query")
         _ = gate.beginQuery()
         try expect(!gate.accepts(sentenceB), "cancellation invalidates response generation")
+
+        var operationGate = AISentenceOperationGate()
+        for index in 0..<50 {
+            let sentenceID = "sentence-\(index % 5)"
+            let operation = operationGate.begin(sentenceID: sentenceID)
+            if index.isMultiple(of: 7) {
+                let retry = operationGate.begin(sentenceID: sentenceID)
+                try expect(!operationGate.accepts(operation) &&
+                           operationGate.accepts(retry),
+                           "retry did not supersede only its sentence")
+                try expect(operationGate.finish(retry),
+                           "retry operation did not finish")
+            } else {
+                let sibling = operationGate.begin(sentenceID: "sibling-\(index)")
+                try expect(operationGate.accepts(operation) &&
+                           operationGate.accepts(sibling),
+                           "sibling sentence operation was globally replaced")
+                try expect(operationGate.finish(operation) &&
+                           operationGate.finish(sibling),
+                           "independent sentence operation did not finish")
+            }
+        }
+        try expect(operationGate.activeCount == 0,
+                   "50-operation sentence stress leaked active ownership")
+
+        var duplicate = sampleSentenceAnalysis
+        duplicate.rawFallbackText = duplicate.translationZH
+        let deduplicated = AISentenceEntryFormatter().format(
+            AISentenceAnalysisPresentation(
+                analysis: duplicate, providerDisplayName: "DeepSeek",
+                model: "plain", fromCache: false
+            )
+        ).string
+        try expect(!deduplicated.contains("AI 返回的非结构化内容"),
+                   "identical raw fallback was displayed twice")
     }
 
     private static func testRequestLifecycleAndUserMessages() throws {
@@ -1936,8 +3068,8 @@ private struct AIServiceSmoke {
         try expect(section.markdown.contains("> 由 智谱 AI · glm-4.7-flash 生成"),
                    "AI attribution")
         try expect(section.markdown.contains("#### noun") &&
-                   section.markdown.contains("**A cue for action.**") &&
-                   section.markdown.contains("中文释义：促使行动的提示。") &&
+                   section.markdown.contains("**促使行动的提示。**") &&
+                   section.markdown.contains("英文定义：A cue for action.") &&
                    section.markdown.contains("例句：Enter a prompt.") &&
                    section.markdown.contains("译文：输入一条提示。") &&
                    section.markdown.contains("常见搭配：system prompt"),
@@ -1971,6 +3103,23 @@ private struct AIServiceSmoke {
         let localOnlyText = try String(contentsOf: localOnlyURL, encoding: .utf8)
         try expect(localOnlyText.contains("### 牛津高阶 8") &&
                    !localOnlyText.contains("### AI 双语解释"), "unchecked excludes AI")
+
+        let roleAware = VocabularyNoteSaveContent(
+            headword: "prompt", localEntry: local, aiSection: nil,
+            languageMetadata: FavoriteLanguageMetadata(
+                sourceLanguage: .english,
+                nativeLanguage: .simplifiedChinese,
+                learningLanguage: .english,
+                studyLanguage: nil
+            )
+        )
+        let roleAwareURL = root.appendingPathComponent("role-aware.md")
+        try Data().write(to: roleAwareURL)
+        _ = try store.save(roleAware, to: roleAwareURL)
+        let roleAwareText = try String(contentsOf: roleAwareURL, encoding: .utf8)
+        try expect(roleAwareText.contains(
+            "<!-- LocalDictionary-Language source=en; native=zh-Hans; learning=en; study=none -->"
+        ), "new favorite omitted backward-compatible language-role metadata")
 
         let combined = VocabularyNoteSaveContent(headword: "prompt",
                                                  localEntry: local,

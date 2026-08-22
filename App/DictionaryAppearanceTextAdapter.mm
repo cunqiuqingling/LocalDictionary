@@ -62,6 +62,20 @@ bool isLowContrastFixedColor(NSColor *color, NSAppearance *appearance) {
   NSMutableAttributedString *result =
       [[NSMutableAttributedString alloc] initWithAttributedString:attributedString];
   NSRange fullRange = NSMakeRange(0, result.length);
+  // NSTextStorage supplies a fixed black default when an attributed run has no explicit
+  // foreground color.  Fill those gaps before adapting imported fixed colors so every production
+  // rendering path (including locally assembled translation/status strings) is appearance-aware.
+  [result enumerateAttribute:NSForegroundColorAttributeName
+                     inRange:fullRange
+                     options:0
+                  usingBlock:^(id value, NSRange range, BOOL *stop) {
+    (void)stop;
+    if (!value) {
+      [result addAttribute:NSForegroundColorAttributeName
+                     value:NSColor.labelColor
+                     range:range];
+    }
+  }];
   [result enumerateAttribute:NSForegroundColorAttributeName
                      inRange:fullRange
                      options:0

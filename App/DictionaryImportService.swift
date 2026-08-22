@@ -256,13 +256,19 @@ final class DictionaryImportService {
         into catalog: DictionaryCatalog,
         cancellationToken: DictionaryImportCancellationToken = DictionaryImportCancellationToken(),
         progress: ProgressHandler? = nil,
+        allowDuplicateContent: Bool = false,
         now: Date = Date()
     ) async throws -> DictionaryCatalog {
         guard !importInProgress else { throw DictionaryImportError.importAlreadyInProgress }
         importInProgress = true
         defer { importInProgress = false }
 
-        let plan = try makePlan(selections, catalog: catalog, now: now)
+        let plan = try makePlan(
+            selections,
+            catalog: catalog,
+            allowDuplicateContent: allowDuplicateContent,
+            now: now
+        )
         let worker = fileWorker
         let outcome = await Task.detached(priority: .userInitiated) {
             worker.execute(plan: plan,
@@ -281,12 +287,17 @@ final class DictionaryImportService {
                 throw DictionaryImportError.cancelled
             }
 
-            var updated = catalog
-            updated.updatedAt = now
-            updated.dictionaries.append(contentsOf: executionResult.descriptors)
             do {
-                try catalogStore.save(updated)
-                return updated
+                let mutation = try catalogStore.mutate { latest, _ in
+                    for descriptor in executionResult.descriptors {
+                        guard !latest.dictionaries.contains(where: { $0.dictionaryID == descriptor.dictionaryID }) else {
+                            throw DictionaryImportError.publicationFailed
+                        }
+                    }
+                    latest.dictionaries.append(contentsOf: executionResult.descriptors)
+                    latest.updatedAt = now
+                }
+                return mutation.catalog
             } catch {
                 await Task.detached(priority: .utility) {
                     worker.rollbackPublished(executionResult)
@@ -298,11 +309,17 @@ final class DictionaryImportService {
 
     private func makePlan(_ selections: [DictionaryImportSelection],
                           catalog: DictionaryCatalog,
+                          allowDuplicateContent: Bool,
                           now: Date) throws -> DictionaryImportPlan {
         guard !selections.isEmpty else { throw DictionaryImportError.invalidSelection }
 
         for selection in selections {
-            if let duplicate = duplicateDescriptor(for: selection.preview, in: catalog) {
+            guard selection.preview.mddCandidates.isEmpty,
+                  selection.selectedMDDIDs.isEmpty else {
+                throw DictionaryImportError.invalidSelection
+            }
+            if !allowDuplicateContent,
+               let duplicate = duplicateDescriptor(for: selection.preview, in: catalog) {
                 throw DictionaryImportError.duplicate(
                     existingDictionaryID: duplicate.dictionaryID,
                     displayName: duplicate.displayName
@@ -321,9 +338,7 @@ final class DictionaryImportService {
         let requiredBytes = selections.reduce(UInt64(0)) {
             $0 &+ $1.preview.estimatedDiskBytes(selectedMDDIDs: $1.selectedMDDIDs)
         }
-        var nextPosition = (catalog.dictionaries
-            .filter { $0.queryLevel == .normal }
-            .map(\.sortPosition).max() ?? 0) + 1
+        var nextPosition = (catalog.dictionaries.map(\.sortPosition).max() ?? 0) + 1
         var items: [DictionaryImportPlanItem] = []
 
         for selection in selections {

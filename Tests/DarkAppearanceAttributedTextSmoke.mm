@@ -57,6 +57,15 @@ int main(void) {
     require(colorAt(darkBlack, 0).type == NSColorTypeCatalog,
             @"fixed black maps to a dynamic system color in dark appearance");
 
+    NSAttributedString *missingForeground = [[NSAttributedString alloc]
+        initWithString:@"locally assembled offline result"
+             attributes:@{NSFontAttributeName: [NSFont systemFontOfSize:14]}];
+    NSAttributedString *filledForeground =
+        [DictionaryAppearanceTextAdapter attributedStringByAdapting:missingForeground
+                                                       forAppearance:dark];
+    require(colorAt(filledForeground, 0).type == NSColorTypeCatalog,
+            @"missing foreground receives dynamic label color before NSTextStorage defaults black");
+
     NSAttributedString *fixedWhite = [[NSAttributedString alloc]
         initWithString:@"definition"
              attributes:@{NSForegroundColorAttributeName: NSColor.whiteColor}];

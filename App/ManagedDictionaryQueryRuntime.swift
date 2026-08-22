@@ -6,10 +6,13 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     static let cacheMaximumEntries = 16
 
     private struct RuntimeIdentity: Equatable {
+        let generation: UInt64
         let descriptorUpdatedAt: Date
         let sourceSHA256: String
         let sourceFileSize: UInt64
         let indexFileSize: UInt64
+        let indexPublicationID: String
+        let indexSHA256: String
     }
 
     private final class Runtime {
@@ -23,12 +26,23 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
     }
 
     private let validator: ManagedDictionaryRuntimeValidator
+    private let applicationSupportRootURL: URL
     private let formatter = GenericMDictEntryFormatter()
-    private var runtimes: [String: Runtime] = [:]
+    /// Generation is part of the cache identity.  Lifecycle operations drain leases before
+    /// invalidating this cache, so an old runtime cannot be reused by a newly published index.
+    private var runtimes: [RuntimeKey: Runtime] = [:]
+
+    private struct RuntimeKey: Hashable {
+        let dictionaryID: String
+        let generation: UInt64
+        let indexPublicationID: String
+        let indexSHA256: String
+    }
 
     init(applicationSupportRootURL: URL =
          DictionaryImportService.defaultApplicationSupportRootURL(),
          expectedSchemaVersion: Int = Int(liveDictionaryIndexSchemaVersion)) {
+        self.applicationSupportRootURL = applicationSupportRootURL
         validator = ManagedDictionaryRuntimeValidator(
             applicationSupportRootURL: applicationSupportRootURL,
             expectedSchemaVersion: expectedSchemaVersion
@@ -37,44 +51,90 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
 
     func reset() { runtimes.removeAll() }
 
-    func remove(dictionaryID: String) {
-        runtimes[dictionaryID] = nil
+    /// Legacy broad removal is retained only for callers that have already drained every
+    /// generation, such as explicit lifecycle invalidation.
+    func remove(dictionaryID: String) { removeAll(dictionaryID: dictionaryID) }
+
+    func remove(dictionaryID: String, generation: UInt64) {
+        runtimes = runtimes.filter {
+            $0.key.dictionaryID != dictionaryID ||
+                $0.key.generation != generation
+        }
+    }
+
+    func removeAll(dictionaryID: String) {
+        runtimes = runtimes.filter { $0.key.dictionaryID != dictionaryID }
     }
 
     func lookup(descriptor: DictionaryDescriptor,
+                generation: UInt64,
                 query: String) async -> ManagedDictionaryRuntimeOutcome {
         guard !Task.isCancelled else { return .miss }
+        if DictionaryFormatterIdentifier.supportsOpenResourceSQLite(
+            descriptor.formatterIdentifier
+        ) {
+            do {
+                return try OpenResourceSQLiteRuntime.lookup(
+                    descriptor: descriptor,
+                    query: query,
+                    applicationSupportRootURL: applicationSupportRootURL
+                )
+            } catch {
+                return .identityMismatch
+            }
+        }
         do {
+            guard let persistent = descriptor.publishedIndexIdentity else {
+                return .identityMismatch
+            }
             let runtime: Runtime
-            if let expectedIdentity = Self.identity(for: descriptor),
-               let existing = runtimes[descriptor.dictionaryID],
+            let key = RuntimeKey(
+                dictionaryID: descriptor.dictionaryID,
+                generation: generation,
+                indexPublicationID: persistent.indexPublicationID,
+                indexSHA256: persistent.indexSHA256
+            )
+            if let expectedIdentity = Self.identity(for: descriptor, generation: generation),
+               let existing = runtimes[key],
                existing.identity == expectedIdentity {
                 runtime = existing
             } else {
                 let plan = try validator.validate(descriptor)
                 guard !Task.isCancelled else { return .miss }
                 let identity = RuntimeIdentity(
+                    generation: generation,
                     descriptorUpdatedAt: plan.descriptorUpdatedAt,
                     sourceSHA256: plan.sourceSHA256,
                     sourceFileSize: plan.sourceFileSize,
-                    indexFileSize: plan.indexFileSize
+                    indexFileSize: plan.indexFileSize,
+                    indexPublicationID: plan.indexPublicationID,
+                    indexSHA256: plan.indexSHA256
                 )
                 let core = DictionaryCoreBridge(
-                    readOnlyWithDictionaryPath: plan.sourceURL.path,
-                    indexPath: plan.indexURL.path,
+                    managedReadOnlyWithRootPath: plan.managedRootURL.path,
+                    sourceRelativePath: plan.sourceRelativePath,
+                    indexRelativePath: plan.indexRelativePath,
+                    dictionaryID: plan.dictionaryID,
+                    publicationID: plan.indexPublicationID,
+                    indexSHA256: plan.indexSHA256,
+                    indexFileSize: plan.indexFileSize,
+                    sourceSHA256: plan.sourceSHA256,
+                    sourceFileSize: plan.sourceFileSize,
+                    schemaVersion: plan.schemaVersion,
+                    entryCount: plan.entryCount,
                     cacheMaximumBytes: UInt(Self.cacheMaximumBytes),
                     cacheMaximumEntries: UInt(Self.cacheMaximumEntries)
                 )
-                guard core.isReady else { return .unavailable }
+                guard core.isReady else { return .identityMismatch }
                 runtime = Runtime(identity: identity, core: core)
-                runtimes[plan.dictionaryID] = runtime
+                runtimes[key] = runtime
             }
             let raw = runtime.core.lookup(
                 query, maximumHTMLBytes: UInt(Self.maximumRawHTMLBytes)
             )
             if let error = raw["error"] as? String, !error.isEmpty {
-                runtimes[descriptor.dictionaryID] = nil
-                return .unavailable
+                runtimes[key] = nil
+                return .identityMismatch
             }
             guard raw["found"] as? Bool == true,
                   let html = raw["html"] as? String,
@@ -93,25 +153,35 @@ actor LiveManagedDictionaryQueryRuntime: ManagedDictionaryQueryRuntime {
                 matchedHeadword: matched?.isEmpty == false ? matched! : query,
                 blocks: blocks,
                 plainText: plainText,
-                truncated: sanitized.truncated || (raw["htmlTruncated"] as? Bool == true)
+                truncated: sanitized.truncated || (raw["htmlTruncated"] as? Bool == true),
+                sourcePriority: descriptor.queryLevel.rank,
+                dictionaryOrder: descriptor.sortPosition
             ))
         } catch is CancellationError {
             return .miss
         } catch {
-            runtimes[descriptor.dictionaryID] = nil
-            return .unavailable
+            runtimes = runtimes.filter {
+                $0.key.dictionaryID != descriptor.dictionaryID ||
+                    $0.key.generation != generation
+            }
+            return .identityMismatch
         }
     }
 
-    private static func identity(for descriptor: DictionaryDescriptor) -> RuntimeIdentity? {
+    private static func identity(for descriptor: DictionaryDescriptor,
+                                 generation: UInt64) -> RuntimeIdentity? {
         guard let sourceSHA256 = descriptor.indexMetadata.sourceSHA256,
               let sourceFileSize = descriptor.indexMetadata.sourceFileSize,
-              let indexFileSize = descriptor.indexMetadata.indexFileSize else { return nil }
+              let indexFileSize = descriptor.indexMetadata.indexFileSize,
+              let published = descriptor.publishedIndexIdentity else { return nil }
         return RuntimeIdentity(
+            generation: generation,
             descriptorUpdatedAt: descriptor.updatedAt,
             sourceSHA256: sourceSHA256.lowercased(),
             sourceFileSize: sourceFileSize,
-            indexFileSize: indexFileSize
+            indexFileSize: indexFileSize,
+            indexPublicationID: published.indexPublicationID,
+            indexSHA256: published.indexSHA256
         )
     }
 

@@ -6,7 +6,9 @@ enum AIRequestIntent: String, Codable, CaseIterable, Sendable {
     case inlineWordExpansion = "inline_word_expansion"
     case inlineSentenceExpansion = "inline_sentence_expansion"
 
-    var promptVersion: Int { 1 }
+    var promptVersion: Int {
+        self == .inlineWordQuick ? 3 : 2
+    }
 
     var isQuick: Bool {
         self == .inlineWordQuick || self == .inlineSentenceQuick
@@ -14,7 +16,7 @@ enum AIRequestIntent: String, Codable, CaseIterable, Sendable {
 
     var maximumTokens: Int {
         switch self {
-        case .inlineWordQuick: return 256
+        case .inlineWordQuick: return 512
         case .inlineSentenceQuick: return 512
         case .inlineWordExpansion: return 1_800
         case .inlineSentenceExpansion: return 2_600
@@ -30,18 +32,73 @@ enum InlineLookupSelectionKind: String, Codable, Equatable, Sendable {
 
 enum InlineLookupState: Equatable, Sendable {
     case loadingQuick
+    case loadingOffline
+    case aiActionAvailable(localMiss: Bool)
+    case loadingAI
     case success
     case loadingExpansion
-    case failed(String)
+    case compactFailure(String)
+}
+
+enum InlineOfflineTranslationState: Equatable, Sendable {
+    case notRequested
+    case checking(OfflineTranslationPair)
+    case translating(OfflineTranslationPair)
+    case translated(text: String, pair: OfflineTranslationPair)
+    case languagePackRequired(OfflineTranslationPair)
+    case unavailable(OfflineTranslationPair)
+    case failed(OfflineTranslationPair)
+}
+
+/// Chooses the Apple operation for an inline selection from the current language roles.
+/// Inline lookup uses the current Native↔Learning pair in both directions. The controller still
+/// keeps a reliable single-word local hit ahead of Apple; phrases/sentences and local misses may
+/// use an already-installed Apple language pack before the explicit third-party AI action.
+enum InlineOfflineTranslationPlanner {
+    static func operation(
+        for text: String,
+        preferences: LanguagePreferences
+    ) -> PlannedOfflineTranslation? {
+        let context = LanguageContext.make(
+            classification: QueryIntentClassifier.classify(text),
+            preferences: preferences
+        )
+        guard let plan = OfflineTranslationPlan.make(context: context) else {
+            return nil
+        }
+        let desiredRole: OfflineTranslationOutputRole = context.isNativeDominant
+            ? .learningVersion : .nativeVersion
+        return plan.operations.first { operation in
+            operation.outputRole == desiredRole &&
+                operation.pair.source.languageIdentifier !=
+                    operation.pair.target.languageIdentifier
+        }
+    }
+
+    static func automaticallyTranslates(
+        availability: OfflineTranslationAvailability
+    ) -> Bool {
+        availability == .installed
+    }
 }
 
 struct InlineWordQuickAIResult: Codable, Equatable, Sendable {
     var partOfSpeech: String
     var definitionsZH: [String]
+    var learningEquivalent: String? = nil
+    var learningDefinition: String? = nil
+    var nativeExplanation: String? = nil
+    var exampleLearning: String? = nil
+    var exampleNative: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case partOfSpeech = "part_of_speech"
         case definitionsZH = "definitions_zh"
+        case learningEquivalent = "learning_language_equivalent"
+        case learningDefinition = "learning_language_definition"
+        case nativeExplanation = "native_language_explanation"
+        case exampleLearning = "example_learning_language"
+        case exampleNative = "example_native_language"
     }
 
     func validated() throws -> InlineWordQuickAIResult {
@@ -53,11 +110,25 @@ struct InlineWordQuickAIResult: Codable, Equatable, Sendable {
         guard !definitions.isEmpty else {
             throw AIClientError.schemaInvalid(field: "definitions_zh")
         }
-        return InlineWordQuickAIResult(partOfSpeech: part, definitionsZH: definitions)
+        return InlineWordQuickAIResult(
+            partOfSpeech: part,
+            definitionsZH: definitions,
+            learningEquivalent: Self.optionalClean(learningEquivalent, limit: 180),
+            learningDefinition: Self.optionalClean(learningDefinition, limit: 360),
+            nativeExplanation: Self.optionalClean(nativeExplanation, limit: 360),
+            exampleLearning: Self.optionalClean(exampleLearning, limit: 360),
+            exampleNative: Self.optionalClean(exampleNative, limit: 360)
+        )
     }
 
     private static func clean(_ value: String, limit: Int) -> String {
         String(SentenceTextNormalizer.normalize(value).prefix(limit))
+    }
+
+    private static func optionalClean(_ value: String?, limit: Int) -> String? {
+        guard let value else { return nil }
+        let clean = clean(value, limit: limit)
+        return clean.isEmpty ? nil : clean
     }
 }
 
@@ -78,6 +149,29 @@ struct InlineWordQuickResult: Equatable, Sendable {
     let providerDisplayName: String?
     let model: String?
     let fromCache: Bool
+    let learningEquivalent: String?
+    let learningDefinition: String?
+    let nativeExplanation: String?
+    let exampleLearning: String?
+    let exampleNative: String?
+
+    init(partOfSpeech: String, definitions: [String], source: String,
+         providerDisplayName: String?, model: String?, fromCache: Bool,
+         learningEquivalent: String? = nil, learningDefinition: String? = nil,
+         nativeExplanation: String? = nil, exampleLearning: String? = nil,
+         exampleNative: String? = nil) {
+        self.partOfSpeech = partOfSpeech
+        self.definitions = definitions
+        self.source = source
+        self.providerDisplayName = providerDisplayName
+        self.model = model
+        self.fromCache = fromCache
+        self.learningEquivalent = learningEquivalent
+        self.learningDefinition = learningDefinition
+        self.nativeExplanation = nativeExplanation
+        self.exampleLearning = exampleLearning
+        self.exampleNative = exampleNative
+    }
 
     var isAI: Bool { providerDisplayName != nil }
 }
@@ -115,10 +209,10 @@ struct InlineLocalDictionaryHit: Equatable, Sendable {
     }
 }
 
-struct InlineLocalLookupSource {
+struct InlineLocalLookupSource: Sendable {
     let name: String
     let priority: Int
-    let lookup: (String) -> InlineLocalDictionaryHit?
+    let lookup: @MainActor @Sendable (String) -> InlineLocalDictionaryHit?
 }
 
 typealias ManagedInlineLookup = @Sendable (String) async -> [InlineLocalDictionaryHit]
@@ -208,6 +302,7 @@ struct InlineLookupSupplement: Sendable {
     var localSource: String?
     var aiProvider: String?
     var aiModel: String?
+    var offlineTranslationState: InlineOfflineTranslationState = .notRequested
     var state: InlineLookupState
     var generation: UInt64
 
@@ -329,6 +424,18 @@ enum InlineSelectionSnapshotFactory {
 
     private static func cleanWordOrPhrase(_ source: String) -> String {
         var value = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Browser/PDF/Zotero renderers commonly expose the visual Markdown wrappers as part of
+        // the accessibility selection. Strip only a balanced outer wrapper; internal underscores
+        // (for example `deep_seek`) remain authoritative query text.
+        for (open, close) in [("**", "**"), ("__", "__"), ("`", "`"),
+                              ("*", "*"), ("_", "_")] {
+            if value.count > open.count + close.count,
+               value.hasPrefix(open), value.hasSuffix(close) {
+                value = String(value.dropFirst(open.count).dropLast(close.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
         let quotePairs: [(Character, Character)] = [
             ("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’"),
             ("「", "」"), ("『", "』"), ("«", "»"), ("‹", "›")
@@ -475,7 +582,7 @@ actor InlineLocalLookupService {
         var quick: InlineWordQuickResult?
         for source in sources {
             guard !Task.isCancelled else { break }
-            guard let hit = source.lookup(normalized) else { continue }
+            guard let hit = await source.lookup(normalized) else { continue }
             hits.append(hit)
             if quick == nil, hit.hasChineseCoreDefinition {
                 quick = InlineWordQuickResult(
@@ -649,13 +756,26 @@ final class InlineLookupAttributedFormatter {
 
         switch supplement.state {
         case .loadingQuick:
-            append("正在查询…\n", color: .secondaryLabelColor,
+            append("正在查询本地词典…\n", color: .secondaryLabelColor,
+                   textBlock: textBlock, to: output)
+        case .loadingOffline:
+            break
+        case .aiActionAvailable(let localMiss):
+            if localMiss {
+                append("未找到本地释义。可按需使用 AI 双语解释。\n",
+                       color: .secondaryLabelColor, textBlock: textBlock, to: output)
+            } else {
+                append("可按需使用 AI 双语解释；未点击不会联网。\n",
+                       color: .secondaryLabelColor, textBlock: textBlock, to: output)
+            }
+        case .loadingAI:
+            append("AI 双语解释正在请求…\n", color: .secondaryLabelColor,
                    textBlock: textBlock, to: output)
         case .loadingExpansion:
             appendQuick(supplement.quickResult, textBlock: textBlock, to: output)
             append("正在加载更多内容…\n", color: .secondaryLabelColor,
                    textBlock: textBlock, to: output)
-        case .failed(let message):
+        case .compactFailure(let message):
             appendQuick(supplement.quickResult, textBlock: textBlock, to: output)
             append("\(message)\n", color: .secondaryLabelColor,
                    textBlock: textBlock, to: output)
@@ -667,6 +787,12 @@ final class InlineLookupAttributedFormatter {
                 appendQuick(supplement.quickResult, textBlock: textBlock, to: output)
             }
         }
+
+        appendOfflineTranslation(
+            supplement.offlineTranslationState,
+            textBlock: textBlock,
+            beforeAIContentIn: output
+        )
 
         let source = sourceText(for: supplement)
         if !source.isEmpty {
@@ -691,18 +817,115 @@ final class InlineLookupAttributedFormatter {
         guard let result else { return }
         switch result {
         case .word(let word):
+            if let equivalent = word.learningEquivalent, !equivalent.isEmpty {
+                append("学习语言表达\n", font: .systemFont(ofSize: 11.5, weight: .semibold),
+                       color: .labelColor, spacingBefore: 2,
+                       textBlock: textBlock, to: output)
+                append("\(equivalent)\n", font: .systemFont(ofSize: 14, weight: .semibold),
+                       color: .labelColor, textBlock: textBlock, to: output)
+            }
             if !word.partOfSpeech.isEmpty {
                 append("\(word.partOfSpeech)\n", font: .systemFont(ofSize: 11.5, weight: .medium),
-                       color: .secondaryLabelColor, textBlock: textBlock, to: output)
+                       color: .labelColor, textBlock: textBlock, to: output)
+            }
+            if word.isAI && !word.definitions.isEmpty {
+                append("母语核心释义\n", font: .systemFont(ofSize: 11.5, weight: .semibold),
+                       color: .labelColor, spacingBefore: 2,
+                       textBlock: textBlock, to: output)
             }
             for definition in word.definitions {
                 append("• \(definition)\n", font: .systemFont(ofSize: 12.5),
+                       color: .labelColor, textBlock: textBlock, to: output)
+            }
+            if let definition = word.learningDefinition, !definition.isEmpty {
+                append("学习语言释义\n", font: .systemFont(ofSize: 11.5, weight: .semibold),
+                       color: .labelColor, spacingBefore: 3,
+                       textBlock: textBlock, to: output)
+                append("\(definition)\n", font: .systemFont(ofSize: 12.5),
+                       color: .labelColor, textBlock: textBlock, to: output)
+            }
+            if let explanation = word.nativeExplanation, !explanation.isEmpty,
+               !word.definitions.contains(explanation) {
+                append("用法说明\n", font: .systemFont(ofSize: 11.5, weight: .semibold),
+                       color: .labelColor, spacingBefore: 3,
+                       textBlock: textBlock, to: output)
+                append("\(explanation)\n", font: .systemFont(ofSize: 12.5),
+                       color: .labelColor, textBlock: textBlock, to: output)
+            }
+            if let learning = word.exampleLearning, !learning.isEmpty {
+                append("例句\n", font: .systemFont(ofSize: 11.5, weight: .semibold),
+                       color: .labelColor, spacingBefore: 3,
+                       textBlock: textBlock, to: output)
+                append("\(learning)\n", font: NSFontManager.shared.convert(
+                    .systemFont(ofSize: 12.5), toHaveTrait: .italicFontMask
+                ), color: .labelColor, textBlock: textBlock, to: output)
+            }
+            if let native = word.exampleNative, !native.isEmpty {
+                append("\(native)\n", font: .systemFont(ofSize: 12.5),
                        color: .labelColor, textBlock: textBlock, to: output)
             }
         case .sentence(let sentence):
             append("\(sentence.translation)\n", font: .systemFont(ofSize: 13),
                    color: .labelColor, spacingAfter: 2, textBlock: textBlock, to: output)
         }
+    }
+
+    private func appendOfflineTranslation(
+        _ state: InlineOfflineTranslationState,
+        textBlock: NSTextBlock,
+        beforeAIContentIn output: NSMutableAttributedString
+    ) {
+        // This content belongs before AI output. Insert it immediately after the selected-text
+        // heading even though the formatter appends the AI state first for legacy cards.
+        let content = NSMutableAttributedString()
+        switch state {
+        case .notRequested:
+            return
+        case .checking(let pair):
+            append("正在检查 Apple 系统离线翻译（\(direction(pair))）…\n",
+                   color: .secondaryLabelColor, textBlock: textBlock, to: content)
+        case .translating(let pair):
+            append("Apple 系统离线翻译正在处理（\(direction(pair))）…\n",
+                   color: .secondaryLabelColor, textBlock: textBlock, to: content)
+        case .translated(let text, let pair):
+            append("Apple 系统离线翻译（\(direction(pair))）\n",
+                   font: .systemFont(ofSize: 11.5, weight: .semibold),
+                   color: .secondaryLabelColor, spacingBefore: 2,
+                   textBlock: textBlock, to: content)
+            append("\(text)\n", font: .systemFont(ofSize: 13),
+                   color: .labelColor, spacingAfter: 3,
+                   textBlock: textBlock, to: content)
+        case .languagePackRequired(let pair):
+            append("Apple 离线翻译语言包尚未准备（\(direction(pair))）。" +
+                   "可在主查询的“本地功能”中主动准备。\n",
+                   color: .secondaryLabelColor, textBlock: textBlock, to: content)
+        case .unavailable(let pair):
+            append("Apple 系统离线翻译暂不可用（\(direction(pair))）。\n",
+                   color: .secondaryLabelColor, textBlock: textBlock, to: content)
+        case .failed(let pair):
+            append("Apple 系统离线翻译本次未完成（\(direction(pair))）。\n",
+                   color: .secondaryLabelColor, textBlock: textBlock, to: content)
+        }
+        let insertion = selectedTextHeadingEnd(in: output)
+        output.insert(content, at: insertion)
+    }
+
+    private func selectedTextHeadingEnd(in output: NSAttributedString) -> Int {
+        let string = output.string as NSString
+        guard string.length > 0 else { return 0 }
+        let first = string.range(of: "\n")
+        guard first.location != NSNotFound else { return output.length }
+        let secondSearch = NSRange(
+            location: NSMaxRange(first),
+            length: string.length - NSMaxRange(first)
+        )
+        let second = string.range(of: "\n", options: [], range: secondSearch)
+        return second.location == NSNotFound ? output.length : NSMaxRange(second)
+    }
+
+    private func direction(_ pair: OfflineTranslationPair) -> String {
+        "\(pair.source.languageIdentifier.chineseName) → " +
+            pair.target.languageIdentifier.chineseName
     }
 
     private func appendExpanded(_ result: InlineLookupExpandedResult,
@@ -768,6 +991,9 @@ final class InlineLookupAttributedFormatter {
 
     private func sourceText(for supplement: InlineLookupSupplement) -> String {
         var values: [String] = []
+        if case .translated = supplement.offlineTranslationState {
+            values.append("Apple 系统离线翻译")
+        }
         if let local = supplement.localSource, !local.isEmpty { values.append(local) }
         if let provider = supplement.aiProvider, !provider.isEmpty {
             let model = supplement.aiModel?.isEmpty == false ? " · \(supplement.aiModel!)" : ""
