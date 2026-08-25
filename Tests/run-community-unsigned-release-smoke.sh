@@ -25,8 +25,9 @@ with open(sys.argv[1], "x", encoding="utf-8") as handle:
         "artifactSHA256": sys.argv[2],
         "artifactSize": int(sys.argv[3]),
         "gitDirty": False,
-        "signing": "unsigned",
-        "signingAuthority": "unsigned",
+        "signing": "ad-hoc",
+        "signingAuthority": "authority-free-ad-hoc",
+        "hardenedRuntime": "enabled-ad-hoc",
         "notarization": "not-submitted",
         "notarizationStatus": "not-submitted",
         "stapled": False,
@@ -59,5 +60,8 @@ if /usr/bin/grep -Eq 'notarytool[[:space:]]+submit|codesign[[:space:]].*Develope
 fi
 /usr/bin/grep -Fq 'github-community-unsigned' "$RELEASE/build-release.sh"
 /usr/bin/grep -Fq 'UNSIGNED-NOT-FOR-DISTRIBUTION.zip' "$RELEASE/build-release.sh"
+/usr/bin/grep -Fq 'codesign --force --sign -' "$RELEASE/build-release.sh"
+/usr/bin/grep -Fq 'codesign --verify --deep --strict' "$RELEASE/verify-release.sh"
+/usr/bin/grep -Fq -- '--norsrc' "$RELEASE/build-release.sh"
 
 print "CommunityUnsignedReleaseSmoke PASS"

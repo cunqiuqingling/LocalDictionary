@@ -38,8 +38,12 @@ if missing:
     raise SystemExit(f"manifest missing fields: {missing}")
 if manifest["artifactFilename"] != sys.argv[2]:
     raise SystemExit("manifest artifact filename mismatch")
-if manifest["signingAuthority"] != "UNSIGNED-NOT-FOR-DISTRIBUTION":
-    raise SystemExit("unsigned status missing")
+if manifest["signing"] != "ad-hoc":
+    raise SystemExit("authority-free ad-hoc signing status missing")
+if manifest["signingAuthority"] != "authority-free-ad-hoc-not-for-distribution":
+    raise SystemExit("test-only signing authority status missing")
+if manifest["hardenedRuntime"] != "enabled-ad-hoc":
+    raise SystemExit("ad-hoc hardened runtime status missing")
 if manifest["notarizationStatus"] != "not-submitted":
     raise SystemExit("unsigned artifact claims notarization")
 PY
@@ -47,6 +51,13 @@ PY
 EXTRACT="$WORK/Extracted Artifact With Spaces"
 /bin/mkdir "$EXTRACT"
 /usr/bin/ditto -x -k "$ARTIFACT" "$EXTRACT"
+/usr/bin/codesign --verify --deep --strict --verbose=4 \
+    "$EXTRACT/LocalDictionary.app"
+[[ -f "$EXTRACT/LocalDictionary.app/Contents/_CodeSignature/CodeResources" ]]
+if /usr/bin/zipinfo -1 "$ARTIFACT" | /usr/bin/grep -Eq '(^|/)\._|^__MACOSX(/|$)'; then
+    print -u2 "release ZIP contains AppleDouble metadata entries"
+    exit 1
+fi
 "$ROOT/scripts/release/verify-release.sh" \
     --mode unsigned-dry-run \
     --app "$EXTRACT/LocalDictionary.app" \
@@ -91,8 +102,15 @@ print 'synthetic unaudited license' > \
     "$UNKNOWN_LICENSE/Contents/Resources/ReleaseLegal/Licenses/unknown-LICENSE.txt"
 expect_verify_failure unknown-license "$UNKNOWN_LICENSE"
 
+INCOMPLETE_SIGNATURE="$WORK/Incomplete Signature/LocalDictionary.app"
+/bin/mkdir -p "${INCOMPLETE_SIGNATURE:h}"
+/usr/bin/ditto "$EXTRACT/LocalDictionary.app" "$INCOMPLETE_SIGNATURE"
+/bin/mv "$INCOMPLETE_SIGNATURE/Contents/_CodeSignature" \
+    "$WORK/removed-CodeSignature"
+expect_verify_failure incomplete-signature "$INCOMPLETE_SIGNATURE"
+
 if /usr/bin/grep -Eq 'notarytool submit|gh release create|spctl_status=passed' "$LOG"; then
     print -u2 "unsigned dry-run log claims or invokes an external release result"
     exit 1
 fi
-print "M24UnsignedReleaseDryRun PASS (14/14)"
+print "M24UnsignedReleaseDryRun PASS (18/18)"

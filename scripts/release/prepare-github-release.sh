@@ -62,7 +62,7 @@ if manifest.get("gitDirty") is not False:
     raise SystemExit("formal manifest must record gitDirty=false")
 if mode == "community-unsigned":
     expected = {
-        "signing": "unsigned",
+        "signing": "ad-hoc",
         "notarization": "not-submitted",
         "stapled": False,
         "gatekeeperDirectOpen": "not-guaranteed",
@@ -71,8 +71,10 @@ if mode == "community-unsigned":
     for key, value in expected.items():
         if manifest.get(key) != value:
             raise SystemExit(f"community manifest mismatch: {key}")
-    if manifest.get("signingAuthority") != "unsigned":
-        raise SystemExit("community manifest claims a signing authority")
+    if manifest.get("signingAuthority") != "authority-free-ad-hoc":
+        raise SystemExit("community manifest lacks the authority-free ad-hoc signing record")
+    if manifest.get("hardenedRuntime") != "enabled-ad-hoc":
+        raise SystemExit("community manifest lacks the ad-hoc hardened runtime record")
 else:
     if manifest.get("notarizationStatus") != "Accepted":
         raise SystemExit("formal manifest must record Accepted notarization")

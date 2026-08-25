@@ -68,6 +68,13 @@ require_text 'community-unsigned' "$ROOT/scripts/release/build-release.sh"
 require_text 'macOS-\$RELEASE_ARCHITECTURE-unsigned.zip' \
     "$ROOT/scripts/release/build-release.sh"
 require_text 'github-community-unsigned' "$ROOT/scripts/release/build-release.sh"
+require_fixed 'codesign --force --sign - --timestamp=none --options runtime' \
+    "$ROOT/scripts/release/build-release.sh"
+require_fixed 'codesign --verify --deep --strict' \
+    "$ROOT/scripts/release/verify-release.sh"
+require_fixed 'Contents/_CodeSignature/CodeResources' \
+    "$ROOT/scripts/release/verify-release.sh"
+require_fixed '--norsrc' "$ROOT/scripts/release/build-release.sh"
 require_text 'plutil -insert method -string developer-id' "$ROOT/scripts/release/build-release.sh"
 require_text 'OTHER_CODE_SIGN_FLAGS="--timestamp"' "$ROOT/scripts/release/build-release.sh"
 require_text 'codesign --verify --deep --strict' "$ROOT/scripts/release/notarize-release.sh"

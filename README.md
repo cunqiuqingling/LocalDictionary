@@ -8,8 +8,9 @@ Copyright (C) 2026 liuzhentie (刘震铁, aka "cunqiu")
 
 ## 当前公开状态
 
-首次公开发行支持零费用 `community-unsigned` 模式，同时保留未来可选的 Developer ID、
-Hardened Runtime、公证与 staple 流程。Community canonical asset 为
+首次公开发行支持零费用 `community-unsigned` 模式：发布包会对完整 App Bundle 做无身份的
+ad-hoc 签名与严格校验，避免半签名 Bundle 被误报为“已损坏”；它仍不等同于 Developer ID
+签名或 Apple 公证。项目同时保留未来可选的 Developer ID、公证与 staple 流程。Community canonical asset 为
 `LocalDictionary-<version>-macOS-arm64-unsigned.zip`，没有 Developer ID 签名和 Apple
 公证，Gatekeeper 不保证直接打开。只应从项目官方 GitHub 仓库下载并核对 `SHA256SUMS`；
 首次打开若被阻止，仅使用“系统设置 → 隐私与安全性 → 仍要打开”，不得关闭 Gatekeeper。
@@ -119,7 +120,7 @@ API Key 保存在 macOS Keychain。Provider 名称、URL、模型和开关等非
 
 ## 权限与隐私摘要
 
-App 仅请求辅助功能权限，用于用户主动触发查询时读取当前选区。AX 读取失败时会执行一次 Command-C 剪贴板回退，并尽量恢复原剪贴板；App 不持续监听剪贴板。
+App 首次启动会说明可选的辅助功能权限；该权限只用于用户主动触发查询时读取当前选区，未授权仍可手动查词。AX 读取失败时会执行一次 Command-C 剪贴板回退，并尽量恢复原剪贴板；App 不持续监听剪贴板。
 
 App 不请求屏幕录制、麦克风或系统录音权限。Obsidian 写入只操作用户明确选择的 Markdown 文件，不扫描整个 Vault。更多说明见 [docs/privacy.md](docs/privacy.md)。
 

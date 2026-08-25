@@ -3,7 +3,7 @@
 ## Before archive
 
 - [ ] Distribution mode is explicitly chosen: `community-unsigned` or `developer-id`;
-      unsigned status is never described as notarized or Developer ID signed.
+      authority-free ad-hoc status is never described as notarized or Developer ID signed.
 - [ ] Human approved the marketing version and build number.
 - [ ] Worktree is clean, branch and HEAD are exact, and all public tests passed.
 - [ ] `audit-release.sh` passes with the reviewed Xcode selected by `DEVELOPER_DIR`.
@@ -22,6 +22,9 @@
 - [ ] Export uses Developer ID, Hardened Runtime, secure timestamp, and the empty
       Release entitlements file.
 - [ ] Bundle audit passes before and after signing.
+- [ ] Community mode replaces the executable-only linker signature with a complete
+      authority-free ad-hoc Bundle signature; strict verification, the resource seal,
+      empty entitlements, and Hardened Runtime all pass.
 - [ ] Nested Mach-O list is reviewed; current expectation is only
       `Contents/MacOS/LocalDictionary`.
 - [ ] `codesign -d --verbose=4`, entitlement display, and strict deep verification pass.
@@ -34,12 +37,14 @@
 
 - [ ] Community mode uses
       `LocalDictionary-<version>-macOS-arm64-unsigned.zip`; its manifest says
-      `github-community-unsigned`, `unsigned`, `not-submitted`, `stapled: false`, and
-      `gatekeeperDirectOpen: not-guaranteed`.
+      `github-community-unsigned`, `ad-hoc`, `authority-free-ad-hoc`, `enabled-ad-hoc`,
+      `not-submitted`, `stapled: false`, and `gatekeeperDirectOpen: not-guaranteed`.
 - [ ] Developer ID mode uses `LocalDictionary-<version>-macOS-arm64.zip` only after
       accepted notarization and successful staple/Gatekeeper verification.
 - [ ] Final ZIP was regenerated from the stapled app and contains only
       `LocalDictionary.app`.
+- [ ] ZIP integrity passes and its entry list contains no AppleDouble `._*` or
+      `__MACOSX` metadata.
 - [ ] Final name is `LocalDictionary-<version>-macOS-arm64.zip`.
 - [ ] `SHA256SUMS` and `release-manifest.json` match the immutable final ZIP.
 - [ ] Release notes accurately state macOS 15+, Apple Silicon, privacy/network behavior,
@@ -55,7 +60,7 @@
 1. Download the ZIP and `SHA256SUMS`, then verify:
    `shasum -a 256 -c SHA256SUMS`.
 2. Unzip and move `LocalDictionary.app` to `/Applications` or `~/Applications`.
-3. For a notarized build, start the app normally. For a community unsigned build, first
+3. For a notarized build, start the app normally. For a community ad-hoc build, first
    try opening normally; if macOS blocks it, use only System Settings → Privacy &
    Security → Open Anyway for this app. Do not disable Gatekeeper and do not remove
    quarantine with `xattr`.

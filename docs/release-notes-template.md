@@ -45,9 +45,11 @@ Download the arm64 ZIP and `SHA256SUMS` from the official project release, then 
 `/Applications` or `~/Applications`.
 
 If this release uses the `-unsigned.zip` community asset, it has no Developer ID
-signature or Apple notarization and Gatekeeper direct-open is not guaranteed. Try
-opening it normally; if macOS blocks it, use System Settings → Privacy & Security →
-Open Anyway for this app. Do not disable Gatekeeper or remove quarantine with `xattr`.
+signature or Apple notarization. Its complete authority-free ad-hoc Bundle signature protects
+the ZIP from incomplete-signature “damaged app” failures, but Gatekeeper direct-open is not
+guaranteed because Apple does not trust that signature as a developer identity. Try opening it
+normally; if macOS blocks it, use System Settings → Privacy & Security → Open Anyway for this
+app. Do not disable Gatekeeper or remove quarantine with `xattr`.
 Grant Accessibility only if you want Option-Space to read the selected text. Import an
 MDX only when you have the right to use it.
 

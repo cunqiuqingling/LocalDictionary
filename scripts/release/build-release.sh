@@ -79,17 +79,19 @@ if [[ "$MODE" == "unsigned-dry-run" || "$MODE" == "community-unsigned" ]]; then
     APP="$ARCHIVE/Products/Applications/$RELEASE_PRODUCT.app"
     if [[ "$MODE" == "unsigned-dry-run" ]]; then
         ARTIFACT_NAME="$RELEASE_PRODUCT-$VERSION-macOS-$RELEASE_ARCHITECTURE-UNSIGNED-NOT-FOR-DISTRIBUTION.zip"
-        SIGNING_AUTHORITY="UNSIGNED-NOT-FOR-DISTRIBUTION"
+        SIGNING_AUTHORITY="authority-free-ad-hoc-not-for-distribution"
+        SIGNING_MODE="ad-hoc"
         DISTRIBUTION_CHANNEL="test-only"
     else
         ARTIFACT_NAME="$RELEASE_PRODUCT-$VERSION-macOS-$RELEASE_ARCHITECTURE-unsigned.zip"
-        SIGNING_AUTHORITY="unsigned"
+        SIGNING_AUTHORITY="authority-free-ad-hoc"
+        SIGNING_MODE="ad-hoc"
         DISTRIBUTION_CHANNEL="github-community-unsigned"
     fi
     NOTARY_STATUS="not-submitted"
     STAPLE_STATUS="not-applicable"
     GATEKEEPER_STATUS="not-run"
-    HARDENED_STATUS="configured-not-signature-asserted"
+    HARDENED_STATUS="enabled-ad-hoc"
 else
     DISTRIBUTION_CHANNEL="developer-id"
     ARCHIVE="$WORK/LocalDictionary.xcarchive"
@@ -119,6 +121,7 @@ else
     APP="$WORK/Export/$RELEASE_PRODUCT.app"
     ARTIFACT_NAME="$RELEASE_PRODUCT-$VERSION-macOS-$RELEASE_ARCHITECTURE-NOTARIZATION-SUBMISSION.zip"
     SIGNING_AUTHORITY="$IDENTITY"
+    SIGNING_MODE="developer-id"
     NOTARY_STATUS="not-submitted"
     STAPLE_STATUS="not-stapled"
     GATEKEEPER_STATUS="pending-notarization"
@@ -129,13 +132,22 @@ fi
 PUBLISH_DIR="$WORK/Publish"
 /bin/mkdir "$PUBLISH_DIR"
 /usr/bin/ditto "$APP" "$PUBLISH_DIR/$RELEASE_PRODUCT.app"
+if [[ "$MODE" == "unsigned-dry-run" || "$MODE" == "community-unsigned" ]]; then
+    # ld adds only an executable-level linker signature when Xcode signing is disabled. Signing
+    # the complete bundle ad hoc creates CodeResources and seals Info.plist/resources, preventing
+    # Gatekeeper from interpreting the incomplete linker signature as a damaged app.
+    /usr/bin/codesign --force --sign - --timestamp=none --options runtime \
+        --entitlements "$RELEASE_ROOT/App/LocalDictionaryRelease.entitlements" \
+        "$PUBLISH_DIR/$RELEASE_PRODUCT.app"
+fi
 "$SCRIPT_DIR/verify-release.sh" \
     --mode "$MODE" \
     --app "$PUBLISH_DIR/$RELEASE_PRODUCT.app" \
     --version "$VERSION"
 
 ARTIFACT="$PUBLISH_DIR/$ARTIFACT_NAME"
-(cd "$PUBLISH_DIR" && /usr/bin/ditto -c -k --keepParent "$RELEASE_PRODUCT.app" "$ARTIFACT")
+(cd "$PUBLISH_DIR" && /usr/bin/ditto -c -k --norsrc --keepParent \
+    "$RELEASE_PRODUCT.app" "$ARTIFACT")
 "$SCRIPT_DIR/verify-release.sh" \
     --mode "$MODE" \
     --app "$PUBLISH_DIR/$RELEASE_PRODUCT.app" \
@@ -173,7 +185,7 @@ release_write_manifest "$MANIFEST" \
     artifactSHA256 "$SHA" \
     appBundleIdentity "$APP_IDENTITY" \
     signingAuthority "$SIGNING_AUTHORITY" \
-    signing "$([[ "$MODE" == developer-id ]] && print developer-id || print unsigned)" \
+    signing "$SIGNING_MODE" \
     hardenedRuntime "$HARDENED_STATUS" \
     entitlementsSummary "empty-minimum" \
     notarizationStatus "$NOTARY_STATUS" \
@@ -194,7 +206,7 @@ MANIFEST="$OUTPUT/release-manifest.json"
 print "mode=$MODE"
 case "$MODE" in
     unsigned-dry-run) STATUS="UNSIGNED-NOT-FOR-DISTRIBUTION" ;;
-    community-unsigned) STATUS="community-unsigned-no-developer-id-no-notarization" ;;
+    community-unsigned) STATUS="community-ad-hoc-no-developer-id-no-notarization" ;;
     developer-id) STATUS="developer-id-signed-not-notarized" ;;
 esac
 print "status=$STATUS"

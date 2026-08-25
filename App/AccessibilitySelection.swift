@@ -284,15 +284,69 @@ final class AccessibilityPermissionPrompter {
 
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "允许辅助功能取词"
-        alert.informativeText = "若要读取其他应用中当前选中的文字，请在“系统设置 → 隐私与安全性 → 辅助功能”中允许 LocalDictionary。未授权时仍可手动输入查词。"
-        alert.addButton(withTitle: "打开系统设置")
-        alert.addButton(withTitle: "稍后")
+        alert.messageText = AppLocalization.text(
+            "允许辅助功能取词", "Allow Accessibility for selection lookup"
+        )
+        alert.informativeText = AppLocalization.text(
+            "若要读取其他应用中当前选中的文字，请在“系统设置 → 隐私与安全性 → 辅助功能”中允许 LocalDictionary。未授权时仍可手动输入查词。",
+            "To read selected text in other apps, allow LocalDictionary in System Settings → Privacy & Security → Accessibility. You can still type searches manually without this permission."
+        )
+        alert.addButton(withTitle: AppLocalization.text("打开系统设置", "Open System Settings"))
+        alert.addButton(withTitle: AppLocalization.text("稍后", "Later"))
 
         guard alert.runModal() == .alertFirstButtonReturn,
               let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") else {
             return
         }
         NSWorkspace.shared.open(url)
+    }
+}
+
+protocol FirstLaunchGuidePersisting: AnyObject {
+    func bool(forKey defaultName: String) -> Bool
+    func set(_ value: Any?, forKey defaultName: String)
+}
+
+extension UserDefaults: FirstLaunchGuidePersisting {}
+
+@MainActor
+final class FirstLaunchGuideReminder {
+    static let promptShownKey = "FirstLaunchGuideReminderWasShown.v1"
+
+    private let defaults: FirstLaunchGuidePersisting
+
+    init(defaults: FirstLaunchGuidePersisting = UserDefaults.standard) {
+        self.defaults = defaults
+    }
+
+    /// Claims the one-time presentation before entering a modal session so nested launch events
+    /// cannot display a duplicate alert. Kept internal so the persistence rule can be smoke-tested
+    /// without presenting AppKit UI.
+    func claimPresentation() -> Bool {
+        guard !defaults.bool(forKey: Self.promptShownKey) else { return false }
+        defaults.set(true, forKey: Self.promptShownKey)
+        return true
+    }
+
+    func showIfNeeded(openGuide: () -> Void) {
+        guard claimPresentation() else { return }
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = AppLocalization.text(
+            "开始使用前，请先阅读使用说明",
+            "Please read the User Guide before you begin"
+        )
+        alert.informativeText = AppLocalization.text(
+            "使用说明包含菜单栏入口、Option + Space、辅助功能权限、词典导入、离线翻译以及可选联网 AI 的使用边界。之后也可随时从菜单栏打开“使用说明与版权”。",
+            "The User Guide explains the menu-bar controls, Option-Space, Accessibility permission, dictionary import, offline translation, and the boundaries of optional online AI. You can reopen User Guide & Legal from the menu bar at any time."
+        )
+        alert.addButton(withTitle: AppLocalization.text("阅读使用说明", "Read User Guide"))
+        alert.addButton(withTitle: AppLocalization.text("稍后", "Later"))
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            openGuide()
+        }
     }
 }

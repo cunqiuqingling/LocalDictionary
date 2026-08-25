@@ -98,16 +98,26 @@ if /usr/bin/find "$APP" -type f |
 fi
 
 if [[ "$MODE" == "unsigned-dry-run" || "$MODE" == "community-unsigned" ]]; then
-    if /usr/bin/codesign -dv "$APP" >/dev/null 2>&1; then
-        SIGNATURE_DETAILS="$(/usr/bin/codesign -dv --verbose=4 "$APP" 2>&1)"
-        [[ "$SIGNATURE_DETAILS" == *"Signature=adhoc"* ]] ||
-            release_die "unsigned dry-run contains a non-ad-hoc signature"
-        [[ "$SIGNATURE_DETAILS" != *"Authority="* ]] ||
-            release_die "unsigned dry-run contains a signing authority"
-        print "signature_status=linker_adhoc_${MODE}"
-    else
-        print "signature_status=${MODE}"
-    fi
+    /usr/bin/codesign --verify --deep --strict --verbose=4 "$APP"
+    [[ -f "$APP/Contents/_CodeSignature/CodeResources" ]] ||
+        release_die "community app lacks a complete bundle resource seal"
+    SIGNATURE_DETAILS="$(/usr/bin/codesign -dv --verbose=4 "$APP" 2>&1)"
+    [[ "$SIGNATURE_DETAILS" == *"Signature=adhoc"* ]] ||
+        release_die "community app contains a non-ad-hoc signature"
+    [[ "$SIGNATURE_DETAILS" != *"Authority="* ]] ||
+        release_die "community app contains a signing authority"
+    [[ "$SIGNATURE_DETAILS" == *"flags="*"runtime"* ]] ||
+        release_die "community app lacks hardened runtime"
+    [[ "$SIGNATURE_DETAILS" == *"Info.plist entries="* ]] ||
+        release_die "community app signature does not bind Info.plist"
+    [[ "$SIGNATURE_DETAILS" == *"Sealed Resources version="* ]] ||
+        release_die "community app signature does not seal bundle resources"
+    ENTITLEMENTS="$(/usr/bin/codesign -d --entitlements :- "$APP" 2>/dev/null)"
+    NORMALIZED_ENTITLEMENTS="$(print -r -- "$ENTITLEMENTS" |
+        /usr/bin/plutil -convert json -o - -- -)"
+    [[ "$NORMALIZED_ENTITLEMENTS" == "{}" ]] ||
+        release_die "community app entitlements differ from the empty Release allowlist"
+    print "signature_status=bundle_adhoc_${MODE}"
     print "spctl_status=not_run_for_unsigned_artifact"
 else
     /usr/bin/codesign --verify --deep --strict --verbose=4 "$APP"
@@ -135,8 +145,12 @@ fi
 
 if [[ -n "$ZIP" ]]; then
     [[ -f "$ZIP" ]] || release_die "ZIP does not exist: $ZIP"
+    /usr/bin/unzip -tqq "$ZIP" || release_die "ZIP integrity verification failed"
     ZIP_LIST="$(/usr/bin/zipinfo -1 "$ZIP")"
     [[ -n "$ZIP_LIST" ]] || release_die "ZIP is empty"
+    if print -r -- "$ZIP_LIST" | /usr/bin/grep -Eq '(^|/)\._|^__MACOSX(/|$)'; then
+        release_die "ZIP contains AppleDouble metadata entries"
+    fi
     if print -r -- "$ZIP_LIST" |
         /usr/bin/awk -F/ '
             NF && $1 != "LocalDictionary.app" { bad = 1 }

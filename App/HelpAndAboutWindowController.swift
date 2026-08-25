@@ -75,6 +75,7 @@ struct HelpAndAboutDocuments: Equatable {
     ## 1. 开始使用
 
     - LocalDictionary 是原生 macOS 菜单栏词典。点击菜单栏图标并选择“显示词典”，即可手动输入单词、短语或长文本。
+    - 首次启动会先说明可选的辅助功能权限，再提醒阅读本使用说明。以后可随时从菜单栏打开“使用说明与版权”。
     - Option + Space 用于查询其他应用中当前选中的文字。首次使用时，macOS 可能要求授予辅助功能权限；未授权时仍可手动输入查询。
     - App 不请求屏幕录制、麦克风或系统录音权限。扫描版 PDF 当前不包含 OCR。
 
@@ -150,6 +151,7 @@ struct HelpAndAboutDocuments: Equatable {
     ## 1. Getting Started
 
     - LocalDictionary is a native macOS menu-bar dictionary. Choose “Show Dictionary” to enter a word, phrase, or longer text manually.
+    - On first launch, the app explains the optional Accessibility permission and then reminds you to read this guide. You can reopen User Guide & Legal from the menu bar at any time.
     - Option + Space looks up the current selection in another app. macOS may request Accessibility permission; manual input remains available without it.
     - The app does not request Screen Recording, microphone, or system-audio access. OCR is not included.
 

@@ -111,5 +111,8 @@ require_pattern 'release_require_clean_head' "$RELEASE/build-release.sh"
 require_pattern 'notarytool log' "$RELEASE/notarize-release.sh"
 require_pattern 'stapler staple' "$RELEASE/notarize-release.sh"
 require_pattern 'spctl --assess' "$RELEASE/notarize-release.sh"
+require_pattern 'codesign --force --sign -' "$RELEASE/build-release.sh"
+require_pattern 'codesign --verify --deep --strict' "$RELEASE/verify-release.sh"
+require_pattern 'AppleDouble metadata entries' "$RELEASE/verify-release.sh"
 
 print "M24ReleaseToolingSmoke PASS ($ASSERTIONS/$ASSERTIONS)"

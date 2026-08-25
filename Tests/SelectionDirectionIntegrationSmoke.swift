@@ -9,6 +9,18 @@ private func expect(_ value: @autoclosure () -> Bool, _ message: String) throws 
     guard value() else { throw IntegrationFailure.failed(message) }
 }
 
+private final class GuideReminderDefaults: FirstLaunchGuidePersisting {
+    private var values: [String: Any] = [:]
+
+    func bool(forKey defaultName: String) -> Bool {
+        values[defaultName] as? Bool ?? false
+    }
+
+    func set(_ value: Any?, forKey defaultName: String) {
+        values[defaultName] = value
+    }
+}
+
 @MainActor
 private final class MockSelectionWindowHost: GlobalSelectionWindowHosting {
     let globalSelectionWindowSize: CGSize
@@ -97,8 +109,21 @@ private actor DirectionGlossary: TranslationGlossaryService {
 private struct SelectionDirectionIntegrationSmoke {
     static func main() async throws {
         try testProductionPlacement()
+        try testFirstLaunchGuideReminder()
         try await testDirectionStateAndActions()
         print("SelectionDirectionIntegrationSmoke PASS")
+    }
+
+    @MainActor
+    private static func testFirstLaunchGuideReminder() throws {
+        let defaults = GuideReminderDefaults()
+        let reminder = FirstLaunchGuideReminder(defaults: defaults)
+        try expect(reminder.claimPresentation(),
+                   "first launch did not claim the guide reminder")
+        try expect(!reminder.claimPresentation(),
+                   "guide reminder was not limited to one presentation")
+        try expect(defaults.bool(forKey: FirstLaunchGuideReminder.promptShownKey),
+                   "guide reminder did not persist its presentation state")
     }
 
     @MainActor

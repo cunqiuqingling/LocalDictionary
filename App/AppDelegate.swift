@@ -192,6 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let selectionReader = AccessibilitySelectionReader()
     private let clipboardFallback = ClipboardSelectionFallback()
     private let permissionPrompter = AccessibilityPermissionPrompter()
+    private let firstLaunchGuideReminder = FirstLaunchGuideReminder()
     private let noteStore = ObsidianNoteStore()
     private let notePicker = ObsidianNotePicker()
     private let aiConfigurationStore = AIConfigurationStore()
@@ -264,6 +265,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
         configureMainMenu()
         configureStatusItem()
+        DispatchQueue.main.async { [weak self] in
+            self?.showFirstLaunchOnboardingIfNeeded()
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             await configureDictionary()
@@ -2332,6 +2336,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.informativeText = "全局快捷键可能已被其他应用占用。词典、设置和本地文件均不受影响；仍可通过菜单栏的“显示词典”打开面板。"
         alert.addButton(withTitle: "好")
         alert.runModal()
+    }
+
+    private func showFirstLaunchOnboardingIfNeeded() {
+        permissionPrompter.showIfNeeded()
+        firstLaunchGuideReminder.showIfNeeded { [weak self] in
+            self?.helpAndAboutController.show()
+        }
     }
 
     private func configureDictionary() async {
