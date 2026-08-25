@@ -42,7 +42,10 @@
 - [ ] Developer ID mode uses `LocalDictionary-<version>-macOS-arm64.zip` only after
       accepted notarization and successful staple/Gatekeeper verification.
 - [ ] Final ZIP was regenerated from the stapled app and contains only
-      `LocalDictionary.app`.
+      `LocalDictionary/LocalDictionary.app`; the outer folder absorbs Finder duplicate
+      suffixes while the App Bundle name remains exact.
+- [ ] The App filename, `CFBundleName`, and `CFBundleDisplayName` are all exactly
+      `LocalDictionary`, without spaces, numbers, or suffixes.
 - [ ] ZIP integrity passes and its entry list contains no AppleDouble `._*` or
       `__MACOSX` metadata.
 - [ ] Final name is `LocalDictionary-<version>-macOS-arm64.zip`.
@@ -59,7 +62,8 @@
 
 1. Download the ZIP and `SHA256SUMS`, then verify:
    `shasum -a 256 -c SHA256SUMS`.
-2. Unzip and move `LocalDictionary.app` to `/Applications` or `~/Applications`.
+2. Unzip, open the `LocalDictionary` folder, and move its `LocalDictionary.app` to
+   `/Applications` or `~/Applications`.
 3. For a notarized build, start the app normally. For a community ad-hoc build, first
    try opening normally; if macOS blocks it, use only System Settings → Privacy &
    Security → Open Anyway for this app. Do not disable Gatekeeper and do not remove

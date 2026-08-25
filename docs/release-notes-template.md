@@ -41,7 +41,8 @@ distributed with the app.
 ## Install and verify
 
 Download the arm64 ZIP and `SHA256SUMS` from the official project release, then run
-`shasum -a 256 -c SHA256SUMS`. Unzip it and move `LocalDictionary.app` to
+`shasum -a 256 -c SHA256SUMS`. Unzip it, open the `LocalDictionary` folder, and move
+the enclosed `LocalDictionary.app` to
 `/Applications` or `~/Applications`.
 
 If this release uses the `-unsigned.zip` community asset, it has no Developer ID

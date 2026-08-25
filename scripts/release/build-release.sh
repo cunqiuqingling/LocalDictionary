@@ -146,8 +146,20 @@ fi
     --version "$VERSION"
 
 ARTIFACT="$PUBLISH_DIR/$ARTIFACT_NAME"
-(cd "$PUBLISH_DIR" && /usr/bin/ditto -c -k --norsrc --keepParent \
-    "$RELEASE_PRODUCT.app" "$ARTIFACT")
+if [[ "$MODE" == "developer-id" ]]; then
+    # Keep the notarization submission conventional: the App Bundle is at the ZIP root.
+    (cd "$PUBLISH_DIR" && /usr/bin/ditto -c -k --norsrc --keepParent \
+        "$RELEASE_PRODUCT.app" "$ARTIFACT")
+else
+    # Public ZIPs use an outer folder so Finder may suffix that folder after repeated
+    # extraction without ever renaming LocalDictionary.app itself.
+    ZIP_ROOT="$WORK/PublicZipRoot"
+    /bin/mkdir -p "$ZIP_ROOT/$RELEASE_PRODUCT"
+    /usr/bin/ditto "$PUBLISH_DIR/$RELEASE_PRODUCT.app" \
+        "$ZIP_ROOT/$RELEASE_PRODUCT/$RELEASE_PRODUCT.app"
+    (cd "$ZIP_ROOT" && /usr/bin/ditto -c -k --norsrc --keepParent \
+        "$RELEASE_PRODUCT" "$ARTIFACT")
+fi
 "$SCRIPT_DIR/verify-release.sh" \
     --mode "$MODE" \
     --app "$PUBLISH_DIR/$RELEASE_PRODUCT.app" \

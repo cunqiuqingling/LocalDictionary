@@ -87,7 +87,10 @@ The community unsigned public asset is:
 
 `LocalDictionary-<version>-macOS-arm64-unsigned.zip`
 
-It contains only `LocalDictionary.app`. Public checksums are recorded in
+It contains only `LocalDictionary/LocalDictionary.app`. The outer folder prevents Finder
+from adding a numeric duplicate suffix to the App Bundle itself when users extract multiple
+downloads in the same directory; the App filename, `CFBundleName`, and `CFBundleDisplayName`
+remain exactly `LocalDictionary`. Public checksums are recorded in
 `SHA256SUMS`; `release-manifest.json` records the version, build, bundle identifier,
 architecture, minimum macOS, commit, Xcode/SDK, size, SHA-256, signing summary,
 entitlements, notarization submission ID when one truly exists, staple and Gatekeeper
@@ -95,8 +98,9 @@ status, distribution channel, and build timestamp. A dSYM may be retained separa
 is not a default public asset.
 
 Release ZIPs are created without resource-fork/AppleDouble sidecar entries. Verification
-rejects `._*` and `__MACOSX` entries, tests ZIP integrity, and requires the extracted
-community App Bundle to retain its complete resource seal.
+rejects `._*` and `__MACOSX` entries, tests ZIP integrity, enforces the canonical nested
+App path and exact Bundle display name, and requires the extracted community App Bundle
+to retain its complete resource seal.
 
 Community users must verify `SHA256SUMS` and obtain the asset from the official project
 release. Its authority-free ad-hoc signature provides bundle integrity but no Apple-trusted

@@ -46,6 +46,8 @@ require_text 'MARKETING_VERSION = 0.1;' "$PROJECT"
 require_text 'CURRENT_PROJECT_VERSION = 1;' "$PROJECT"
 require_fixed '<string>$(MARKETING_VERSION)</string>' "$INFO"
 require_fixed '<string>$(CURRENT_PROJECT_VERSION)</string>' "$INFO"
+require_text '<key>CFBundleDisplayName</key>' "$INFO"
+require_text '<string>LocalDictionary</string>' "$INFO"
 require_text '<key>LSUIElement</key>' "$INFO"
 
 /usr/bin/plutil -lint "$INFO" "$ENTITLEMENTS" >/dev/null
@@ -75,6 +77,8 @@ require_fixed 'codesign --verify --deep --strict' \
 require_fixed 'Contents/_CodeSignature/CodeResources' \
     "$ROOT/scripts/release/verify-release.sh"
 require_fixed '--norsrc' "$ROOT/scripts/release/build-release.sh"
+require_fixed 'PublicZipRoot' "$ROOT/scripts/release/build-release.sh"
+require_fixed 'LocalDictionary/LocalDictionary.app' "$ROOT/scripts/release/verify-release.sh"
 require_text 'plutil -insert method -string developer-id' "$ROOT/scripts/release/build-release.sh"
 require_text 'OTHER_CODE_SIGN_FLAGS="--timestamp"' "$ROOT/scripts/release/build-release.sh"
 require_text 'codesign --verify --deep --strict' "$ROOT/scripts/release/notarize-release.sh"

@@ -32,6 +32,10 @@ EXECUTABLE="$APP/Contents/MacOS/$RELEASE_PRODUCT"
 [[ -f "$INFO" && -x "$EXECUTABLE" ]] || release_die "bundle metadata or executable is missing"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO")" == "$RELEASE_BUNDLE_ID" ]] ||
     release_die "bundle identifier mismatch"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$INFO")" == "$RELEASE_PRODUCT" ]] ||
+    release_die "CFBundleName must be exactly $RELEASE_PRODUCT"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$INFO")" == "$RELEASE_PRODUCT" ]] ||
+    release_die "CFBundleDisplayName must be exactly $RELEASE_PRODUCT"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO")" == "$VERSION" ]] ||
     release_die "bundle version mismatch"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$INFO")" == "true" ]] ||
@@ -151,13 +155,26 @@ if [[ -n "$ZIP" ]]; then
     if print -r -- "$ZIP_LIST" | /usr/bin/grep -Eq '(^|/)\._|^__MACOSX(/|$)'; then
         release_die "ZIP contains AppleDouble metadata entries"
     fi
-    if print -r -- "$ZIP_LIST" |
-        /usr/bin/awk -F/ '
-            NF && $1 != "LocalDictionary.app" { bad = 1 }
-            END { exit bad ? 0 : 1 }
-        '; then
-        release_die "ZIP contains content outside LocalDictionary.app"
+    ZIP_VERIFY_WORK="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/LocalDictionary-zip-verification.XXXXXX")"
+    /usr/bin/ditto -x -k "$ZIP" "$ZIP_VERIFY_WORK"
+    if [[ "$MODE" == "developer-id" ]]; then
+        if print -r -- "$ZIP_LIST" |
+            /usr/bin/grep -Ev '^LocalDictionary\.app(/|$)' >/dev/null; then
+            release_die "notarization submission ZIP contains content outside LocalDictionary.app"
+        fi
+        ZIP_APP="$ZIP_VERIFY_WORK/$RELEASE_PRODUCT.app"
+    else
+        if print -r -- "$ZIP_LIST" |
+            /usr/bin/grep -Ev '^LocalDictionary/$|^LocalDictionary/LocalDictionary\.app(/|$)' >/dev/null; then
+            release_die "public ZIP must contain only LocalDictionary/LocalDictionary.app"
+        fi
+        ZIP_APP="$ZIP_VERIFY_WORK/$RELEASE_PRODUCT/$RELEASE_PRODUCT.app"
     fi
+    [[ -d "$ZIP_APP" ]] || release_die "ZIP is missing the canonical LocalDictionary.app path"
+    if ! /usr/bin/diff -qr "$APP" "$ZIP_APP" >/dev/null; then
+        release_die "ZIP App Bundle differs from the verified LocalDictionary.app"
+    fi
+    /bin/rm -rf "$ZIP_VERIFY_WORK"
 fi
 
 print "bundle_audit=passed"

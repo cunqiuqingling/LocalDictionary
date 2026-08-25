@@ -87,8 +87,12 @@ PUBLISH_DIR="$WORK/Publish"
 /usr/sbin/spctl --assess --type execute --verbose=4 "$PUBLISH_DIR/$RELEASE_PRODUCT.app"
 
 FINAL_NAME="$RELEASE_PRODUCT-$VERSION-macOS-$RELEASE_ARCHITECTURE.zip"
-(cd "$PUBLISH_DIR" && /usr/bin/ditto -c -k --norsrc --keepParent \
-    "$RELEASE_PRODUCT.app" "$FINAL_NAME")
+FINAL_ZIP_ROOT="$WORK/PublicZipRoot"
+/bin/mkdir -p "$FINAL_ZIP_ROOT/$RELEASE_PRODUCT"
+/usr/bin/ditto "$PUBLISH_DIR/$RELEASE_PRODUCT.app" \
+    "$FINAL_ZIP_ROOT/$RELEASE_PRODUCT/$RELEASE_PRODUCT.app"
+(cd "$FINAL_ZIP_ROOT" && /usr/bin/ditto -c -k --norsrc --keepParent \
+    "$RELEASE_PRODUCT" "$PUBLISH_DIR/$FINAL_NAME")
 "$SCRIPT_DIR/verify-release.sh" \
     --mode notarized \
     --app "$PUBLISH_DIR/$RELEASE_PRODUCT.app" \

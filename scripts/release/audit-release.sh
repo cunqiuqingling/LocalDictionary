@@ -46,6 +46,10 @@ release_require_build_number "$BUILD_NUMBER"
     release_die "Info.plist marketing version is not project-substituted"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$RELEASE_ROOT/App/Info.plist")" == '$(CURRENT_PROJECT_VERSION)' ]] ||
     release_die "Info.plist build number is not project-substituted"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$RELEASE_ROOT/App/Info.plist")" == "$RELEASE_PRODUCT" ]] ||
+    release_die "CFBundleName must remain exactly $RELEASE_PRODUCT"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$RELEASE_ROOT/App/Info.plist")" == "$RELEASE_PRODUCT" ]] ||
+    release_die "CFBundleDisplayName must remain exactly $RELEASE_PRODUCT"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$RELEASE_ROOT/App/Info.plist")" == "true" ]] ||
     release_die "LSUIElement must remain true"
 

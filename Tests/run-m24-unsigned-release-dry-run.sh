@@ -51,16 +51,24 @@ PY
 EXTRACT="$WORK/Extracted Artifact With Spaces"
 /bin/mkdir "$EXTRACT"
 /usr/bin/ditto -x -k "$ARTIFACT" "$EXTRACT"
+EXTRACTED_APP="$EXTRACT/LocalDictionary/LocalDictionary.app"
 /usr/bin/codesign --verify --deep --strict --verbose=4 \
-    "$EXTRACT/LocalDictionary.app"
-[[ -f "$EXTRACT/LocalDictionary.app/Contents/_CodeSignature/CodeResources" ]]
+    "$EXTRACTED_APP"
+[[ -f "$EXTRACTED_APP/Contents/_CodeSignature/CodeResources" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$EXTRACTED_APP/Contents/Info.plist")" == LocalDictionary ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$EXTRACTED_APP/Contents/Info.plist")" == LocalDictionary ]]
+if /usr/bin/zipinfo -1 "$ARTIFACT" |
+    /usr/bin/grep -Ev '^LocalDictionary/$|^LocalDictionary/LocalDictionary\.app(/|$)' >/dev/null; then
+    print -u2 "release ZIP does not preserve the canonical nested App name"
+    exit 1
+fi
 if /usr/bin/zipinfo -1 "$ARTIFACT" | /usr/bin/grep -Eq '(^|/)\._|^__MACOSX(/|$)'; then
     print -u2 "release ZIP contains AppleDouble metadata entries"
     exit 1
 fi
 "$ROOT/scripts/release/verify-release.sh" \
     --mode unsigned-dry-run \
-    --app "$EXTRACT/LocalDictionary.app" \
+    --app "$EXTRACTED_APP" \
     --zip "$ARTIFACT" \
     --version 0.1
 
@@ -78,33 +86,33 @@ expect_verify_failure() {
 
 WRONG_VERSION="$WORK/Wrong Version/LocalDictionary.app"
 /bin/mkdir -p "${WRONG_VERSION:h}"
-/usr/bin/ditto "$EXTRACT/LocalDictionary.app" "$WRONG_VERSION"
+/usr/bin/ditto "$EXTRACTED_APP" "$WRONG_VERSION"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 9.9' \
     "$WRONG_VERSION/Contents/Info.plist"
 expect_verify_failure wrong-version "$WRONG_VERSION"
 
 MISSING_ICON="$WORK/Missing Icon/LocalDictionary.app"
 /bin/mkdir -p "${MISSING_ICON:h}"
-/usr/bin/ditto "$EXTRACT/LocalDictionary.app" "$MISSING_ICON"
+/usr/bin/ditto "$EXTRACTED_APP" "$MISSING_ICON"
 /bin/mv "$MISSING_ICON/Contents/Resources/AppIcon.icns" "$WORK/removed-AppIcon.icns"
 expect_verify_failure missing-icon "$MISSING_ICON"
 
 WRONG_ARCH="$WORK/Wrong Architecture/LocalDictionary.app"
 /bin/mkdir -p "${WRONG_ARCH:h}"
-/usr/bin/ditto "$EXTRACT/LocalDictionary.app" "$WRONG_ARCH"
+/usr/bin/ditto "$EXTRACTED_APP" "$WRONG_ARCH"
 /bin/cp /usr/bin/true "$WRONG_ARCH/Contents/MacOS/LocalDictionary"
 expect_verify_failure wrong-architecture "$WRONG_ARCH"
 
 UNKNOWN_LICENSE="$WORK/Unknown License/LocalDictionary.app"
 /bin/mkdir -p "${UNKNOWN_LICENSE:h}"
-/usr/bin/ditto "$EXTRACT/LocalDictionary.app" "$UNKNOWN_LICENSE"
+/usr/bin/ditto "$EXTRACTED_APP" "$UNKNOWN_LICENSE"
 print 'synthetic unaudited license' > \
     "$UNKNOWN_LICENSE/Contents/Resources/ReleaseLegal/Licenses/unknown-LICENSE.txt"
 expect_verify_failure unknown-license "$UNKNOWN_LICENSE"
 
 INCOMPLETE_SIGNATURE="$WORK/Incomplete Signature/LocalDictionary.app"
 /bin/mkdir -p "${INCOMPLETE_SIGNATURE:h}"
-/usr/bin/ditto "$EXTRACT/LocalDictionary.app" "$INCOMPLETE_SIGNATURE"
+/usr/bin/ditto "$EXTRACTED_APP" "$INCOMPLETE_SIGNATURE"
 /bin/mv "$INCOMPLETE_SIGNATURE/Contents/_CodeSignature" \
     "$WORK/removed-CodeSignature"
 expect_verify_failure incomplete-signature "$INCOMPLETE_SIGNATURE"
@@ -113,4 +121,4 @@ if /usr/bin/grep -Eq 'notarytool submit|gh release create|spctl_status=passed' "
     print -u2 "unsigned dry-run log claims or invokes an external release result"
     exit 1
 fi
-print "M24UnsignedReleaseDryRun PASS (18/18)"
+print "M24UnsignedReleaseDryRun PASS (21/21)"
