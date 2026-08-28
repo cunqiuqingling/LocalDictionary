@@ -21,7 +21,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
     private let keyStatusLabel = NSTextField(labelWithString: "密钥状态：未配置")
     private let providerOptionsStack = NSStackView()
     private let zhipuThinkingButton = NSButton(
-        checkboxWithTitle: "思考模式（结构化请求中固定关闭）", target: nil, action: nil
+        checkboxWithTitle: "思考模式（请求 JSON 固定：thinking.type=disabled）", target: nil, action: nil
     )
     private let providerOptionsLabel = NSTextField(labelWithString: "无额外选项")
     private let automaticFallbackButton = NSButton(
@@ -398,17 +398,18 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         }
         let replacementKey = session?.pendingAPIKey(for: providerID)
         setTesting(true)
-        showStatus("正在验证传输、模型与响应兼容性…", isError: false)
+        showStatus("正在发送单次连接测试…", isError: false)
         connectionTestTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let report = try await service.testCompatibility(
+                try await service.testConnection(
                     configuration: profile, replacementKey: replacementKey
                 )
                 guard !Task.isCancelled else { return }
                 self.connectionTestTask = nil
                 self.finishTesting()
-                self.showStatus(report.summary, isError: !report.hasRecommendedEnglish)
+                self.showStatus("连接测试成功：已验证 Endpoint、鉴权、模型和可见响应。",
+                                isError: false)
             } catch {
                 guard !Task.isCancelled else { return }
                 self.connectionTestTask = nil

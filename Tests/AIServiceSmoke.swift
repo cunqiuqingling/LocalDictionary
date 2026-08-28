@@ -290,6 +290,8 @@ private struct AIServiceSmoke {
             try await testKeychain()
         }
         try await testClientAndErrors()
+        try await testZhipuHistoricalRequestContract()
+        try await testConnectionCardinalityAndRateLimitSeparation()
         try testCanonicalResponseFixtures()
         try await testProviderEnvelopeCompatibility()
         try await testProviderProductionCompatibilityFixtures()
@@ -1002,6 +1004,151 @@ private struct AIServiceSmoke {
             throw SmokeFailure.failed("oversize response accepted")
         } catch let error as AIClientError {
             try expect(error == .responseTooLarge, "response size limit")
+        }
+    }
+
+    private static func testZhipuHistoricalRequestContract() async throws {
+        let client = OpenAICompatibleClient(session: session())
+        var configuration = AIProviderConfiguration.zhipuPreset
+        configuration.enabled = true
+
+        var requestURLs: [String] = []
+        var requestBodies: [[String: Any]] = []
+        var responseIndex = 0
+        let hiddenReasoning = "INTERNAL_REASONING_MUST_NOT_BE_VISIBLE"
+        let wordJSON = String(data: try JSONEncoder().encode(sample), encoding: .utf8)!
+        let sentenceJSON = String(
+            data: try JSONEncoder().encode(sampleSentenceAnalysis), encoding: .utf8
+        )!
+        let inlineValue = InlineWordQuickAIResult(
+            partOfSpeech: "noun", definitionsZH: ["提示；提示语"],
+            learningEquivalent: "prompt",
+            learningDefinition: "A cue that elicits a response.",
+            nativeExplanation: "用于促使用户或系统作出反应的提示。"
+        )
+        let inlineJSON = String(data: try JSONEncoder().encode(inlineValue), encoding: .utf8)!
+        let visibleResponses = [
+            "{\"status\":\"ok\"}",
+            wordJSON,
+            sampleTextTranslation.translation,
+            sentenceJSON,
+            inlineJSON
+        ]
+
+        MockURLProtocol.responseHeaders = [:]
+        MockURLProtocol.handler = { request in
+            requestURLs.append(request.url?.absoluteString ?? "")
+            let body = try JSONSerialization.jsonObject(
+                with: requestBody(request)
+            ) as! [String: Any]
+            requestBodies.append(body)
+            guard responseIndex < visibleResponses.count else {
+                throw SmokeFailure.failed("unexpected extra Zhipu request")
+            }
+            let visible = visibleResponses[responseIndex]
+            responseIndex += 1
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": [
+                    "content": visible,
+                    "reasoning_content": hiddenReasoning
+                ], "finish_reason": "stop"]]
+            ]))
+        }
+
+        try await client.testConnection(configuration: configuration, apiKey: "dummy-key")
+        let word = try await client.explain(
+            query: "prompt", domain: "general", configuration: configuration,
+            apiKey: "dummy-key"
+        )
+        let translation = try await client.translateText(
+            sampleSentenceText, configuration: configuration, apiKey: "dummy-key"
+        )
+        let sentence = try await client.analyzeSentence(
+            sampleSentenceText, configuration: configuration, apiKey: "dummy-key"
+        )
+        let inline = try await client.inlineWordQuick(
+            "prompt", configuration: configuration, apiKey: "dummy-key"
+        )
+
+        let expectedEndpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        try expect(requestURLs.count == 5 && requestURLs.allSatisfy { $0 == expectedEndpoint },
+                   "all Zhipu production paths use the v4 chat-completions endpoint once")
+        let expectedBudgets = [64, 1_800, 4_000, 2_600, 512]
+        try expect(requestBodies.compactMap { $0["max_tokens"] as? Int } == expectedBudgets &&
+                   expectedBudgets.allSatisfy { $0 >= 64 },
+                   "Zhipu production paths preserve the validated token floors")
+        for body in requestBodies {
+            let thinking = body["thinking"] as? [String: String]
+            try expect(thinking?["type"] == "disabled" && body["enable_thinking"] == nil,
+                       "Zhipu production JSON omitted thinking.type=disabled")
+        }
+        try expect(word.headword == sample.headword &&
+                   translation.translation == sampleTextTranslation.translation &&
+                   sentence.translationZH == sampleSentenceAnalysis.translationZH &&
+                   inline.definitionsZH == inlineValue.definitionsZH,
+                   "choices[0].message.content was not extracted for a Zhipu production path")
+        let visibleResultText = [
+            word.rawFallbackText ?? "", translation.translation,
+            sentence.rawFallbackText ?? sentence.translationZH,
+            inline.nativeExplanation ?? ""
+        ].joined(separator: "\n")
+        try expect(!visibleResultText.contains(hiddenReasoning),
+                   "reasoning_content leaked into a visible answer")
+    }
+
+    private static func testConnectionCardinalityAndRateLimitSeparation() async throws {
+        let client = OpenAICompatibleClient(session: session())
+        var configuration = AIProviderConfiguration.zhipuPreset
+        configuration.enabled = true
+
+        var requests = 0
+        MockURLProtocol.responseHeaders = [:]
+        MockURLProtocol.handler = { request in
+            requests += 1
+            let body = try JSONSerialization.jsonObject(
+                with: requestBody(request)
+            ) as! [String: Any]
+            let thinking = body["thinking"] as? [String: String]
+            try expect(body["max_tokens"] as? Int == 64 &&
+                       thinking?["type"] == "disabled",
+                       "connection test payload diverged from the validated GLM contract")
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": ["content": "{\"status\":\"ok\"}"]]]
+            ]))
+        }
+        try await client.testConnection(configuration: configuration, apiKey: "dummy-key")
+        try expect(requests == 1, "one Test Connection issued more than one HTTP request")
+
+        requests = 0
+        MockURLProtocol.responseHeaders = ["Retry-After": "9"]
+        MockURLProtocol.handler = { _ in
+            requests += 1
+            return (429, Data("{\"error\":{\"code\":\"1302\",\"message\":\"rate limit\"}}".utf8))
+        }
+        do {
+            try await client.testConnection(configuration: configuration, apiKey: "dummy-key")
+            throw SmokeFailure.failed("connection-test 429 accepted")
+        } catch let error as AIClientError {
+            try expect(error == .rateLimited(retryAfter: "9") && requests == 1,
+                       "connection-test 429 was retried or misclassified")
+        }
+
+        requests = 0
+        MockURLProtocol.responseHeaders = [:]
+        MockURLProtocol.handler = { _ in
+            requests += 1
+            return (200, try JSONSerialization.data(withJSONObject: [
+                "choices": [["message": [
+                    "content": "", "reasoning_content": "internal only"
+                ], "finish_reason": "stop"]]
+            ]))
+        }
+        do {
+            try await client.testConnection(configuration: configuration, apiKey: "dummy-key")
+            throw SmokeFailure.failed("reasoning-only connection response accepted")
+        } catch let error as AIClientError {
+            try expect(error == .providerReasoningOnly && requests == 1,
+                       "reasoning-only content was confused with HTTP 429")
         }
     }
 

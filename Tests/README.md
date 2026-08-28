@@ -16,6 +16,17 @@ explicit language-pack preparation, result reassembly, and vocabulary recomputat
 All three runners use synthetic data and avoid real dictionaries, Application Support,
 `local.json`, Keychain, and network access.
 
+`run-ai-service-smoke.sh` includes the historical GLM-4.7-Flash compatibility contract. With
+`MockURLProtocol` only, it verifies that Test Connection, bilingual supplement, Deep Translation,
+Sentence AI Analysis, and Inline AI all resolve the Zhipu preset to
+`https://open.bigmodel.cn/api/paas/v4/chat/completions`, send
+`thinking.type=disabled` in the final JSON body, and keep `max_tokens` at or above 64 (the
+connection probe is exactly 64). It also proves that visible output comes from
+`choices[0].message.content`, never from `reasoning_content`; one Test Connection sends one HTTP
+request, duplicate in-flight clicks are gated, and HTTP 429 returns immediately without retry and
+remains distinct from a reasoning-only/empty-content response. The same suite retains Google,
+DeepSeek, SiliconFlow, and generic OpenAI-compatible payload coverage.
+
 `run-m24-release-structural-gates.sh` verifies the Release-only Hardened Runtime and
 minimal entitlement configuration, project-substituted version authority, arm64/macOS
 15 identity, empty production Resource Center network/trust configuration, source-traceable

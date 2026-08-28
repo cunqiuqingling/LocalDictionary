@@ -1074,6 +1074,7 @@ extension AIProviderClient {
 
 final class OpenAICompatibleClient: AIProviderClient {
     static let maximumResponseBytes = 1_048_576
+    static let connectionTestMaximumTokens = 64
 
     private let session: URLSession
 
@@ -1204,7 +1205,9 @@ final class OpenAICompatibleClient: AIProviderClient {
             configuration: configuration,
             apiKey: apiKey,
             systemPrompt: "Return strict JSON only.",
-            userPrompt: "Return exactly this JSON object: {\"status\":\"ok\"}"
+            userPrompt: "Return exactly this JSON object: {\"status\":\"ok\"}",
+            maximumTokens: Self.connectionTestMaximumTokens,
+            diagnosticAction: "connectionTest"
         )
         struct Status: Decodable { let status: String }
         guard let data = AIProviderCanonicalParser.extractedJSONObjectData(from: content.content),
@@ -1355,9 +1358,6 @@ final class OpenAICompatibleClient: AIProviderClient {
         }
         if expectsStructuredResponse && configuration.responseCapability != .plainTextOnly {
             body["response_format"] = ["type": "json_object"]
-        }
-        if configuration.providerType == .zhipu {
-            body["thinking"] = ["type": "disabled"]
         }
         try Self.applyThinkingPolicy(to: &body, configuration: configuration, intent: intent)
         guard JSONSerialization.isValidJSONObject(body) else {
@@ -1887,11 +1887,16 @@ final class OpenAICompatibleClient: AIProviderClient {
             body["thinking"] = ["type": "disabled"]
             return
         }
+        // Keep provider-specific thinking controls independent from JSON response mode. In
+        // particular, GLM-4.7-Flash still supports thinking and does not treat a missing field as
+        // an explicit disable, even when the request deliberately uses tolerant plain text.
+        if isGLM && !isSiliconFlow {
+            body["thinking"] = ["type": "disabled"]
+            return
+        }
         if configuration.responseCapability == .plainTextOnly { return }
         if isSiliconFlow {
             body["enable_thinking"] = false
-        } else if isGLM {
-            body["thinking"] = ["type": "disabled"]
         }
     }
 
