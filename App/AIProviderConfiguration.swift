@@ -5,12 +5,14 @@ let aiDictionaryPromptVersion = 5
 enum AIProviderType: String, Codable, CaseIterable, Sendable {
     case googleGemini = "google-gemini"
     case zhipu = "zhipu"
+    case deepSeek = "deepseek"
     case openAICompatible = "openai-compatible"
 
     var title: String {
         switch self {
         case .googleGemini: return "Google Gemini"
         case .zhipu: return "智谱 AI"
+        case .deepSeek: return "DeepSeek"
         case .openAICompatible: return "自定义 OpenAI 兼容接口"
         }
     }
@@ -41,6 +43,7 @@ struct AIProviderOptions: Codable, Equatable, Sendable {
 struct AIProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
     static let googleProviderID = UUID(uuidString: "3F5E7E8D-4C6C-4D1E-A67C-37191DF45E11")!
     static let zhipuProviderID = UUID(uuidString: "4A157C65-BCC2-4F64-A8D4-9324D8C35631")!
+    static let deepSeekProviderID = UUID(uuidString: "67E9C2AA-6D38-4D23-927C-97FA9D59F1D8")!
 
     var providerID: UUID
     var providerType: AIProviderType
@@ -93,6 +96,19 @@ struct AIProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
         priority: 2
     )
 
+    static let deepSeekPreset = AIProviderConfiguration(
+        providerID: deepSeekProviderID,
+        enabled: false,
+        providerType: .deepSeek,
+        providerDisplayName: "DeepSeek",
+        baseURL: "https://api.deepseek.com",
+        model: "deepseek-v4-flash",
+        priority: 3,
+        options: AIProviderOptions(usesJSONResponseFormat: false)
+    )
+
+    var isResidentPreset: Bool { providerID == Self.deepSeekProviderID }
+
     var normalizedBaseURL: String {
         AIEndpoint.normalizedBaseURL(baseURL)
     }
@@ -109,7 +125,7 @@ struct AIProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
 
     var responseCapability: AIProviderResponseCapability {
         let normalizedModel = model.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if providerType == .openAICompatible,
+        if providerType == .deepSeek || providerType == .openAICompatible,
            normalizedModel.contains("deepseek-v4-flash") {
             // This compatibility profile is intentionally instruction + tolerant parsing. Do not
             // send a response_format field that a proxy/model combination may reject or ignore.
@@ -117,7 +133,7 @@ struct AIProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
         }
         if !options.usesJSONResponseFormat { return .plainTextOnly }
         switch providerType {
-        case .googleGemini, .zhipu, .openAICompatible:
+        case .googleGemini, .zhipu, .deepSeek, .openAICompatible:
             return .supportsJSONMode
         }
     }
@@ -162,7 +178,7 @@ struct AIProviderConfiguration: Codable, Equatable, Identifiable, Sendable {
 }
 
 struct AIProviderCatalog: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 3
+    static let currentSchemaVersion = 4
 
     var schemaVersion: Int
     var profiles: [AIProviderConfiguration]
@@ -180,14 +196,22 @@ struct AIProviderCatalog: Codable, Equatable, Sendable {
     }
 
     static let builtIn = AIProviderCatalog(
-        profiles: [.googlePreset, .zhipuPreset]
+        profiles: [.googlePreset, .zhipuPreset, .deepSeekPreset]
     )
 
     func normalizedForSave() throws -> AIProviderCatalog {
         guard !profiles.isEmpty else { throw AIConfigurationError.emptyProviderList }
+        var sourceProfiles = profiles
+        if !sourceProfiles.contains(where: {
+            $0.providerID == AIProviderConfiguration.deepSeekProviderID
+        }) {
+            var deepSeek = AIProviderConfiguration.deepSeekPreset
+            deepSeek.priority = (sourceProfiles.map(\.priority).max() ?? 0) + 1
+            sourceProfiles.append(deepSeek)
+        }
         var ids = Set<UUID>()
         var normalized: [AIProviderConfiguration] = []
-        for profile in profiles {
+        for profile in sourceProfiles {
             guard ids.insert(profile.providerID).inserted else {
                 throw AIConfigurationError.duplicateProviderID
             }
@@ -431,7 +455,8 @@ final class AIConfigurationStore: @unchecked Sendable {
 
     private func normalizedLoadedCatalog(_ catalog: AIProviderCatalog) throws
         -> AIProviderCatalog? {
-        if catalog.schemaVersion == AIProviderCatalog.currentSchemaVersion {
+        if catalog.schemaVersion == AIProviderCatalog.currentSchemaVersion ||
+           catalog.schemaVersion == 3 {
             return try catalog.normalizedForSave()
         }
         guard catalog.schemaVersion == 2 else { return nil }

@@ -103,6 +103,7 @@ struct AIProviderSettingsSession {
     @discardableResult
     mutating func remove(_ providerID: UUID, deleteKey: Bool) -> Bool {
         guard orderedProviderIDs.count > 1,
+              providerID != AIProviderConfiguration.deepSeekProviderID,
               editingDrafts.removeValue(forKey: providerID) != nil else { return false }
         orderedProviderIDs.removeAll { $0 == providerID }
         pendingAPIKeys.removeValue(forKey: providerID)

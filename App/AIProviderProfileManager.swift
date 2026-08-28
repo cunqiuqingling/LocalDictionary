@@ -107,8 +107,10 @@ actor AIProviderProfileManager {
 
         var google = AIProviderConfiguration.googlePreset
         var zhipu = AIProviderConfiguration.zhipuPreset
+        var deepSeek = AIProviderConfiguration.deepSeekPreset
         google.enabled = accounts.contains(where: Self.isLegacyGoogleAccount)
         zhipu.enabled = accounts.contains(where: Self.isLegacyZhipuAccount)
+        deepSeek.enabled = accounts.contains(where: Self.isLegacyDeepSeekAccount)
 
         if let legacy {
             let source = legacy.configuration
@@ -128,6 +130,13 @@ actor AIProviderProfileManager {
                 zhipu.baseURL = source.baseURL
                 zhipu.model = source.model.caseInsensitiveCompare("glm-4.7-flash") == .orderedSame
                     ? "glm-4.7-flash" : source.model
+            case .deepSeek:
+                deepSeek.enabled = source.enabled
+                deepSeek.providerDisplayName = String(
+                    AIConfigurationInput.cleanSingleLine(source.providerDisplayName).prefix(48)
+                )
+                deepSeek.baseURL = source.baseURL
+                deepSeek.model = source.model
             case .openAICompatible:
                 break
             }
@@ -136,14 +145,18 @@ actor AIProviderProfileManager {
         // Built-in values remain valid even if the legacy scalar data was malformed.
         if (try? google.validate()) == nil { google = .googlePreset }
         if (try? zhipu.validate()) == nil { zhipu = .zhipuPreset }
+        if (try? deepSeek.validate()) == nil { deepSeek = .deepSeekPreset }
         google.enabled = true
         zhipu.enabled = false
+        deepSeek.enabled = false
         google.priority = 1
         zhipu.priority = 2
+        deepSeek.priority = 3
 
-        var profiles = [google, zhipu]
+        var profiles = [google, zhipu, deepSeek]
         let knownAccounts = Set(accounts.filter {
-            Self.isLegacyGoogleAccount($0) || Self.isLegacyZhipuAccount($0)
+            Self.isLegacyGoogleAccount($0) || Self.isLegacyZhipuAccount($0) ||
+                Self.isLegacyDeepSeekAccount($0)
         })
         let unknownAccounts = accounts.filter { !knownAccounts.contains($0) && !Self.isUUID($0) }
         for (offset, oldAccount) in unknownAccounts.enumerated() {
@@ -177,6 +190,8 @@ actor AIProviderProfileManager {
                     legacyAccount = accounts.first(where: Self.isLegacyGoogleAccount)
                 case .zhipu:
                     legacyAccount = accounts.first(where: Self.isLegacyZhipuAccount)
+                case .deepSeek:
+                    legacyAccount = accounts.first(where: Self.isLegacyDeepSeekAccount)
                 case .openAICompatible:
                     legacyAccount = unknownAccounts.first(where: {
                         Self.urlSuffix(in: $0) == profile.baseURL
@@ -208,6 +223,7 @@ actor AIProviderProfileManager {
         let url = configuration.normalizedBaseURL.lowercased()
         if url.contains("generativelanguage.googleapis.com") { return .googleGemini }
         if url.contains("open.bigmodel.cn") { return .zhipu }
+        if url.contains("api.deepseek.com") { return .deepSeek }
         return configuration.providerType
     }
 
@@ -217,6 +233,10 @@ actor AIProviderProfileManager {
 
     private static func isLegacyZhipuAccount(_ account: String) -> Bool {
         account.lowercased().contains("open.bigmodel.cn")
+    }
+
+    private static func isLegacyDeepSeekAccount(_ account: String) -> Bool {
+        account.lowercased().contains("api.deepseek.com")
     }
 
     private static func isUUID(_ value: String) -> Bool { UUID(uuidString: value) != nil }

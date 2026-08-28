@@ -387,13 +387,17 @@ private struct AIServiceSmoke {
 
     private static func testConfigurationAndUserDefaults() throws {
         let preset = AIProviderConfiguration.zhipuPreset
+        let deepSeekPreset = AIProviderConfiguration.deepSeekPreset
         let builtIn = AIProviderCatalog.builtIn
-        try expect(builtIn.profiles.first?.providerID ==
+        try expect(builtIn.profiles.count == 3 && builtIn.profiles.first?.providerID ==
                    AIProviderConfiguration.googleProviderID &&
                    builtIn.profiles.first?.enabled == true &&
                    builtIn.profiles.first(where: { $0.providerType == .zhipu })?.enabled == false &&
+                   builtIn.profiles.last?.providerID ==
+                   AIProviderConfiguration.deepSeekProviderID &&
+                   builtIn.profiles.last?.enabled == false &&
                    !builtIn.automaticFallbackEnabled,
-                   "Google is primary, Zhipu defaults off, fallback defaults off")
+                   "Google is primary; Zhipu and resident DeepSeek default off")
         try expect(preset.baseURL == "https://open.bigmodel.cn/api/paas/v4", "zhipu base URL")
         try expect(preset.model == "glm-4.7-flash", "zhipu model")
         let appendedEndpoint = try preset.validatedEndpointURL().absoluteString
@@ -404,6 +408,14 @@ private struct AIServiceSmoke {
         let fullEndpoint = try full.validatedEndpointURL().absoluteString
         try expect(fullEndpoint ==
                    "https://open.bigmodel.cn/api/paas/v4/chat/completions", "endpoint deduplicate")
+        let deepSeekEndpoint = try deepSeekPreset.validatedEndpointURL().absoluteString
+        try expect(deepSeekPreset.providerType == .deepSeek &&
+                   deepSeekPreset.baseURL == "https://api.deepseek.com" &&
+                   deepSeekPreset.model == "deepseek-v4-flash" &&
+                   deepSeekPreset.responseCapability == .plainTextOnly &&
+                   deepSeekEndpoint ==
+                   "https://api.deepseek.com/chat/completions",
+                   "resident DeepSeek preset follows the current official API contract")
 
         let suite = "LocalDictionary.AISmoke.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -433,11 +445,27 @@ private struct AIServiceSmoke {
             try JSONEncoder().encode(v2Catalog)
         let migratedV2 = try AIConfigurationStore(defaults: v2Defaults).loadCatalog()
         try expect(migratedV2?.schemaVersion == AIProviderCatalog.currentSchemaVersion &&
+                   migratedV2?.profiles.count == 3 &&
                    migratedV2?.profiles.first?.providerType == .googleGemini &&
                    migratedV2?.profiles.first?.enabled == true &&
                    migratedV2?.profiles.first(where: { $0.providerType == .zhipu })?.enabled == false &&
+                   migratedV2?.profiles.last?.providerID ==
+                   AIProviderConfiguration.deepSeekProviderID &&
                    migratedV2?.automaticFallbackEnabled == false,
-                   "v2 catalog applies the Google-only default without deleting Zhipu")
+                   "v2 catalog keeps prior providers and gains resident DeepSeek")
+
+        let v3Defaults = MemoryDefaults()
+        let v3Catalog = AIProviderCatalog(
+            schemaVersion: 3,
+            profiles: [.googlePreset, .zhipuPreset]
+        )
+        v3Defaults.values["LocalDictionary.AI.providerCatalog.v2"] =
+            try JSONEncoder().encode(v3Catalog)
+        let migratedV3 = try AIConfigurationStore(defaults: v3Defaults).loadCatalog()
+        try expect(migratedV3?.schemaVersion == AIProviderCatalog.currentSchemaVersion &&
+                   migratedV3?.profiles.count == 3 &&
+                   migratedV3?.profiles.last == deepSeekPreset,
+                   "existing v3 catalogs receive one disabled resident DeepSeek profile")
     }
 
     private static func testProviderProfilesAndMigration() async throws {
@@ -451,23 +479,29 @@ private struct AIServiceSmoke {
         defaults.values["LocalDictionary.AI.automaticSentenceAnalysis"] = true
         let oldGoogle = "openai-compatible|https://generativelanguage.googleapis.com/v1beta/openai"
         let oldZhipu = "zhipu|https://open.bigmodel.cn/api/paas/v4"
-        let keychain = StubKeychain(values: [oldGoogle: "google-key", oldZhipu: "zhipu-key"])
+        let oldDeepSeek = "openai-compatible|https://api.deepseek.com"
+        let keychain = StubKeychain(values: [oldGoogle: "google-key", oldZhipu: "zhipu-key",
+                                             oldDeepSeek: "deepseek-key"])
         let store = AIConfigurationStore(defaults: defaults)
         let manager = AIProviderProfileManager(store: store, keychain: keychain)
         let catalog = try await manager.catalog()
-        try expect(catalog.profiles.count == 2 &&
+        try expect(catalog.profiles.count == 3 &&
                    !catalog.automaticSentenceAnalysisEnabled,
                    "legacy automatic analysis is migrated to explicit-click only")
         let google = catalog.profiles.first { $0.providerType == .googleGemini }!
         let zhipu = catalog.profiles.first { $0.providerType == .zhipu }!
+        let deepSeek = catalog.profiles.first { $0.providerType == .deepSeek }!
         try expect(google.providerID == AIProviderConfiguration.googleProviderID &&
-                   zhipu.providerID == AIProviderConfiguration.zhipuProviderID,
+                   zhipu.providerID == AIProviderConfiguration.zhipuProviderID &&
+                   deepSeek.providerID == AIProviderConfiguration.deepSeekProviderID,
                    "built-in provider IDs are stable")
         try expect(google.priority == 1 && zhipu.priority == 2 &&
-                   google.enabled && !zhipu.enabled &&
+                   deepSeek.priority == 3 && google.enabled && !zhipu.enabled &&
+                   !deepSeek.enabled &&
                    !catalog.automaticFallbackEnabled &&
-                   zhipu.model == "glm-4.7-flash",
-                   "provider ordering and exact Zhipu model migration")
+                   zhipu.model == "glm-4.7-flash" &&
+                   deepSeek.model == "deepseek-v4-flash",
+                   "resident provider ordering and model migration")
         var secondGoogleProfile = google
         secondGoogleProfile.providerID = UUID()
         try expect(AIExplanationCache.cacheKey(query: "prompt", configuration: google) !=
@@ -476,11 +510,15 @@ private struct AIServiceSmoke {
                    "provider UUID isolates cache identity")
         let migratedGoogleKey = try await keychain.readKey(account: google.keychainAccount)
         let migratedZhipuKey = try await keychain.readKey(account: zhipu.keychainAccount)
-        try expect(migratedGoogleKey == "google-key" && migratedZhipuKey == "zhipu-key",
-                   "legacy keys copied to independent UUID accounts")
+        let migratedDeepSeekKey = try await keychain.readKey(account: deepSeek.keychainAccount)
+        try expect(migratedGoogleKey == "google-key" && migratedZhipuKey == "zhipu-key" &&
+                   migratedDeepSeekKey == "deepseek-key",
+                   "legacy keys copied to independent resident UUID accounts")
         let retainedGoogleKey = try await keychain.readKey(account: oldGoogle)
         let retainedZhipuKey = try await keychain.readKey(account: oldZhipu)
-        try expect(retainedGoogleKey == "google-key" && retainedZhipuKey == "zhipu-key",
+        let retainedDeepSeekKey = try await keychain.readKey(account: oldDeepSeek)
+        try expect(retainedGoogleKey == "google-key" && retainedZhipuKey == "zhipu-key" &&
+                   retainedDeepSeekKey == "deepseek-key",
                    "legacy keychain items retained")
         let second = try await manager.catalog()
         try expect(second == catalog, "migration is idempotent")
@@ -626,6 +664,12 @@ private struct AIServiceSmoke {
                    "unsaved Zhipu draft survives switching")
 
         var deletionSession = AIProviderSettingsSession(snapshot: snapshot)
+        try expect(!deletionSession.remove(AIProviderConfiguration.deepSeekProviderID,
+                                           deleteKey: true) &&
+                   deletionSession.profilesInPriorityOrder.contains(where: {
+                       $0.providerID == AIProviderConfiguration.deepSeekProviderID
+                   }),
+                   "resident DeepSeek cannot be removed from the service list")
         try expect(deletionSession.remove(google.providerID, deleteKey: false) &&
                    !deletionSession.keyDeletionIDs.contains(google.providerID) &&
                    deletionSession.selectedProviderID == zhipu.providerID,

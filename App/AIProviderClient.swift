@@ -1872,7 +1872,7 @@ final class OpenAICompatibleClient: AIProviderClient {
             base.contains("generativelanguage.googleapis.com")
         guard !isGemini else { return }
         let isSiliconFlow = base.contains("siliconflow.cn") || base.contains("siliconflow.com")
-        let isDeepSeek = base.contains("deepseek.com")
+        let isDeepSeek = configuration.providerType == .deepSeek || base.contains("deepseek.com")
         let isGLM = configuration.providerType == .zhipu || base.contains("bigmodel.cn") ||
             model.hasPrefix("glm-")
 

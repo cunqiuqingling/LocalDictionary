@@ -361,6 +361,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func deleteProvider() {
         guard let profile = session?.selectedDraft,
+              !profile.isResidentPreset,
               session?.profilesInPriorityOrder.count ?? 0 > 1,
               let window else { return }
         let alert = NSAlert()
@@ -514,7 +515,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         suppressControlActions = false
         refreshProviderOptions()
         refreshProfileSummary()
-        deleteButton.isEnabled = (session?.profilesInPriorityOrder.count ?? 0) > 1
+        deleteButton.isEnabled = canDeleteSelectedProvider
     }
 
     private func rebuildProfileSelector() {
@@ -576,7 +577,8 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
             providerOptionsStack.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
-        if session?.selectedDraft?.providerType == .zhipu {
+        if session?.selectedDraft?.providerType == .zhipu ||
+           session?.selectedDraft?.providerType == .deepSeek {
             zhipuThinkingButton.state = .off
             providerOptionsStack.addArrangedSubview(zhipuThinkingButton)
         } else {
@@ -596,7 +598,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         else { progressIndicator.stopAnimation(nil) }
         profileSelector.isEnabled = !testing
         addButton.isEnabled = !testing
-        deleteButton.isEnabled = !testing && (session?.profilesInPriorityOrder.count ?? 0) > 1
+        deleteButton.isEnabled = !testing && canDeleteSelectedProvider
         providerTypePopup.isEnabled = !testing
         enabledButton.isEnabled = !testing
         displayNameField.isEnabled = !testing
@@ -617,7 +619,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
     private func setBusy(_ busy: Bool) {
         profileSelector.isEnabled = !busy
         addButton.isEnabled = !busy
-        deleteButton.isEnabled = !busy && (session?.profilesInPriorityOrder.count ?? 0) > 1
+        deleteButton.isEnabled = !busy && canDeleteSelectedProvider
         priorityPopup.isEnabled = !busy
         providerTypePopup.isEnabled = !busy
         enabledButton.isEnabled = !busy
@@ -642,6 +644,11 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
         progressIndicator.stopAnimation(nil)
         testButton.title = t("测试连接", "Test Connection")
         session = nil
+    }
+
+    private var canDeleteSelectedProvider: Bool {
+        guard let session, let selected = session.selectedDraft else { return false }
+        return session.profilesInPriorityOrder.count > 1 && !selected.isResidentPreset
     }
 
     private func showStatus(_ message: String, isError: Bool) {

@@ -27,6 +27,12 @@ request, duplicate in-flight clicks are gated, and HTTP 429 returns immediately 
 remains distinct from a reasoning-only/empty-content response. The same suite retains Google,
 DeepSeek, SiliconFlow, and generic OpenAI-compatible payload coverage.
 
+DeepSeek is a resident, disabled-by-default provider preset with a stable UUID, the official
+`https://api.deepseek.com/chat/completions` endpoint, and the current `deepseek-v4-flash` model.
+Catalog schema migration adds it once to existing installations without enabling network use,
+overwriting another profile, or deleting legacy credentials; the settings session prevents the
+resident entry from being removed accidentally.
+
 `run-m24-release-structural-gates.sh` verifies the Release-only Hardened Runtime and
 minimal entitlement configuration, project-substituted version authority, arm64/macOS
 15 identity, empty production Resource Center network/trust configuration, source-traceable
