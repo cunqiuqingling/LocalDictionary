@@ -27,6 +27,7 @@ xcrun --sdk macosx swiftc \
   -module-cache-path "$WORK/module-cache" \
   "$ROOT/App/QueryIntentClassifier.swift" \
   "$ROOT/App/ObsidianNoteStore.swift" \
+  "$ROOT/App/ObsidianNotePicker.swift" \
   "$ROOT/Tests/PublicObsidianNoteStoreSmoke.swift" \
   -o "$WORK/PublicObsidianNoteStoreSmoke"
 

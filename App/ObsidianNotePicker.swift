@@ -4,6 +4,29 @@ import UniformTypeIdentifiers
 @MainActor
 final class ObsidianNotePicker {
     private(set) var isChoosing = false
+    private let isObsidianInstalled: () -> Bool
+    private let showMissingObsidian: () -> Void
+
+    init(isObsidianInstalled: @escaping () -> Bool = {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: "md.obsidian") != nil
+    }, showMissingObsidian: @escaping () -> Void = {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "请下载obsidian笔记库后进行收藏"
+        alert.informativeText = "安装并打开 Obsidian，创建或打开一个笔记库，再点击星号选择库中的 Markdown 笔记。"
+        alert.addButton(withTitle: "好")
+        alert.runModal()
+    }) {
+        self.isObsidianInstalled = isObsidianInstalled
+        self.showMissingObsidian = showMissingObsidian
+    }
+
+    // Resolve on each action so installing Obsidian does not require restarting this app.
+    func ensureObsidianAvailable() -> Bool {
+        if isObsidianInstalled() { return true }
+        showMissingObsidian()
+        return false
+    }
 
     func chooseTarget(for store: ObsidianNoteStore) -> Bool {
         guard let url = chooseExistingNote(initialDirectory: store.targetURL?.deletingLastPathComponent()) else {
@@ -19,6 +42,7 @@ final class ObsidianNotePicker {
     }
 
     func chooseExistingNote(initialDirectory: URL?) -> URL? {
+        guard ensureObsidianAvailable() else { return nil }
         guard !isChoosing else { return nil }
         isChoosing = true
         defer { isChoosing = false }
@@ -38,6 +62,7 @@ final class ObsidianNotePicker {
     }
 
     func chooseNewNote(initialDirectory: URL?) -> URL? {
+        guard ensureObsidianAvailable() else { return nil }
         guard !isChoosing else { return nil }
         isChoosing = true
         defer { isChoosing = false }

@@ -172,6 +172,25 @@ private final class StubClient: AIProviderClient {
     }
 }
 
+private final class AdvancingFixtureClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var date = Date()
+    func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        date = date.addingTimeInterval(86_400)
+        return date
+    }
+}
+
+// Independent error fixtures represent separate visits, not immediate user retries.
+// Dedicated coordinator tests below use an explicit clock to exercise cooldowns.
+private func fixtureClient() -> OpenAICompatibleClient {
+    let clock = AdvancingFixtureClock()
+    return OpenAICompatibleClient(session: session(),
+        coordinator: AIProviderRequestCoordinator(now: { clock.now() }))
+}
+
 private func session() -> URLSession {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [MockURLProtocol.self]
@@ -292,6 +311,7 @@ private struct AIServiceSmoke {
         try await testClientAndErrors()
         try await testZhipuHistoricalRequestContract()
         try await testConnectionCardinalityAndRateLimitSeparation()
+        try await testProviderCoordinationAndOptionalRecovery()
         try testCanonicalResponseFixtures()
         try await testProviderEnvelopeCompatibility()
         try await testProviderProductionCompatibilityFixtures()
@@ -828,7 +848,7 @@ private struct AIServiceSmoke {
     }
 
     private static func testClientAndErrors() async throws {
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         let configuration = AIProviderConfiguration(
             enabled: true, providerType: .zhipu, providerDisplayName: "Mock",
             baseURL: "https://mock.invalid/v1", model: "mock-model", thinkingEnabled: false
@@ -1052,7 +1072,7 @@ private struct AIServiceSmoke {
     }
 
     private static func testZhipuHistoricalRequestContract() async throws {
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         var configuration = AIProviderConfiguration.zhipuPreset
         configuration.enabled = true
 
@@ -1141,7 +1161,7 @@ private struct AIServiceSmoke {
     }
 
     private static func testConnectionCardinalityAndRateLimitSeparation() async throws {
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         var configuration = AIProviderConfiguration.zhipuPreset
         configuration.enabled = true
 
@@ -1193,6 +1213,109 @@ private struct AIServiceSmoke {
         } catch let error as AIClientError {
             try expect(error == .providerReasoningOnly && requests == 1,
                        "reasoning-only content was confused with HTTP 429")
+        }
+    }
+
+    private static func testProviderCoordinationAndOptionalRecovery() async throws {
+        let coordinator = AIProviderRequestCoordinator()
+        let host = "open.bigmodel.cn"
+        try await coordinator.acquire(host)
+        let blockedClient = OpenAICompatibleClient(session: session(), coordinator: coordinator)
+        var requests = 0
+        MockURLProtocol.responseHeaders = [:]
+        MockURLProtocol.handler = { _ in
+            requests += 1
+            return (200, Data("{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}".utf8))
+        }
+        do {
+            try await blockedClient.testConnection(configuration: .zhipuPreset, apiKey: "dummy-key")
+            throw SmokeFailure.failed("in-flight provider request did not block test")
+        } catch let error as AIClientError {
+            try expect(error == .invalidRequest(code: "request_in_progress") && requests == 0,
+                       "a second test must never issue HTTP while another request is active")
+        }
+        await coordinator.release(host)
+        MockURLProtocol.responseHeaders = ["Retry-After": "60"]
+        MockURLProtocol.handler = { _ in requests += 1; return (429, Data()) }
+        do {
+            try await blockedClient.testConnection(configuration: .zhipuPreset, apiKey: "dummy-key")
+            throw SmokeFailure.failed("429 accepted")
+        } catch let error as AIClientError {
+            try expect(error == .rateLimited(retryAfter: "60"), "real HTTP 429 classification")
+        }
+        do {
+            try await blockedClient.testConnection(configuration: .zhipuPreset, apiKey: "dummy-key")
+            throw SmokeFailure.failed("cooldown bypassed")
+        } catch let error as AIClientError {
+            guard case .invalidRequest(let code) = error else { throw error }
+            try expect(code?.hasPrefix("local_cooldown:") == true && requests == 1,
+                       "local cooldown must not send HTTP or masquerade as a new HTTP 429")
+        }
+        try expect(AIProviderRequestCoordinator.retryDelay(nil) == 60 &&
+                   AIProviderRequestCoordinator.retryDelay("9") == 9 &&
+                   AIProviderRequestCoordinator.retryDelay("1e300") == 86400 &&
+                   AIProviderRequestCoordinator.retryDelay("Wed, 21 Oct 2015 07:28:00 GMT",
+                       now: Date(timeIntervalSince1970: 1445412470)) == 10,
+                   "Retry-After and default backoff")
+
+        MockURLProtocol.responseHeaders = [:]
+        MockURLProtocol.handler = { request in
+            let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+            try expect(body["max_tokens"] as? Int == 2048 && body["response_format"] == nil &&
+                       body["temperature"] == nil && body["thinking"] == nil,
+                       "Gemini probe needs reasoning headroom without changing model thinking defaults")
+            return (200, Data("{\"choices\":[{\"message\":{\"content\":\"{\\\"status\\\":\\\"ok\\\"}\"}}]}".utf8))
+        }
+        try await fixtureClient().testConnection(configuration: .googlePreset, apiKey: "dummy-key")
+
+        for preset in [AIProviderConfiguration.googlePreset, .zhipuPreset] {
+            var configuration = preset
+            configuration.model = "future-model-2099"
+            let client = fixtureClient()
+            var bodies: [[String: Any]] = []
+            MockURLProtocol.responseHeaders = [:]
+            MockURLProtocol.handler = { request in
+                let body = try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any]
+                bodies.append(body)
+                if bodies.count == 1 {
+                    return (400, Data("{\"error\":{\"message\":\"temperature is not supported by this model\"}}".utf8))
+                }
+                let content = String(data: try JSONEncoder().encode(sampleTextTranslation), encoding: .utf8)!
+                return (200, try JSONSerialization.data(withJSONObject: [
+                    "choices": [["message": ["content": content]]]
+                ]))
+            }
+            let result = try await client.translateText(sampleSentenceText, configuration: configuration,
+                                                        apiKey: "dummy-key")
+            try expect(result.translation == sampleTextTranslation.translation && bodies.count == 2,
+                       "future model optional-field recovery")
+            let first = bodies[0], second = bodies[1]
+            try expect(first["max_tokens"] as? Int == 4000 && second["max_tokens"] as? Int == 4000 &&
+                       first["messages"] as? [[String: String]] == second["messages"] as? [[String: String]] &&
+                       first["temperature"] as? Double == 0.1 && second["temperature"] == nil &&
+                       second["response_format"] == nil &&
+                       second["model"] as? String == "future-model-2099",
+                       "recovery must preserve quality, full prompts, model and output budget")
+            if preset.providerType == .zhipu {
+                try expect((second["thinking"] as? [String: String])?["type"] == "disabled",
+                           "optional-field recovery must preserve GLM thinking policy")
+            }
+            bodies = []
+            MockURLProtocol.handler = { request in
+                bodies.append(try JSONSerialization.jsonObject(with: requestBody(request)) as! [String: Any])
+                if bodies.count == 1 {
+                    return (400, Data("{\"error\":{\"message\":\"response_format is unsupported for model\"}}".utf8))
+                }
+                return (200, try envelope(sample))
+            }
+            let word = try await client.explain(query: "prompt", domain: "general",
+                                                configuration: configuration, apiKey: "dummy-key")
+            try expect(word.partsOfSpeech == sample.partsOfSpeech && bodies.count == 2 &&
+                       bodies[1]["response_format"] == nil &&
+                       bodies[1]["temperature"] as? Double == 0.1 &&
+                       bodies[1]["max_tokens"] as? Int == 1800 &&
+                       bodies[0]["messages"] as? [[String: String]] == bodies[1]["messages"] as? [[String: String]],
+                       "JSON mode recovery preserves full structured answer quality and supported temperature")
         }
     }
 
@@ -1250,7 +1373,7 @@ private struct AIServiceSmoke {
         try expect(malformed.failureReason == .malformedProviderEnvelope,
                    "unknown envelope is typed malformed")
 
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         let configuration = AIProviderConfiguration(
             enabled: true, providerType: .openAICompatible,
             providerDisplayName: "Mock Plain", baseURL: "https://mock.invalid/v1",
@@ -1411,7 +1534,7 @@ private struct AIServiceSmoke {
     }
 
     private static func testProviderEnvelopeCompatibility() async throws {
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         let configuration = AIProviderConfiguration(
             enabled: true, providerType: .openAICompatible,
             providerDisplayName: "Compatible Fixture",
@@ -1482,7 +1605,7 @@ private struct AIServiceSmoke {
     }
 
     private static func testProviderProductionCompatibilityFixtures() async throws {
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         let gemini = AIProviderConfiguration(
             enabled: true, providerType: .googleGemini,
             providerDisplayName: "Google Gemini",
@@ -1630,7 +1753,7 @@ private struct AIServiceSmoke {
 
     private static func testConnectionAndProductionRequestShareTransportConfiguration()
         async throws {
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         let profile = AIProviderConfiguration(
             providerID: UUID(), enabled: true, providerType: .openAICompatible,
             providerDisplayName: "DeepSeek",
@@ -1674,11 +1797,10 @@ private struct AIServiceSmoke {
                    "connection and production query use the same persisted model")
         try expect(connectionBody["stream"] == nil && productionBody["stream"] == nil,
                    "both request paths are non-streaming")
-        try expect((connectionBody["response_format"] as? [String: String])?["type"] ==
-                    "json_object" &&
+        try expect(connectionBody["response_format"] == nil &&
                    (productionBody["response_format"] as? [String: String])?["type"] ==
                    "json_object",
-                   "both request paths share strict JSON response policy")
+                   "connection probe is minimal; production retains JSON response policy")
 
         var flashProfile = profile
         flashProfile.model = "deepseek-v4-flash"
@@ -1718,7 +1840,7 @@ private struct AIServiceSmoke {
     }
 
     private static func testInlineLookupRequestsAndCache() async throws {
-        let client = OpenAICompatibleClient(session: session())
+        let client = fixtureClient()
         var deepSeek = AIProviderConfiguration(
             enabled: true, providerType: .openAICompatible, providerDisplayName: "DeepSeek",
             baseURL: "https://api.deepseek.com", model: "deepseek-chat"
@@ -1758,10 +1880,10 @@ private struct AIServiceSmoke {
         do {
             _ = try await client.inlineWordQuick("prompt", configuration: deepSeek,
                                                 apiKey: "dummy-key")
-            throw SmokeFailure.failed("reasoner used for quick lookup")
+            throw SmokeFailure.failed("synthetic server failure accepted")
         } catch let error as AIClientError {
-            try expect(error == .invalidRequest(code: "reasoner_not_allowed_for_quick") &&
-                       requestCount == 0, "DeepSeek reasoner rejected before quick request")
+            try expect(error == .serverError && requestCount == 1,
+                       "valid model names must reach the provider, not a local name blacklist")
         }
 
         let silicon = AIProviderConfiguration(

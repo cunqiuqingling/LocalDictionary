@@ -1360,7 +1360,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
                     if self.isNativeLanguageLookup(query) {
                         self.shortNativeLocalDisplay = attributed
                         self.renderShortNativeLookup()
-                    } else if self.isLearningLanguageLookup(query) {
+                    } else if self.isLearningLanguageLookup(query), self.offlineActionPair != nil {
                         self.shortLearningLocalDisplay = attributed
                         self.renderShortLearningLookup()
                     } else {
@@ -2029,11 +2029,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     private func configureAutomaticShortOfflineLookup(_ query: String, intent: QueryIntent) {
-        let context = LanguageContext.make(query: query)
-        let shouldStart = context.isPureNative ||
-            (context.isPureLearning && intent == .phrase)
-        guard shouldStart,
-              let plan = OfflineTranslationPlan.make(context: context),
+        guard let plan = OfflineTranslationPlan.automaticShortLookup(query: query, intent: intent),
               let operation = plan.operations.first(where: {
                   $0.outputRole == plan.primaryOutputRole
               }) else { return }
@@ -2188,7 +2184,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
             guard let self else { return }
             let availability = await offlineTranslation.availability(for: pair)
             await MainActor.run {
-                guard self.currentQuery == source,
+                guard !Task.isCancelled, self.currentQuery == source,
                       self.offlineActionPair == pair else { return }
                 let presentation = AppleTranslationActionPresentation.make(
                     availability: availability,
@@ -5298,6 +5294,7 @@ final class DictionaryPanelController: NSWindowController, NSWindowDelegate, NSS
     }
 
     @objc private func showNoteMenu() {
+        guard notePicker.ensureObsidianAvailable() else { return }
         guard let content = currentNoteSaveContent(), !isShowingNoteMenu else { return }
         let menu = NSMenu(title: "保存到 Markdown 笔记")
         if let target = noteStore.targetURL {

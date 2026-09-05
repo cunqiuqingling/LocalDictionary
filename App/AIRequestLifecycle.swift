@@ -109,7 +109,10 @@ enum AIRequestUserMessage {
             return "AI 请求未能完成，请稍后重试或检查 AI 服务设置。"
         }
         switch client {
-        case .invalidRequest:
+        case .invalidRequest(let code):
+            if code == "request_in_progress" || code?.hasPrefix("local_cooldown:") == true {
+                return client.localizedDescription
+            }
             return "服务拒绝了请求参数，请检查服务地址和模型配置。"
         case .unauthorized:
             return "API 密钥无效或无权使用该模型，请在 AI 服务设置中检查。"

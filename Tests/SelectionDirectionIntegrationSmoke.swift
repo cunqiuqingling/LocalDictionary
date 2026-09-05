@@ -110,6 +110,14 @@ private struct SelectionDirectionIntegrationSmoke {
     static func main() async throws {
         try testProductionPlacement()
         try testFirstLaunchGuideReminder()
+        for query in ["github", "apple", "苹果", "red apple", "红色苹果"] {
+            let intent = QueryIntentClassifier.classify(query).intent
+            let plan = OfflineTranslationPlan.automaticShortLookup(query: query, intent: intent)
+            try expect(plan != nil, "both English and Chinese short lookups must invoke Apple: \(query)")
+            try expect(plan?.operations.first?.pair.target ==
+                       (query == "苹果" || query == "红色苹果" ? .english : .simplifiedChinese),
+                       "short lookup translated in the wrong direction")
+        }
         try await testDirectionStateAndActions()
         print("SelectionDirectionIntegrationSmoke PASS")
     }

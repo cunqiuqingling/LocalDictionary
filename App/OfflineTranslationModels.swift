@@ -48,6 +48,13 @@ struct OfflineTranslationPlan: Equatable, Sendable {
     let operations: [PlannedOfflineTranslation]
     let primaryOutputRole: OfflineTranslationOutputRole
 
+    static func automaticShortLookup(query: String, intent: QueryIntent) -> OfflineTranslationPlan? {
+        let context = LanguageContext.make(query: query)
+        guard intent == .word || intent == .phrase,
+              context.isPureNative || context.isPureLearning else { return nil }
+        return make(context: context)
+    }
+
     static func make(context: LanguageContext) -> OfflineTranslationPlan? {
         guard let native = OfflineTranslationLanguage(context.nativeLanguage),
               let learning = OfflineTranslationLanguage(context.learningLanguage),

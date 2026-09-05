@@ -94,7 +94,7 @@ struct HelpAndAboutDocuments: Equatable {
 
     ## 4. Apple 系统离线翻译
 
-    - 基础翻译使用 macOS Translation framework。相关语言包已经安装时，母语单词、短语和句子查询可以自动尝试本机翻译；中文反向词典候选随后显示。
+    - 基础翻译使用 macOS Translation framework。相关语言包已经安装时，母语和学习语言的单词、短语和句子查询均可自动尝试本机翻译；中文反向词典候选随后显示。
     - 缺少语言包时，App 不会静默下载。只有用户主动点击“准备离线语言包”后，才进入 Apple 管理的系统准备流程。
     - 单次翻译超时、取消或查询被替换只结束当前操作，不应使后续查询永久失效。
 
@@ -119,10 +119,14 @@ struct HelpAndAboutDocuments: Equatable {
     - API Key 保存在 macOS Keychain；Provider 名称、Base URL、模型和开关等非敏感设置保存在本机。项目不内置 API Key。
     - DeepSeek、Google Gemini 和兼容接口的实际可用性、计费、日志与隐私政策由相应服务商决定。LocalDictionary 不展示 Provider 的内部推理内容。
     - Provider 返回安全、非空的普通文本或 Markdown 时，App 会尽量兼容显示。当前查询存在 AI 结果时，可用“清除此条 AI 缓存”移除该查询的 AI 产物，而不删除本地词典或 Apple 离线翻译结果。
+    - 常见问题：请求超时或 HTTP 429 时，请等待提示的冷却时间后再试，不要连续点击测试连接。同一服务的 AI 请求会串行执行；长段落可能需要更久，但不会为提速而缩短输入或降低回答预算。
+    - 测试连接只验证一次轻量请求，不保证服务商额度、网络及复杂查询始终可用。仍失败时，请检查 API 有效性、账户额度、Base URL、模型名称和该模型的访问权限；可更换服务商支持的模型 ID，无需等待 App 更新名单。
+    - 清除 AI 缓存可重新生成已有结果，但不能修复 HTTP 参数错误、限流或账户问题。失败请求不会被保存为成功缓存；不要把反复清缓存当作必要操作。
 
     ## 8. 收藏与 Markdown 笔记
 
     - 星标用于收藏当前词条或长文本。启用“收藏时加入 AI 内容”后，收藏可包含用户已经主动生成的 AI 结果。
+    - 未安装 Obsidian 时会提示“请下载obsidian笔记库后进行收藏”。安装并打开 Obsidian、创建或打开笔记库后，再点击星号选择库中的 Markdown 笔记；无需重启 LocalDictionary。
     - Obsidian/Markdown 写入只操作用户明确选择或创建的单个 Markdown 文件，不自动扫描整个 Vault，也不删除已经写出的笔记内容。
 
     ## 9. 开放资源中心
@@ -191,10 +195,14 @@ struct HelpAndAboutDocuments: Equatable {
     - API keys are stored in macOS Keychain. Provider/model settings remain local. No API key is bundled.
     - Safe visible plain text and Markdown are displayed through a bounded compatibility path. Provider reasoning is not shown.
     - “Clear AI Cache for This Query” removes current-query AI artifacts while preserving local and Apple offline results.
+    - FAQ: after a timeout or HTTP 429, wait for the indicated cooldown instead of repeatedly testing. Requests to one service run serially. Long input, prompts, answer budgets and validation are preserved.
+    - Connection testing checks one lightweight request, not ongoing quota or every complex query. If problems persist, check the key, quota, Base URL, exact model ID and access permissions. New compatible model IDs do not require an app allowlist update.
+    - Clearing cache regenerates existing answers; it does not fix HTTP parameter errors, rate limits or account issues. Failed requests are not cached as successful answers.
 
     ## 8. Favorites, Notes, and Resources
 
     - Favorites can optionally include AI content that the user already generated.
+    - Install and open Obsidian, then create or open a vault. Click the star again and select a Markdown note in that vault; LocalDictionary detects installation without restarting.
     - Markdown export writes only to a file explicitly selected or created by the user; it does not scan an entire Obsidian vault.
     - The v0.1 Starter Catalog exposes only Princeton WordNet and GNU GCIDE. Downloads start only after an explicit install action and are verified before local conversion.
 

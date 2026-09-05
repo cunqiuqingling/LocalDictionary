@@ -6,7 +6,20 @@ private enum PublicObsidianSmokeError: Error {
 
 @main
 private struct PublicObsidianNoteStoreSmoke {
-    static func main() throws {
+    @MainActor static func main() throws {
+        var installed = false
+        var alerts = 0
+        let picker = ObsidianNotePicker(isObsidianInstalled: { installed },
+                                        showMissingObsidian: { alerts += 1 })
+        guard !picker.ensureObsidianAvailable(), alerts == 1,
+              picker.chooseExistingNote(initialDirectory: nil) == nil,
+              picker.chooseNewNote(initialDirectory: nil) == nil, alerts == 3 else {
+            throw PublicObsidianSmokeError.failed("missing Obsidian must block note selection with guidance")
+        }
+        installed = true
+        guard picker.ensureObsidianAvailable(), alerts == 3 else {
+            throw PublicObsidianSmokeError.failed("Obsidian installation must be detected without restart")
+        }
         guard CommandLine.arguments.count == 2 else {
             throw PublicObsidianSmokeError.failed("missing isolated working directory")
         }

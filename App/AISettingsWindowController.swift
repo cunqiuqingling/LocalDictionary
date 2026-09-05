@@ -409,7 +409,7 @@ final class AISettingsWindowController: NSWindowController, NSWindowDelegate,
                 guard !Task.isCancelled else { return }
                 self.connectionTestTask = nil
                 self.finishTesting()
-                self.showStatus("连接测试成功：已验证 Endpoint、鉴权、模型和可见响应。",
+                self.showStatus("连接测试成功：本次轻量请求可用；实际查询仍受网络、额度和模型能力影响。",
                                 isError: false)
             } catch {
                 guard !Task.isCancelled else { return }

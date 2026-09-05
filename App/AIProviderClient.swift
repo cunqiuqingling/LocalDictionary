@@ -964,6 +964,11 @@ enum AIClientError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidRequest(let code):
+            if code == "request_in_progress" { return "此服务已有 AI 请求正在进行，请等待完成后再测试。" }
+            if let code, code.hasPrefix("local_cooldown:"),
+               let seconds = Int(code.dropFirst("local_cooldown:".count)) {
+                return "上次请求后正在本地等待，请在 \(seconds) 秒后重试（尚未发送新请求）。"
+            }
             return code.map { "AI 请求参数无效（错误码：\($0)）。" } ?? "AI 请求参数无效。"
         case .unauthorized: return "未授权，请检查 API 密钥。"
         case .rateLimited(let retryAfter):
@@ -1072,20 +1077,67 @@ extension AIProviderClient {
     }
 }
 
+actor AIProviderRequestCoordinator {
+    static let shared = AIProviderRequestCoordinator()
+    private var active = Set<String>()
+    private var cooldowns: [String: Date] = [:]
+    private let now: @Sendable () -> Date
+
+    init(now: @escaping @Sendable () -> Date = { Date() }) { self.now = now }
+
+    func acquire(_ service: String, connectionTest: Bool = false) async throws {
+        while true {
+            try Task.checkCancellation()
+            if let until = cooldowns[service], until > now() {
+                let remaining = Int(ceil(until.timeIntervalSince(now())))
+                throw AIClientError.invalidRequest(code: "local_cooldown:\(remaining)")
+            }
+            if active.insert(service).inserted { return }
+            if connectionTest {
+                throw AIClientError.invalidRequest(code: "request_in_progress")
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    func release(_ service: String, cooldown: TimeInterval = 0) {
+        if cooldown > 0 { cooldowns[service] = now().addingTimeInterval(cooldown) }
+        active.remove(service)
+    }
+
+    static func retryDelay(_ value: String?, now: Date = Date()) -> TimeInterval {
+        if let value, let seconds = Double(value), seconds.isFinite {
+            return min(86_400, max(1, seconds))
+        }
+        if let value {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss z"
+            if let date = formatter.date(from: value) {
+                return min(86_400, max(1, date.timeIntervalSince(now)))
+            }
+        }
+        return 60
+    }
+}
+
 final class OpenAICompatibleClient: AIProviderClient {
     static let maximumResponseBytes = 1_048_576
     static let connectionTestMaximumTokens = 64
 
     private let session: URLSession
+    private let coordinator: AIProviderRequestCoordinator
 
-    init(session: URLSession = OpenAICompatibleClient.productionSession()) {
-        self.session = session
+    init(session: URLSession? = nil, coordinator: AIProviderRequestCoordinator? = nil) {
+        self.session = session ?? Self.productionSession()
+        self.coordinator = coordinator ?? (session == nil ? .shared : AIProviderRequestCoordinator())
     }
 
     static func productionSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 15
-        configuration.timeoutIntervalForResource = 30
+        configuration.timeoutIntervalForRequest = 90
+        configuration.timeoutIntervalForResource = 180
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
@@ -1201,12 +1253,16 @@ final class OpenAICompatibleClient: AIProviderClient {
 
     func testConnection(configuration: AIProviderConfiguration,
                         apiKey: String) async throws {
+        // Gemini thinking models share the output budget with reasoning; do not disable their
+        // reasoning or assume a Flash name means non-thinking. GLM retains its verified 64.
+        let isGemini = configuration.providerType == .googleGemini ||
+            configuration.normalizedBaseURL.lowercased().contains("generativelanguage.googleapis.com")
         let content = try await send(
             configuration: configuration,
             apiKey: apiKey,
             systemPrompt: "Return strict JSON only.",
             userPrompt: "Return exactly this JSON object: {\"status\":\"ok\"}",
-            maximumTokens: Self.connectionTestMaximumTokens,
+            maximumTokens: isGemini ? 2_048 : Self.connectionTestMaximumTokens,
             diagnosticAction: "connectionTest"
         )
         struct Status: Decodable { let status: String }
@@ -1341,6 +1397,44 @@ final class OpenAICompatibleClient: AIProviderClient {
                       diagnosticAction: String? = nil,
                       diagnosticTargetLanguage: LanguageIdentifier? = nil) async throws
         -> ProviderResponse {
+        let endpoint = try configuration.validatedEndpointURL()
+        // A model/profile edit must not bypass a provider's active request or rate limit.
+        let service = endpoint.host?.lowercased() ?? endpoint.absoluteString
+        do {
+            try await coordinator.acquire(service, connectionTest: diagnosticAction == "connectionTest")
+        } catch is CancellationError { throw AIClientError.cancelled }
+        do {
+            let result = try await sendCoordinated(
+                configuration: configuration, apiKey: apiKey,
+                systemPrompt: systemPrompt, userPrompt: userPrompt,
+                maximumTokens: maximumTokens, intent: intent,
+                expectsStructuredResponse: expectsStructuredResponse,
+                diagnosticAction: diagnosticAction,
+                diagnosticTargetLanguage: diagnosticTargetLanguage
+            )
+            await coordinator.release(service)
+            return result
+        } catch {
+            var cooldown: TimeInterval = 0
+            if case AIClientError.rateLimited(let retryAfter) = error {
+                cooldown = AIProviderRequestCoordinator.retryDelay(retryAfter)
+            } else if (error as? AIClientError) == .timeout {
+                // The remote generation may still be running after a local timeout.
+                cooldown = 15
+            }
+            await coordinator.release(service, cooldown: cooldown)
+            throw error
+        }
+    }
+
+    private func sendCoordinated(configuration: AIProviderConfiguration, apiKey: String,
+                      systemPrompt: String, userPrompt: String,
+                      maximumTokens: Int = 1_800,
+                      intent: AIRequestIntent? = nil,
+                      expectsStructuredResponse: Bool = true,
+                      diagnosticAction: String? = nil,
+                      diagnosticTargetLanguage: LanguageIdentifier? = nil) async throws
+        -> ProviderResponse {
         try configuration.validate()
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { throw AIConfigurationError.missingAPIKey }
@@ -1353,10 +1447,11 @@ final class OpenAICompatibleClient: AIProviderClient {
             ],
             "max_tokens": maximumTokens
         ]
-        if configuration.responseCapability != .plainTextOnly {
+        let isConnectionTest = diagnosticAction == "connectionTest"
+        if !isConnectionTest && configuration.responseCapability != .plainTextOnly {
             body["temperature"] = 0.1
         }
-        if expectsStructuredResponse && configuration.responseCapability != .plainTextOnly {
+        if !isConnectionTest && expectsStructuredResponse && configuration.responseCapability != .plainTextOnly {
             body["response_format"] = ["type": "json_object"]
         }
         try Self.applyThinkingPolicy(to: &body, configuration: configuration, intent: intent)
@@ -1365,20 +1460,24 @@ final class OpenAICompatibleClient: AIProviderClient {
         }
         let context = AIProviderDiagnosticScope.current
         let action = diagnosticAction ?? context?.action
-        let maximumAttempts = Self.supportsBoundedVisibleContentRetry(action: action) ? 2 : 1
+        let allowsVisibleRetry = Self.supportsBoundedVisibleContentRetry(action: action)
+        let maximumAttempts = isConnectionTest ? 1 : 2
+        var rejectedOptionalParameters = Set<String>()
         for attempt in 0..<maximumAttempts {
             let requestID = UUID().uuidString.lowercased()
             var attemptBody = body
             if attempt > 0 {
                 // The one recovery attempt deliberately uses the broadest compatible protocol.
-                attemptBody.removeValue(forKey: "response_format")
-                attemptBody.removeValue(forKey: "temperature")
+                let fields = rejectedOptionalParameters.isEmpty
+                    ? Set(["response_format", "temperature"]) : rejectedOptionalParameters
+                for field in fields { attemptBody.removeValue(forKey: field) }
                 // Keep an explicit provider-safe non-thinking policy. DeepSeek V4 defaults to
                 // thinking mode when this field is omitted; removing it on the retry can spend
                 // the whole bounded request window on reasoning_content before final content is
                 // produced. Reasoning is never promoted to user-visible content.
             }
-            var request = URLRequest(url: endpoint, timeoutInterval: 30)
+            var request = URLRequest(url: endpoint, timeoutInterval: isConnectionTest ? 60 : 90)
+            request.cachePolicy = .reloadIgnoringLocalCacheData
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -1403,6 +1502,17 @@ final class OpenAICompatibleClient: AIProviderClient {
                     action: action, context: context, requestID: requestID,
                     statusCode: http.statusCode, byteCount: data.count
                 )
+                let unsupported = http.statusCode == 400
+                    ? Self.rejectedOptionalFields(data, body: attemptBody) : []
+                if http.statusCode == 400, attempt == 0, !isConnectionTest,
+                   !unsupported.isEmpty {
+                    rejectedOptionalParameters = unsupported
+                    Self.recordRequestTerminal(
+                        action: action, context: context, requestID: requestID,
+                        resultKind: "retrying", typedReason: "unsupportedOptionalParameter"
+                    )
+                    continue
+                }
                 try Self.validateStatus(http, responseData: data)
                 let normalized = ProviderVisibleContentNormalizer.normalize(data)
                 Self.recordNormalization(
@@ -1417,7 +1527,7 @@ final class OpenAICompatibleClient: AIProviderClient {
                     throw AIClientError.refused(reason: refusal)
                 }
                 if let failure = normalized.failureReason {
-                    if attempt == 0, maximumAttempts > 1,
+                    if attempt == 0, allowsVisibleRetry, rejectedOptionalParameters.isEmpty,
                        Self.isRetryableVisibleContentFailure(failure) {
                         Self.recordBoundedRetry(
                             action: action, context: context, requestID: requestID,
@@ -1876,9 +1986,6 @@ final class OpenAICompatibleClient: AIProviderClient {
         let isGLM = configuration.providerType == .zhipu || base.contains("bigmodel.cn") ||
             model.hasPrefix("glm-")
 
-        if intent?.isQuick == true, isDeepSeek, model.contains("reasoner") {
-            throw AIClientError.invalidRequest(code: "reasoner_not_allowed_for_quick")
-        }
         // DeepSeek V4 defaults to thinking mode. Sentence learning, translation and dictionary
         // explanations need the final visible answer promptly, not a long reasoning trace. This
         // policy applies even to tolerant plain-text profiles; response capability and thinking
@@ -1936,11 +2043,24 @@ final class OpenAICompatibleClient: AIProviderClient {
         case 408: throw AIClientError.timeout
         case 500...599: throw AIClientError.serverError
         case 400:
-            throw details.message.lowercased().contains("model")
+            let message = details.message.lowercased()
+            throw ["model not found", "model does not exist", "unknown model", "模型不存在"].contains(where: message.contains)
                 ? AIClientError.modelNotFound
                 : AIClientError.invalidRequest(code: details.code)
         default: throw AIClientError.invalidResponse
         }
+    }
+
+    private static func rejectedOptionalFields(_ data: Data, body: [String: Any]) -> Set<String> {
+        let message = errorDetails(from: data).message.lowercased()
+        // Retry only a diagnosed optional-field rejection, never arbitrary HTTP 400/429.
+        let rejection = ["unsupported", "not supported", "not allowed", "unknown", "invalid", "不支持", "无效"]
+            .contains(where: message.contains)
+        guard rejection else { return [] }
+        return Set(["response_format", "response format", "temperature"].compactMap {
+            let field = $0 == "response format" ? "response_format" : $0
+            return message.contains($0) && body[field] != nil ? field : nil
+        })
     }
 
     private static func extractedJSONObjectData(from content: String) -> Data? {
